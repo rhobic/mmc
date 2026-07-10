@@ -1,0 +1,15 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 2 --iq 1",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-g0b1 (NucleoG0b1) over mmc-proto; 1980 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 10,
+    "duration_s": 2.0,
+    "iq_A": 1.0
+  },
+  "title": "NUCLEO-G0B1RE UART capture — 1 A step (synthetic plant)",
+  "unix_time": 1783714996
+}

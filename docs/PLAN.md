@@ -113,12 +113,14 @@ sync — normal for motor control in any language.
 - **MS2 — Sim + FOC current loop** ✅ *(2026-07-10)*: PMSM model, transforms,
   SVPWM, dq current PI against sim truth angle; unit + step-response regression
   tests; CSV scenario runs; `suite`/`report` dashboard added during cleanup.
-- **MS3 — Telemetry + protocol + live view** ⏳: `mmc-proto` for real (frames,
-  COBS+CRC, commands), sim serves TCP, host captures to CSV/dashboard.
-  **Amended 2026-07-10:** includes NUCLEO-G0B1RE protocol bring-up — the same
-  `mmc-proto` over ST-Link VCP UART from a Cortex-M0+ — to prove protocol and
-  hardware modularity before the G474 exists. `thumbv6m-none-eabi` (no FPU,
-  soft-float) joins the no_std CI matrix.
+- **MS3 — Telemetry + protocol** ✅ *(2026-07-10)*: `mmc-proto` (COBS+CRC
+  frames, commands, telemetry channels), sim served over TCP, host capture to
+  CSV/dashboard over TCP and serial through one code path.
+  **Amended 2026-07-10:** included NUCLEO-G0B1RE protocol bring-up — the same
+  `mmc-proto` over ST-Link VCP UART from a Cortex-M0+ (1 Mbaud, 11 channels at
+  ~1 kHz, zero rejected frames) — proving protocol and hardware modularity
+  before the G474 exists. `thumbv6m-none-eabi` joined the no_std CI matrix.
+  *Deferred:* live plot view — revisit in MS4 where observer tuning needs it.
 - **MS4 — Sensorless foundation (in sim)**: flux observer + PLL behind
   `AngleEstimator`, I-f open-loop startup and handoff, sensorless speed loop.
   Regression tests compare estimated angle/speed against sim truth across load

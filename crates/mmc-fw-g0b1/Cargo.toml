@@ -1,0 +1,28 @@
+[package]
+name = "mmc-fw-g0b1"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "NUCLEO-G0B1RE protocol bring-up firmware: mmc-proto over the ST-Link VCP UART"
+
+# Detached from the root workspace: this crate always builds for
+# thumbv6m-none-eabi (see .cargo/config.toml) and must not join host builds.
+[workspace]
+
+[dependencies]
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
+embassy-futures = "0.1.2"
+embassy-stm32 = { version = "0.6.0", features = ["stm32g0b1re", "memory-x", "rt", "time-driver-any"] }
+embassy-sync = "0.8.0"
+embassy-time = { version = "0.5.1", features = ["tick-hz-1_000_000"] }
+mmc-core = { path = "../mmc-core" }
+mmc-proto = { path = "../mmc-proto" }
+panic-halt = "1.0.0"
+portable-atomic = { version = "1.13.1", features = ["critical-section"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "s"

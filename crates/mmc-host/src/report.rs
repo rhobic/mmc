@@ -86,7 +86,8 @@ pub fn generate(dir: &Path, out: &Path) -> std::io::Result<usize> {
         }
     }
     for g in &mut groups {
-        g.runs.sort_by(|a, b| a.order.cmp(&b.order).then(a.name.cmp(&b.name)));
+        g.runs
+            .sort_by(|a, b| a.order.cmp(&b.order).then(a.name.cmp(&b.name)));
     }
     let n_runs = groups.iter().map(|g| g.runs.len()).sum();
 
@@ -116,7 +117,10 @@ fn collect_csvs(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
         let path = entry?.path();
         if path.is_dir() {
             collect_csvs(&path, out)?;
-        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv")) {
+        } else if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("csv"))
+        {
             out.push(path);
         }
     }
@@ -190,9 +194,10 @@ fn load_run(path: &Path) -> Result<Run, String> {
         .pointer("/params/locked")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let final_speed_rpm = col("omega_m")
-        .filter(|_| !locked)
-        .and_then(|c| rows.last().map(|r| r[c] * 60.0 / (2.0 * std::f32::consts::PI)));
+    let final_speed_rpm = col("omega_m").filter(|_| !locked).and_then(|c| {
+        rows.last()
+            .map(|r| r[c] * 60.0 / (2.0 * std::f32::consts::PI))
+    });
 
     let total_samples = rows.len();
     Ok(Run {

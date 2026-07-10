@@ -9,14 +9,17 @@
 //! Later (MS3+): live telemetry capture from sim or hardware over the shared
 //! protocol, and the motor profiler.
 
+mod capture;
+mod link;
 mod report;
 mod scenario;
+mod server;
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use scenario::{run_current_step, print_summary, RunSpec, StepConfig};
+use scenario::{print_summary, run_current_step, RunSpec, StepConfig};
 
 #[derive(Parser)]
 #[command(name = "mmc-host", about = "modular motor controller host tools")]
@@ -33,6 +36,52 @@ enum Command {
     Suite(SuiteArgs),
     /// Rebuild the HTML dashboard from the results directory.
     Report(ReportArgs),
+    /// Serve the simulator over TCP, speaking the mmc-proto wire protocol.
+    Serve(ServeArgs),
+    /// Capture telemetry from a device (sim over TCP, hardware over serial).
+    Capture(CaptureArgs),
+}
+
+#[derive(clap::Args)]
+struct ServeArgs {
+    #[arg(long, default_value_t = 7770)]
+    port: u16,
+    /// Control-loop rate [Hz].
+    #[arg(long, default_value_t = 10_000.0)]
+    ctrl_freq: f32,
+    /// Exit after the first client disconnects.
+    #[arg(long)]
+    once: bool,
+}
+
+#[derive(clap::Args)]
+struct CaptureArgs {
+    /// TCP address of a sim server (e.g. 127.0.0.1:7770).
+    #[arg(long, conflicts_with = "serial")]
+    addr: Option<String>,
+    /// Serial port of a hardware device (COMx, or `auto` for the first ST-Link).
+    #[arg(long)]
+    serial: Option<String>,
+    #[arg(long, default_value_t = 115_200)]
+    baud: u32,
+    /// Telemetry divider (device control periods per sample).
+    #[arg(long, default_value_t = 10)]
+    divider: u16,
+    /// Channel selection mask (default: all channels).
+    #[arg(long, default_value_t = mmc_proto::channel::ALL)]
+    mask: u32,
+    /// Capture length [s].
+    #[arg(long, default_value_t = 1.0)]
+    duration: f32,
+    /// Send a q-axis current step of this amplitude [A] at 10% of the capture.
+    #[arg(long)]
+    iq: Option<f32>,
+    /// Output CSV path.
+    #[arg(long, default_value = "capture.csv")]
+    out: PathBuf,
+    /// Run title on the dashboard.
+    #[arg(long)]
+    title: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -124,7 +173,69 @@ fn main() -> std::io::Result<()> {
             println!("dashboard: {n} runs -> {}", out.display());
             Ok(())
         }
+        Command::Serve(args) => {
+            let listener = std::net::TcpListener::bind(("0.0.0.0", args.port))?;
+            server::serve(
+                listener,
+                &server::ServeCfg {
+                    ctrl_freq: args.ctrl_freq,
+                    once: args.once,
+                    ..Default::default()
+                },
+            )
+        }
+        Command::Capture(args) => {
+            let mut link = match (&args.addr, &args.serial) {
+                (Some(addr), _) => link::Link::tcp(addr)?,
+                (None, Some(port)) => link::Link::serial(port, args.baud)?,
+                (None, None) => {
+                    eprintln!("pass --addr host:port (sim) or --serial COMx|auto (hardware)");
+                    std::process::exit(2);
+                }
+            };
+            let title = args.title.clone().unwrap_or_else(|| {
+                args.out
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().replace('_', " "))
+                    .unwrap_or_else(|| "capture".into())
+            });
+            let summary = capture::run(
+                &mut link,
+                &capture::CaptureCfg {
+                    divider: args.divider,
+                    mask: args.mask,
+                    duration: args.duration,
+                    iq: args.iq,
+                    title: &title,
+                    description: "Ad-hoc telemetry capture.",
+                    order: 100,
+                    command: capture_cmdline(&args),
+                },
+                &args.out,
+            )?;
+            println!(
+                "captured {} frames ({} rejected) -> {}",
+                summary.frames,
+                summary.frame_errors,
+                args.out.display()
+            );
+            Ok(())
+        }
     }
+}
+
+fn capture_cmdline(args: &CaptureArgs) -> String {
+    let target = match (&args.addr, &args.serial) {
+        (Some(a), _) => format!("--addr {a}"),
+        (_, Some(s)) => format!("--serial {s} --baud {}", args.baud),
+        _ => String::new(),
+    };
+    format!(
+        "mmc-host capture {target} --divider {} --duration {}{}",
+        args.divider,
+        args.duration,
+        args.iq.map(|i| format!(" --iq {i}")).unwrap_or_default(),
+    )
 }
 
 /// The canonical regression set. Add new scenarios here as milestones land;
@@ -181,8 +292,55 @@ fn run_suite(dir: &std::path::Path) -> std::io::Result<()> {
         print_summary(spec, &out, &result, false);
     }
 
+    suite_tcp_capture(dir)?;
+
     let out = dir.join("index.html");
     let n = report::generate(dir, &out)?;
     println!("dashboard: {n} runs -> {}", out.display());
+    Ok(())
+}
+
+/// MS3 leg of the suite: spin the sim server up in-process and capture a live
+/// current step through the actual TCP wire protocol.
+fn suite_tcp_capture(dir: &std::path::Path) -> std::io::Result<()> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    let handle = std::thread::spawn(move || {
+        server::serve(
+            listener,
+            &server::ServeCfg {
+                once: true,
+                ..Default::default()
+            },
+        )
+    });
+
+    let out = dir.join("ms3-telemetry").join("tcp_step.csv");
+    let mut link = link::Link::tcp(&addr.to_string())?;
+    let summary = capture::run(
+        &mut link,
+        &capture::CaptureCfg {
+            divider: 10,
+            mask: mmc_proto::channel::ALL,
+            duration: 1.0,
+            iq: Some(0.5),
+            title: "TCP live capture — 0.5 A step",
+            description: "End-to-end protocol regression: the sim runs behind the mmc-proto \
+                          TCP server, the host connects like it would to hardware, streams \
+                          telemetry at 1 kHz, and commands a 0.5 A q-axis step over the wire.",
+            order: 0,
+            command: "mmc-host suite (in-process sim server)".into(),
+        },
+        &out,
+    )?;
+    drop(link);
+    let _ = handle.join();
+    println!(
+        "  {:24} {} frames, {} rejected -> {}",
+        "TCP live capture",
+        summary.frames,
+        summary.frame_errors,
+        out.display()
+    );
     Ok(())
 }

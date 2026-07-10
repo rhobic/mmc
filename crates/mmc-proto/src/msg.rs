@@ -113,18 +113,34 @@ impl TelemetryFrame {
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum Message {
     /// Liveness check; the peer echoes the nonce in [`Message::Pong`].
-    Ping { nonce: u32 },
-    Pong { nonce: u32 },
+    Ping {
+        nonce: u32,
+    },
+    Pong {
+        nonce: u32,
+    },
     GetInfo,
     Info(DeviceInfo),
     /// Select streamed channels and the sample-rate divider
     /// (`0`/`1` = every control period, `n` = every n-th).
-    SetTelemetry { divider: u16, mask: u32 },
-    Stream { enable: bool },
+    SetTelemetry {
+        divider: u16,
+        mask: u32,
+    },
+    Stream {
+        enable: bool,
+    },
     /// Torque-mode q-axis current reference [A].
-    SetIqRef { iq: f32 },
-    Ack { of: u8 },
-    Nak { of: u8, err: u8 },
+    SetIqRef {
+        iq: f32,
+    },
+    Ack {
+        of: u8,
+    },
+    Nak {
+        of: u8,
+        err: u8,
+    },
     Telemetry(TelemetryFrame),
 }
 

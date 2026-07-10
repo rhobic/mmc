@@ -1,0 +1,15 @@
+{
+  "command": "mmc-host suite (in-process sim server)",
+  "description": "End-to-end protocol regression: the sim runs behind the mmc-proto TCP server, the host connects like it would to hardware, streams telemetry at 1 kHz, and commands a 0.5 A q-axis step over the wire.",
+  "notes": [
+    "Captured live from mmc-sim (Sim) over mmc-proto; 1006 frames."
+  ],
+  "order": 0,
+  "params": {
+    "divider": 10,
+    "duration_s": 1.0,
+    "iq_A": 0.5
+  },
+  "title": "TCP live capture — 0.5 A step",
+  "unix_time": 1783713617
+}

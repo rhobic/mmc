@@ -7,11 +7,14 @@ members = [
     "crates/mmc-sim",
     "crates/mmc-host",
 ]
+# Firmware binaries build for their MCU target only (own .cargo/config.toml),
+# so they stay out of the host workspace.
+exclude = ["crates/mmc-fw-g0b1"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.84"
+rust-version = "1.87"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
