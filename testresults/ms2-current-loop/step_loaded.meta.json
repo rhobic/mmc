@@ -1,0 +1,19 @@
+{
+  "command": "mmc-host sim --scenario current-step --duration 0.12 --bandwidth 2000 --iq 1 --vbus 24 --load 0.04",
+  "description": "1 A q-axis step against a 0.04 N·m load (torque constant is 0.084 N·m/A) — accelerates more slowly under load.",
+  "notes": [
+    "Drive ended voltage-limited (back-EMF ≈ bus voltage): the current reference is unreachable there — expected without field weakening."
+  ],
+  "order": 2,
+  "params": {
+    "bandwidth_rad_s": 2000.0,
+    "ctrl_freq_hz": 10000.0,
+    "duration_s": 0.11999999731779099,
+    "iq_A": 1.0,
+    "load_Nm": 0.03999999910593033,
+    "locked": false,
+    "vbus_V": 24.0
+  },
+  "title": "Loaded rotor",
+  "unix_time": 1783687030
+}

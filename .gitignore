@@ -1,2 +1,4 @@
 /target
+# Ad-hoc sim output stays out of git; curated results in testresults/ are kept.
 *.csv
+!testresults/**/*.csv

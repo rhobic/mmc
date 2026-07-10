@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mmc test results</title>
+<style>
+  :root {
+    --page:    #f9f9f7;
+    --surface: #fcfcfb;
+    --ink:     #0b0b0b;
+    --ink2:    #52514e;
+    --muted:   #898781;
+    --grid:    #e1e0d9;
+    --axis:    #c3c2b7;
+    --border:  rgba(11,11,11,.10);
+    --s1: #2a78d6;  /* q axis / phase a / primary  */
+    --s2: #1baf7a;  /* d axis / phase b            */
+    --s3: #eda100;  /* phase c                     */
+    --ref: #898781; /* reference / target trace    */
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page:    #0d0d0d;
+      --surface: #1a1a19;
+      --ink:     #ffffff;
+      --ink2:    #c3c2b7;
+      --muted:   #898781;
+      --grid:    #2c2c2a;
+      --axis:    #383835;
+      --border:  rgba(255,255,255,.10);
+      --s1: #3987e5;
+      --s2: #199e70;
+      --s3: #c98500;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--page); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1160px; margin: 0 auto; padding: 24px 20px 64px; }
+  header.page { max-width: 1160px; margin: 0 auto; padding: 28px 20px 4px; }
+  header.page h1 { font-size: 22px; font-weight: 650; margin: 0; }
+  header.page .sub { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  header.page code { font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+                     background: var(--surface); border: 1px solid var(--border);
+                     border-radius: 4px; padding: 1px 5px; }
+  h2 { font-size: 15px; font-weight: 650; color: var(--ink);
+       margin: 36px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--grid); }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 20px 22px 14px; margin-bottom: 20px;
+  }
+  .card h3 { font-size: 15px; font-weight: 650; margin: 0; }
+  .card .desc { color: var(--ink2); font-size: 13px; margin: 3px 0 0; max-width: 72ch; }
+  .card .prov { color: var(--muted); font-size: 12px; margin: 4px 0 0;
+                font-family: ui-monospace, Consolas, monospace; overflow-wrap: anywhere; }
+  .note { color: var(--ink2); font-size: 12.5px; margin: 10px 0 0;
+          padding: 8px 12px; border: 1px solid var(--grid); border-radius: 8px; }
+  .tiles { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0 4px; }
+  .tile { border: 1px solid var(--grid); border-radius: 10px;
+          padding: 10px 16px 9px; min-width: 150px; }
+  .tile .tl { color: var(--ink2); font-size: 12px; }
+  .tile .tv { font-size: 24px; font-weight: 600; margin-top: 1px; }
+  .tile .tv .tu { font-size: 13px; font-weight: 500; color: var(--ink2); margin-left: 2px; }
+  .tile .td { color: var(--muted); font-size: 11.5px; margin-top: 1px; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+            gap: 18px 22px; margin-top: 14px; }
+  .chart { position: relative; min-width: 0; }
+  .chart h4 { font-size: 13px; font-weight: 600; margin: 0 0 2px; }
+  .chart h4 .unit { color: var(--muted); font-weight: 500; }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 2px 0 4px;
+            color: var(--ink2); font-size: 12px; }
+  .legend .key { display: inline-block; width: 14px; border-top: 2.5px solid;
+                 border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+  .legend .key.dashed { border-top-style: dashed; }
+  .chart svg { width: 100%; height: auto; display: block; outline: none; }
+  .chart svg:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; border-radius: 4px; }
+  .tt {
+    position: absolute; pointer-events: none; display: none; z-index: 3;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.12); padding: 7px 10px; font-size: 12px;
+    min-width: 130px;
+  }
+  .tt .tth { color: var(--muted); font-size: 11px; margin-bottom: 3px; }
+  .tt .row { display: flex; align-items: center; gap: 6px; margin-top: 1px; }
+  .tt .row .key { width: 11px; border-top: 2.5px solid; border-radius: 2px; flex: none; }
+  .tt .row .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .tt .row .n { color: var(--ink2); }
+  details.tbl { margin: 12px 0 6px; }
+  details.tbl summary { color: var(--ink2); font-size: 12.5px; cursor: pointer; user-select: none; }
+  .tscroll { overflow: auto; max-height: 330px; margin-top: 8px;
+             border: 1px solid var(--grid); border-radius: 8px; }
+  table.data { border-collapse: collapse; font-size: 12px; width: 100%;
+               font-variant-numeric: tabular-nums; }
+  table.data th { position: sticky; top: 0; background: var(--surface); color: var(--ink2);
+                  text-align: right; font-weight: 600; padding: 6px 10px;
+                  border-bottom: 1px solid var(--grid); }
+  table.data td { text-align: right; padding: 3px 10px; color: var(--ink);
+                  border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  .empty { color: var(--ink2); padding: 40px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header class="page">
+  <h1>mmc — test results</h1>
+  <p class="sub" id="pagesub"></p>
+</header>
+<main id="app"></main>
+<script>
+"use strict";
+const DATA = __MMC_DATA__;
+
+const RPM = 60 / (2 * Math.PI);
+
+/* Chart catalog: a chart renders when its columns exist in the run. Columns
+   not claimed by any spec get a single-series fallback chart each. */
+const CHART_SPECS = [
+  { title: "Currents (dq)", unit: "A", series: [
+      { col: "i_q",    name: "i_q measured", color: "var(--s1)" },
+      { col: "i_d",    name: "i_d measured", color: "var(--s2)" },
+      { col: "iq_ref", name: "i_q target",   color: "var(--ref)", dash: "5 4", w: 1.5, nodot: true },
+  ]},
+  { title: "Voltage command (dq)", unit: "V", series: [
+      { col: "v_q", name: "v_q", color: "var(--s1)" },
+      { col: "v_d", name: "v_d", color: "var(--s2)" },
+  ]},
+  { title: "Mechanical speed", unit: "rpm", series: [
+      { col: "omega_m", name: "speed", color: "var(--s1)", scale: RPM },
+  ]},
+  { title: "PWM duty cycles", unit: "0–1", series: [
+      { col: "duty_a", name: "phase a", color: "var(--s1)" },
+      { col: "duty_b", name: "phase b", color: "var(--s2)" },
+      { col: "duty_c", name: "phase c", color: "var(--s3)" },
+  ]},
+];
+/* High-frequency wrapped signals that chart as noise; the table still has them. */
+const NO_AUTOCHART = new Set(["t", "theta_e"]);
+
+/* ---------- tiny DOM helpers (textContent only — labels are data) ---------- */
+function h(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+const SVGNS = "http://www.w3.org/2000/svg";
+function s(tag, attrs) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return el;
+}
+
+function fmt(v) {
+  if (!isFinite(v)) return "–";
+  const a = Math.abs(v);
+  if (a >= 1e5) return v.toExponential(2);
+  if (a >= 1000) return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  if (a >= 10) return +v.toFixed(1) + "";
+  if (a >= 0.01 || v === 0) return +v.toFixed(3) + "";
+  return v.toExponential(2);
+}
+function fmtDate(unix) {
+  if (!unix) return null;
+  return new Date(unix * 1000).toLocaleString(undefined,
+    { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function niceTicks(lo, hi, n) {
+  if (hi - lo < 1e-12) hi = lo + 1;
+  const raw = (hi - lo) / (n || 5);
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  let step = 10 * mag;
+  for (const m of [1, 2, 2.5, 5, 10]) if (raw <= m * mag) { step = m * mag; break; }
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-6; v += step)
+    out.push(Math.abs(v) < step * 1e-6 ? 0 : v);
+  return out;
+}
+
+/* ------------------------------- line chart ------------------------------- */
+/* spec: {title, unit, series:[{name,color,vals,dash?,w?,nodot?}]}, xs in ms  */
+function lineChart(spec, xs) {
+  const W = 560, H = 280, ml = 48, mr = 78, mt = 12, mb = 32;
+  const pw = W - ml - mr, ph = H - mt - mb;
+
+  const wrap = h("div", "chart");
+  const title = h("h4", null, spec.title + " ");
+  const unitEl = h("span", "unit", spec.unit ? "[" + spec.unit + "]" : "");
+  title.appendChild(unitEl);
+  wrap.appendChild(title);
+
+  if (spec.series.length >= 2) {           // legend: always for ≥2 series
+    const lg = h("div", "legend");
+    for (const sr of spec.series) {
+      const item = h("span");
+      const key = h("span", "key" + (sr.dash ? " dashed" : ""));
+      key.style.borderTopColor = sr.color;
+      item.appendChild(key);
+      item.appendChild(document.createTextNode(sr.name));
+      lg.appendChild(item);
+    }
+    wrap.appendChild(lg);
+  }
+
+  let lo = Infinity, hi = -Infinity;
+  for (const sr of spec.series) for (const v of sr.vals) {
+    if (v < lo) lo = v; if (v > hi) hi = v;
+  }
+  lo = Math.min(lo, 0); hi = Math.max(hi, 0);
+  const pad = (hi - lo || 1) * 0.05;
+  lo -= pad; hi += pad;
+
+  const x0 = xs[0], x1 = xs[xs.length - 1];
+  const X = t => ml + (t - x0) / (x1 - x0 || 1) * pw;
+  const Y = v => mt + (hi - v) / (hi - lo) * ph;
+
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, tabindex: "0", role: "img" });
+  svg.append(s("title", {}));
+  svg.lastChild.textContent = spec.title;
+
+  for (const v of niceTicks(lo, hi, 5)) {      // hairline solid grid, y only
+    svg.append(s("line", { x1: ml, x2: ml + pw, y1: Y(v), y2: Y(v),
+      style: "stroke:var(--grid);stroke-width:1" }));
+    const lbl = s("text", { x: ml - 7, y: Y(v) + 3.5, "text-anchor": "end",
+      style: "fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums" });
+    lbl.textContent = fmt(v);
+    svg.append(lbl);
+  }
+  svg.append(s("line", { x1: ml, x2: ml + pw, y1: mt + ph, y2: mt + ph,
+    style: "stroke:var(--axis);stroke-width:1" }));
+  for (const v of niceTicks(x0, x1, 6)) {
+    if (v < x0 - 1e-9 || v > x1 + 1e-9) continue;
+    const lbl = s("text", { x: X(v), y: mt + ph + 17, "text-anchor": "middle",
+      style: "fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums" });
+    lbl.textContent = fmt(v);
+    svg.append(lbl);
+  }
+  const xt = s("text", { x: ml + pw / 2, y: H - 2, "text-anchor": "middle",
+    style: "fill:var(--muted);font-size:11px" });
+  xt.textContent = "t [ms]";
+  svg.append(xt);
+
+  for (const sr of spec.series) {
+    let d = "";
+    for (let i = 0; i < xs.length; i++)
+      d += (i ? "L" : "M") + X(xs[i]).toFixed(1) + " " + Y(sr.vals[i]).toFixed(1);
+    svg.append(s("path", { d, fill: "none",
+      style: `stroke:${sr.color};stroke-width:${sr.w || 2};stroke-linecap:round;` +
+             `stroke-linejoin:round${sr.dash ? ";stroke-dasharray:" + sr.dash : ""}` }));
+    if (!sr.nodot)                            // end marker with surface ring
+      svg.append(s("circle", { cx: X(x1), cy: Y(sr.vals[xs.length - 1]), r: 4,
+        style: `fill:${sr.color};stroke:var(--surface);stroke-width:2` }));
+  }
+
+  /* direct end labels (identity), dropped on collision — legend still covers */
+  const labels = spec.series
+    .map(sr => ({ y: Y(sr.vals[xs.length - 1]), text: sr.name }))
+    .sort((a, b) => a.y - b.y);
+  let lastY = -1e9;
+  for (const l of labels) {
+    if (l.y - lastY < 13) continue;
+    lastY = l.y;
+    const t = s("text", { x: ml + pw + 8, y: l.y + 3.5,
+      style: "fill:var(--ink2);font-size:11px" });
+    t.textContent = l.text;
+    svg.append(t);
+  }
+
+  /* hover layer: crosshair snaps to nearest sample, tooltip lists every series */
+  const cross = s("line", { y1: mt, y2: mt + ph, visibility: "hidden",
+    style: "stroke:var(--axis);stroke-width:1" });
+  svg.append(cross);
+  const dots = spec.series.map(sr => {
+    const dot = s("circle", { r: 3.5, visibility: "hidden",
+      style: `fill:${sr.color};stroke:var(--surface);stroke-width:2` });
+    svg.append(dot);
+    return dot;
+  });
+  const tt = h("div", "tt");
+  wrap.appendChild(tt);
+
+  function showIdx(i) {
+    const px = X(xs[i]);
+    cross.setAttribute("x1", px); cross.setAttribute("x2", px);
+    cross.setAttribute("visibility", "visible");
+    dots.forEach((dot, k) => {
+      dot.setAttribute("cx", px);
+      dot.setAttribute("cy", Y(spec.series[k].vals[i]));
+      dot.setAttribute("visibility", "visible");
+    });
+    tt.textContent = "";
+    tt.appendChild(h("div", "tth", "t = " + fmt(xs[i]) + " ms"));
+    for (const sr of spec.series) {
+      const row = h("div", "row");
+      const key = h("span", "key");
+      key.style.borderTopColor = sr.color;
+      row.appendChild(key);
+      row.appendChild(h("span", "v", fmt(sr.vals[i]) + (spec.unit === "rpm" ? " rpm" : spec.unit === "0–1" ? "" : " " + spec.unit)));
+      row.appendChild(h("span", "n", sr.name));
+      tt.appendChild(row);
+    }
+    tt.style.display = "block";
+    const scale = svg.clientWidth / W;
+    const cssX = px * scale, top = (mt + 8) * scale;
+    if (px > ml + pw / 2) { tt.style.left = ""; tt.style.right = (svg.clientWidth - cssX + 10) + "px"; }
+    else { tt.style.right = ""; tt.style.left = (cssX + 10) + "px"; }
+    tt.style.top = top + "px";
+    return i;
+  }
+  function hide() {
+    cross.setAttribute("visibility", "hidden");
+    dots.forEach(d => d.setAttribute("visibility", "hidden"));
+    tt.style.display = "none";
+  }
+  function nearest(tms) {
+    let a = 0, b = xs.length - 1;
+    while (b - a > 1) { const m = (a + b) >> 1; (xs[m] < tms ? a = m : b = m); }
+    return tms - xs[a] < xs[b] - tms ? a : b;
+  }
+  let idx = -1;
+  svg.addEventListener("pointermove", ev => {
+    const r = svg.getBoundingClientRect();
+    const vx = (ev.clientX - r.left) * W / r.width;
+    idx = showIdx(nearest(x0 + (vx - ml) / pw * (x1 - x0)));
+  });
+  svg.addEventListener("pointerleave", () => { idx = -1; hide(); });
+  svg.addEventListener("keydown", ev => {
+    if (ev.key === "ArrowRight" || ev.key === "ArrowLeft") {
+      ev.preventDefault();
+      if (idx < 0) idx = ev.key === "ArrowRight" ? 0 : xs.length - 1;
+      else idx = Math.max(0, Math.min(xs.length - 1, idx + (ev.key === "ArrowRight" ? 1 : -1)));
+      showIdx(idx);
+    } else if (ev.key === "Escape") { idx = -1; hide(); }
+  });
+  svg.addEventListener("blur", () => { idx = -1; hide(); });
+
+  wrap.appendChild(svg);
+  return wrap;
+}
+
+/* --------------------------------- run card -------------------------------- */
+function tile(label, value, unit, sub) {
+  const el = h("div", "tile");
+  el.appendChild(h("div", "tl", label));
+  const tv = h("div", "tv", value);
+  if (unit) tv.appendChild(h("span", "tu", unit));
+  el.appendChild(tv);
+  if (sub) el.appendChild(h("div", "td", sub));
+  return el;
+}
+
+function runCard(run) {
+  const card = h("section", "card");
+  card.appendChild(h("h3", null, run.title));
+  if (run.description) card.appendChild(h("p", "desc", run.description));
+  const prov = [run.name + ".csv", run.command, fmtDate(run.unix_time)]
+    .filter(Boolean).join("  ·  ");
+  card.appendChild(h("p", "prov", prov));
+
+  const m = run.metrics;
+  if (m || run.final_speed_rpm !== null) {
+    const tiles = h("div", "tiles");
+    if (m) {
+      const pct = v => v >= 100 ? fmt(v) : v.toFixed(2);
+      tiles.appendChild(tile("Rise time (10–90%)", m.rise_time_ms.toFixed(2), "ms",
+        m.ideal_rise_ms !== null ? "ideal " + m.ideal_rise_ms.toFixed(2) + " ms" : null));
+      tiles.appendChild(tile("Overshoot", pct(m.overshoot_pct), "%"));
+      tiles.appendChild(tile("Steady-state error", pct(m.sse_pct), "%"));
+    }
+    if (run.final_speed_rpm !== null)
+      tiles.appendChild(tile("Final speed", fmt(run.final_speed_rpm), "rpm"));
+    card.appendChild(tiles);
+  }
+
+  const ci = name => run.columns.indexOf(name);
+  const ti = ci("t");
+  const xs = run.rows.map((r, i) => ti >= 0 ? r[ti] * 1000 : i);
+  const chartsEl = h("div", "charts");
+  const used = new Set(["t"]);
+  for (const spec of CHART_SPECS) {
+    const series = spec.series
+      .filter(sr => ci(sr.col) >= 0)
+      .map(sr => ({ ...sr, vals: run.rows.map(r => r[ci(sr.col)] * (sr.scale || 1)) }));
+    if (!series.some(sr => !sr.nodot)) continue;
+    series.forEach(sr => used.add(sr.col));
+    chartsEl.appendChild(lineChart({ title: spec.title, unit: spec.unit, series }, xs));
+  }
+  for (const colName of run.columns) {       // fallback: unclaimed channels
+    if (used.has(colName) || NO_AUTOCHART.has(colName)) continue;
+    const vals = run.rows.map(r => r[ci(colName)]);
+    chartsEl.appendChild(lineChart({ title: colName, unit: "",
+      series: [{ name: colName, color: "var(--s1)", vals }] }, xs));
+  }
+  card.appendChild(chartsEl);
+
+  for (const note of run.notes) card.appendChild(h("p", "note", "ⓘ " + note));
+
+  /* table view — the WCAG-clean twin; built lazily on first open */
+  const det = h("details", "tbl");
+  const shown = run.rows.length, total = run.total_samples;
+  det.appendChild(h("summary", null,
+    "Data table (" + shown.toLocaleString() +
+    (total > shown ? " of " + total.toLocaleString() + " samples, decimated)" : " samples)")));
+  det.addEventListener("toggle", function build() {
+    if (!det.open || det.dataset.built) return;
+    det.dataset.built = "1";
+    const scroll = h("div", "tscroll");
+    const tbl = h("table", "data");
+    const thead = h("thead"); const trh = h("tr");
+    for (const c of run.columns) trh.appendChild(h("th", null, c));
+    thead.appendChild(trh); tbl.appendChild(thead);
+    const tbody = h("tbody");
+    for (const r of run.rows) {
+      const tr = h("tr");
+      for (const v of r) tr.appendChild(h("td", null, fmt(v)));
+      tbody.appendChild(tr);
+    }
+    tbl.appendChild(tbody); scroll.appendChild(tbl); det.appendChild(scroll);
+  });
+  card.appendChild(det);
+  return card;
+}
+
+/* ---------------------------------- page ---------------------------------- */
+(function render() {
+  const sub = document.getElementById("pagesub");
+  sub.textContent = "Generated " + (fmtDate(DATA.generated_unix) || "–") +
+    (DATA.git_rev ? "  ·  rev " + DATA.git_rev : "") + "  ·  regenerate with ";
+  const code = h("code", null, "cargo run -p mmc-host -- suite");
+  sub.appendChild(code);
+
+  const app = document.getElementById("app");
+  if (!DATA.groups.length) {
+    app.appendChild(h("p", "empty",
+      "No runs found. Run the suite to populate this dashboard."));
+    return;
+  }
+  for (const g of DATA.groups) {
+    app.appendChild(h("h2", null, g.title));
+    for (const run of g.runs) app.appendChild(runCard(run));
+  }
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host sim --scenario current-step --duration 0.05 --bandwidth 2000 --iq 1 --vbus 24 --locked",
+  "description": "1 A q-axis step at standstill — isolates the electrical dynamics from back-EMF; the regression baseline.",
+  "notes": [],
+  "order": 0,
+  "params": {
+    "bandwidth_rad_s": 2000.0,
+    "ctrl_freq_hz": 10000.0,
+    "duration_s": 0.05000000074505806,
+    "iq_A": 1.0,
+    "load_Nm": 0.0,
+    "locked": true,
+    "vbus_V": 24.0
+  },
+  "title": "Locked rotor",
+  "unix_time": 1783687030
+}
