@@ -1,0 +1,8 @@
+[package]
+name = "mmc-hal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hardware abstraction traits for the modular motor controller"
+
+[dependencies]

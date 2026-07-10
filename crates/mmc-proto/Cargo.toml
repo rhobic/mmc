@@ -1,0 +1,8 @@
+[package]
+name = "mmc-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Telemetry and command wire protocol shared by firmware and host"
+
+[dependencies]

@@ -1,0 +1,9 @@
+[package]
+name = "mmc-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Portable no_std control library for the modular motor controller"
+
+[dependencies]
+libm.workspace = true

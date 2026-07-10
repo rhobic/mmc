@@ -1,0 +1,10 @@
+[package]
+name = "mmc-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Virtual PMSM, inverter and sensor models behind the mmc-hal traits"
+
+[dependencies]
+mmc-core.workspace = true
+mmc-hal.workspace = true
