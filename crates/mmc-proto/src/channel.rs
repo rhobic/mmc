@@ -23,13 +23,36 @@ pub const I_C: u8 = 13;
 /// Drive state: 0 = off, 1 = running, 2 = overcurrent fault, 3 = gate-driver
 /// fault, 4 = bus-voltage fault.
 pub const STATE: u8 = 14;
+/// Sensorless observer estimate of the electrical angle [rad].
+pub const THETA_EST: u8 = 15;
+/// Sensorless observer estimate of the electrical velocity [rad/s].
+pub const OMEGA_EST: u8 = 16;
+/// Estimate minus reference angle, wrapped [rad]. Reference = sim truth on
+/// the simulator, the forced/applied angle on hardware.
+pub const THETA_ERR: u8 = 17;
 
-pub const COUNT: usize = 15;
+pub const COUNT: usize = 18;
 
 /// Wire names, indexed by channel id; used as CSV headers by the host.
 pub const NAMES: [&str; COUNT] = [
-    "iq_ref", "i_d", "i_q", "v_d", "v_q", "duty_a", "duty_b", "duty_c", "omega_m", "theta_e",
-    "vbus", "i_a", "i_b", "i_c", "state",
+    "iq_ref",
+    "i_d",
+    "i_q",
+    "v_d",
+    "v_q",
+    "duty_a",
+    "duty_b",
+    "duty_c",
+    "omega_m",
+    "theta_e",
+    "vbus",
+    "i_a",
+    "i_b",
+    "i_c",
+    "state",
+    "theta_est",
+    "omega_est",
+    "theta_err",
 ];
 
 /// Selection mask with every defined channel enabled.

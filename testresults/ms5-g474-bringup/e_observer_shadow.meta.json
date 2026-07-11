@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 20 --duration 6",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 6019 frames.",
+    "1 frames rejected (CRC/framing) during capture."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 20,
+    "drive": "IfCurrent { amps: 0.3, omega_e: 125.66371 }",
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "Stage E — shadow flux observer during I-f, 0.3 A @ 20 Hz elec",
+  "unix_time": 1783766699
+}

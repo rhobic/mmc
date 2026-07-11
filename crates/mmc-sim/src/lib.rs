@@ -4,9 +4,11 @@
 
 pub mod analysis;
 pub mod motor;
+pub mod sensorless_rig;
 pub mod truth;
 pub mod virtual_motor;
 
 pub use motor::{PmsmModel, PmsmParams};
+pub use sensorless_rig::{Sample, SensorlessRunCfg, SensorlessSim};
 pub use truth::TruthAngle;
 pub use virtual_motor::VirtualMotor;

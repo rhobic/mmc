@@ -20,7 +20,10 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 
-use scenario::{print_summary, run_current_step, RunSpec, StepConfig};
+use scenario::{
+    print_summary, run_current_step, run_sensorless, RunSpec, SensorlessConfig, SensorlessSpec,
+    StepConfig,
+};
 
 #[derive(Parser)]
 #[command(name = "mmc-host", about = "modular motor controller host tools")]
@@ -143,12 +146,20 @@ struct SimArgs {
     /// Hold the rotor at standstill (locked-rotor bench).
     #[arg(long)]
     locked: bool,
+    /// Sensorless speed target [rad/s electrical].
+    #[arg(long, default_value_t = 800.0)]
+    omega_e: f32,
+    /// Additional load stepped in at 60% of a sensorless run [N·m].
+    #[arg(long, default_value_t = 0.0)]
+    load_step: f32,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
 enum Scenario {
     /// q-axis current reference step in torque mode.
     CurrentStep,
+    /// I-f startup → observer handoff → sensorless speed loop (MS4).
+    SensorlessSpeed,
 }
 
 #[derive(clap::Args)]
@@ -194,6 +205,25 @@ fn main() -> std::io::Result<()> {
                 };
                 let result = run_current_step(&spec, &args.out)?;
                 print_summary(&spec, &args.out, &result, true);
+                Ok(())
+            }
+            Scenario::SensorlessSpeed => {
+                let spec = SensorlessSpec {
+                    title: "sensorless speed",
+                    description: "Ad-hoc sensorless run.",
+                    order: 100,
+                    cfg: SensorlessConfig {
+                        duration: args.duration.max(1.0),
+                        omega_e: args.omega_e,
+                        load: args.load,
+                        load_step: args.load_step,
+                    },
+                };
+                let result = run_sensorless(&spec, &args.out)?;
+                println!("wrote {} samples to {}", result.samples, args.out.display());
+                for note in &result.notes {
+                    println!("{note}");
+                }
                 Ok(())
             }
         },
@@ -357,6 +387,28 @@ fn run_suite(dir: &std::path::Path) -> std::io::Result<()> {
         let result = run_current_step(spec, &out)?;
         print_summary(spec, &out, &result, false);
     }
+
+    // MS4: canonical sensorless startup + load step.
+    let ms4 = dir.join("ms4-sensorless");
+    let spec = SensorlessSpec {
+        title: "Sensorless startup + load step",
+        description: "I-f startup, blend to the flux observer at 150 rad/s elec, speed loop \
+                      to 800 rad/s elec, +0.03 N·m load step at 60% — angle estimate vs sim \
+                      truth is the regression that MS4 lives by.",
+        order: 0,
+        cfg: SensorlessConfig {
+            load_step: 0.03,
+            ..SensorlessConfig::default()
+        },
+    };
+    let out = ms4.join("sensorless_speed.csv");
+    let result = run_sensorless(&spec, &out)?;
+    println!(
+        "  {:24} {} -> {}",
+        "Sensorless speed",
+        result.notes.first().map(String::as_str).unwrap_or(""),
+        out.display()
+    );
 
     suite_tcp_capture(dir)?;
 

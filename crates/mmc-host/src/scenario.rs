@@ -13,7 +13,7 @@ use mmc_core::transforms::{Abc, Dq};
 use mmc_core::tuning::current_pi_gains;
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
 use mmc_sim::analysis::{step_metrics, StepMetrics};
-use mmc_sim::{PmsmParams, TruthAngle, VirtualMotor};
+use mmc_sim::{PmsmParams, SensorlessRunCfg, SensorlessSim, TruthAngle, VirtualMotor};
 
 /// Parameters of a q-axis current-step run.
 #[derive(Copy, Clone, Debug)]
@@ -173,6 +173,147 @@ pub fn run_current_step(spec: &RunSpec, out: &Path) -> std::io::Result<RunResult
     };
     write_meta(spec, out, &result)?;
     Ok(result)
+}
+
+/// Parameters of a sensorless startup + speed run (MS4).
+#[derive(Copy, Clone, Debug)]
+pub struct SensorlessConfig {
+    pub duration: f32,
+    /// Speed target [rad/s electrical].
+    pub omega_e: f32,
+    /// Steady load torque [N·m].
+    pub load: f32,
+    /// Additional load stepped in at 60% of the run [N·m].
+    pub load_step: f32,
+}
+
+impl Default for SensorlessConfig {
+    fn default() -> Self {
+        Self {
+            duration: 2.0,
+            omega_e: 800.0,
+            load: 0.005,
+            load_step: 0.0,
+        }
+    }
+}
+
+/// Identity + config for a sensorless run.
+pub struct SensorlessSpec<'a> {
+    pub title: &'a str,
+    pub description: &'a str,
+    pub order: u32,
+    pub cfg: SensorlessConfig,
+}
+
+/// Run the full sensorless stack (I-f startup → observer handoff → speed
+/// loop) against the virtual motor and record every channel.
+pub fn run_sensorless(spec: &SensorlessSpec, out: &Path) -> std::io::Result<RunResult> {
+    let cfg = &spec.cfg;
+    let run_cfg = SensorlessRunCfg::small_bldc(cfg.omega_e);
+    let mut sim = SensorlessSim::new(run_cfg);
+    sim.set_load(cfg.load);
+    let steps = (cfg.duration * run_cfg.ctrl_freq) as usize;
+    let vbus = run_cfg.vbus;
+
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut writer = BufWriter::new(File::create(out)?);
+    writeln!(
+        writer,
+        "t,iq_ref,i_d,i_q,v_d,v_q,omega_m,theta_e,vbus,state,theta_est,omega_est,theta_err"
+    )?;
+
+    let mut handoff_t = f32::NAN;
+    let mut err_max = 0.0f32;
+    let mut err_sq = 0.0f64;
+    let mut err_n = 0u32;
+    let mut last_omega_est = 0.0;
+    for _ in 0..steps {
+        let s = sim.step();
+        if cfg.load_step != 0.0 && s.t >= 0.6 * cfg.duration {
+            sim.set_load(cfg.load + cfg.load_step);
+        }
+        let phase_code = match s.phase {
+            mmc_core::sensorless::Phase::Ramp => 6.0,
+            mmc_core::sensorless::Phase::Blend => 7.0,
+            mmc_core::sensorless::Phase::Closed => 1.0,
+        };
+        if handoff_t.is_nan() && phase_code == 1.0 {
+            handoff_t = s.t;
+        }
+        if !handoff_t.is_nan() && s.t > handoff_t + 0.1 {
+            let e = s.theta_err.abs();
+            err_max = err_max.max(e);
+            err_sq += (e as f64) * (e as f64);
+            err_n += 1;
+        }
+        last_omega_est = s.omega_est;
+        writeln!(
+            writer,
+            "{},{},{},{},{},{},{},{},{vbus},{phase_code},{},{},{}",
+            s.t,
+            s.iq_ref,
+            s.out.i_dq.d,
+            s.out.i_dq.q,
+            s.out.v_dq.d,
+            s.out.v_dq.q,
+            s.omega_m_true,
+            s.theta_e_true,
+            s.theta_est,
+            s.omega_est,
+            s.theta_err,
+        )?;
+    }
+    writer.flush()?;
+
+    let err_rms = (err_sq / err_n.max(1) as f64).sqrt();
+    let notes = vec![format!(
+        "Sensorless: handoff at {handoff_t:.3} s; post-handoff angle error \
+         max {err_max:.3} rad / rms {err_rms:.3} rad; final speed estimate \
+         {last_omega_est:.0} rad/s elec (target {}).",
+        cfg.omega_e
+    )];
+
+    let result = RunResult {
+        samples: steps,
+        metrics: None,
+        final_speed: Some(sim.rig.motor.omega_m),
+        notes,
+    };
+    write_sensorless_meta(spec, out, &result)?;
+    Ok(result)
+}
+
+fn write_sensorless_meta(
+    spec: &SensorlessSpec,
+    csv_path: &Path,
+    result: &RunResult,
+) -> std::io::Result<()> {
+    let cfg = &spec.cfg;
+    let meta = serde_json::json!({
+        "title": spec.title,
+        "description": spec.description,
+        "order": spec.order,
+        "command": format!(
+            "mmc-host sim --scenario sensorless-speed --duration {} --omega-e {} --load {}{}",
+            cfg.duration, cfg.omega_e, cfg.load,
+            if cfg.load_step != 0.0 { format!(" --load-step {}", cfg.load_step) } else { String::new() },
+        ),
+        "unix_time": SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+        "params": {
+            "duration_s": cfg.duration,
+            "omega_e_rad_s": cfg.omega_e,
+            "load_Nm": cfg.load,
+            "load_step_Nm": cfg.load_step,
+        },
+        "notes": result.notes,
+    });
+    std::fs::write(
+        csv_path.with_extension("meta.json"),
+        serde_json::to_string_pretty(&meta)?,
+    )
 }
 
 /// Sidecar with provenance and context for the dashboard. Metrics are *not*

@@ -4,7 +4,7 @@
 //! module, so a fixed-point or CORDIC implementation for Cortex-M0-class
 //! targets can be introduced later without touching the control code.
 
-pub use core::f32::consts::PI;
+pub use core::f32::consts::{FRAC_PI_4, PI};
 
 pub const TWO_PI: f32 = 2.0 * PI;
 pub const SQRT_3: f32 = 1.732_050_8;

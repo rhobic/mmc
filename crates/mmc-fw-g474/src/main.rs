@@ -43,8 +43,10 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Ticker};
 use panic_halt as _;
 
+use mmc_core::angle::AngleEstimator;
 use mmc_core::foc::Foc;
 use mmc_core::math::{sin_cos, wrap_angle};
+use mmc_core::observer::{FluxObserver, FluxObserverCfg};
 use mmc_core::svpwm::svpwm;
 use mmc_core::transforms::{clarke, inverse_park, park, Abc, Dq};
 use mmc_core::tuning::current_pi_gains;
@@ -83,10 +85,11 @@ const DEADMAN_TICKS: u32 = 2 * 20_000;
 const CAL_TICKS: u32 = 8192;
 
 // Conservative textbook gains for the I-f current loop until the profiler
-// measures the real R/L (assumes a small hobby BLDC, ~0.5 Ω / 0.6 mH).
+// measures the real R/L. Rs was measured during bring-up (stage C: i_d at
+// steady v_d gave ≈1.0 Ω); L is still assumed.
 const IF_BANDWIDTH: f32 = 500.0;
-const IF_ASSUMED_RS: f32 = 0.5;
-const IF_ASSUMED_LQ: f32 = 0.6e-3;
+const MOTOR_RS: f32 = 1.0;
+const MOTOR_LS: f32 = 0.6e-3;
 
 // drive state values (channel::STATE)
 const ST_OFF: u8 = 0;
@@ -137,6 +140,10 @@ struct IsrState {
     omega: f32,
     amp: f32,
     foc: Option<Foc>,
+    /// Shadow flux observer: estimates the rotor angle from v/i while the
+    /// forced-angle drives run — MS4's estimator proving itself on hardware
+    /// before it closes the loop.
+    obs: Option<FluxObserver>,
     oc_strikes: u8,
     vbus_filt: f32,
 }
@@ -155,6 +162,7 @@ static ISR_STATE: IsrCell = IsrCell(UnsafeCell::new(IsrState {
     omega: 0.0,
     amp: 0.0,
     foc: None,
+    obs: None,
     oc_strikes: 0,
     vbus_filt: 0.0,
 }));
@@ -592,11 +600,8 @@ unsafe extern "C" fn ADC1_2() {
                     s.omega = 0.0;
                     s.amp = 0.0;
                     s.oc_strikes = 0;
-                    s.foc = Some(Foc::new(current_pi_gains(
-                        IF_ASSUMED_RS,
-                        IF_ASSUMED_LQ,
-                        IF_BANDWIDTH,
-                    )));
+                    s.foc = Some(Foc::new(current_pi_gains(MOTOR_RS, MOTOR_LS, IF_BANDWIDTH)));
+                    s.obs = Some(FluxObserver::new(FluxObserverCfg::new(MOTOR_RS, MOTOR_LS)));
                     stage_on();
                 }
                 s.mode = mode;
@@ -644,6 +649,9 @@ unsafe extern "C" fn ADC1_2() {
     let mut v_dq = Dq::default();
     let mut i_dq = Dq::default();
     let mut iq_ref = 0.0f32;
+    let mut theta_est = 0.0f32;
+    let mut omega_est = 0.0f32;
+    let mut theta_err = 0.0f32;
 
     if s.mode != 0 {
         // Ramp the forced electrical frequency and the amplitude.
@@ -657,13 +665,15 @@ unsafe extern "C" fn ADC1_2() {
         s.theta = wrap_angle(s.theta + s.omega * CTRL_DT);
 
         let sc = sin_cos(s.theta);
-        i_dq = park(clarke(i_abc), sc);
+        let i_ab = clarke(i_abc);
+        i_dq = park(i_ab, sc);
 
-        if s.mode == 1 {
+        let v_ab = if s.mode == 1 {
             // Open-loop rotating voltage vector.
             v_dq = Dq { d: s.amp, q: 0.0 };
             let v_ab = inverse_park(v_dq, sc);
             duties = svpwm(v_ab, s.vbus_filt.max(1.0));
+            v_ab
         } else {
             // I-f: closed current loop on the forced angle.
             iq_ref = s.amp;
@@ -678,8 +688,18 @@ unsafe extern "C" fn ADC1_2() {
             duties = out.duties;
             v_dq = out.v_dq;
             i_dq = out.i_dq;
-        }
+            out.v_ab
+        };
         set_duties(duties);
+
+        // Shadow observer: estimate the rotor angle from what was applied
+        // and measured; theta_err compares against the forced angle.
+        if let Some(obs) = s.obs.as_mut() {
+            obs.update(i_ab, v_ab, CTRL_DT);
+            theta_est = obs.electrical_angle();
+            omega_est = obs.electrical_velocity();
+            theta_err = wrap_angle(theta_est - s.theta);
+        }
     }
 
     // --- telemetry snapshot (seqlock).
@@ -701,6 +721,9 @@ unsafe extern "C" fn ADC1_2() {
     put(channel::I_B, i_abc.b);
     put(channel::I_C, i_abc.c);
     put(channel::STATE, STATE.load(Ordering::Relaxed) as f32);
+    put(channel::THETA_EST, theta_est);
+    put(channel::OMEGA_EST, omega_est);
+    put(channel::THETA_ERR, theta_err);
     TELEM_SEQ.store(seq.wrapping_add(2), Ordering::Release);
 
     let dur = cortex_m::peripheral::DWT::cycle_count().wrapping_sub(isr_t0);

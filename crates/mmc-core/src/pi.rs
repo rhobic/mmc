@@ -34,6 +34,13 @@ impl Pi {
         self.integral = 0.0;
     }
 
+    /// Preload the integrator (clamped to the output limit) — bumpless
+    /// transfer, e.g. handing the I-f startup current to the speed loop
+    /// without a torque step.
+    pub fn preload(&mut self, value: f32) {
+        self.integral = value.clamp(-self.limit, self.limit);
+    }
+
     pub fn update(&mut self, error: f32, dt: f32) -> f32 {
         self.integral = (self.integral + self.gains.ki * error * dt).clamp(-self.limit, self.limit);
         (self.gains.kp * error + self.integral).clamp(-self.limit, self.limit)

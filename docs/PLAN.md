@@ -121,10 +121,13 @@ sync — normal for motor control in any language.
   ~1 kHz, zero rejected frames) — proving protocol and hardware modularity
   before the G474 exists. `thumbv6m-none-eabi` joined the no_std CI matrix.
   *Deferred:* live plot view — revisit in MS4 where observer tuning needs it.
-- **MS4 — Sensorless foundation (in sim)**: flux observer + PLL behind
-  `AngleEstimator`, I-f open-loop startup and handoff, sensorless speed loop.
-  Regression tests compare estimated angle/speed against sim truth across load
-  and speed sweeps.
+- **MS4 — Sensorless foundation (in sim)** ✅ *(2026-07-11)*: flux observer
+  (leaky voltage model, lead-compensated) + PLL behind `AngleEstimator`, I-f
+  startup `Sequencer` with blend handoff, sensorless `SpeedLoop` with bumpless
+  preload. Regression sweeps (speed × load × direction) hold angle error
+  < 0.3 rad vs sim truth. Observer also **shadow-validated on the real motor**
+  (exact ω̂, θ̂ = true rotor angle incl. I-f hang angle, noise ≈ 0.11 rad).
+  *Known limit:* no field weakening — usable ceiling ≈ 0.7 × (V_bus/√3)/ψ.
 - **MS5 — G474 bring-up, sensorless** 🟡 *(hardware layer done early,
   2026-07-10)*: clocks (170 MHz), TIM1 center-aligned PWM + injected-ADC shunt
   sensing on the IHM16M1, zero-current calibration, protection trips

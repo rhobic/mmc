@@ -3,6 +3,48 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-07-11 — session 4: MS4 sensorless foundation + observer shadow-validated on hardware
+
+**Landed (sim / core):**
+- `mmc-core::observer::FluxObserver` — leaky voltage-model flux integrator +
+  PLL (`AngleEstimator`). Key subtlety: the leaky integrator's transfer is
+  `jω/(jω+leak)`, so the flux estimate **leads** by `atan(leak/ω)` — the
+  compensation *subtracts* (first cut added it; the ideal-machine unit test
+  caught the doubled error immediately).
+- `mmc-core::sensorless` — I-f startup `Sequencer` (Ramp → Blend → Closed,
+  shortest-path angle interpolation) and `SpeedLoop` with `Pi::preload` for
+  bumpless transfer (preload is **sign-matched to rotation** — a +0.5 A preload
+  on a reverse spin brakes through the observer's blind zone; found by test).
+- `tuning::speed_pi_gains` (integral corner at bw/4 — bw/10 was too slow to
+  settle inside a test run).
+- `mmc-sim::SensorlessSim` — the full stack against the virtual motor, used by
+  both the regression tests and `mmc-host sim --scenario sensorless-speed`.
+- Regression tests: startup+handoff+load-step (2 s), 3×3 speed/load sweep
+  (400/800/1200 rad/s elec × 0/0.02/0.04 N·m), negative direction. Canonical
+  suite run → `testresults/ms4-sensorless/` (handoff 0.43 s, post-handoff
+  angle error ≤ 0.23 rad peak / 0.08 rad RMS, speed on target).
+- **Voltage-ceiling finding:** at 24 V the back-EMF meets the voltage limit at
+  ~1730 rad/s elec; above ~0.7× that a small speed overshoot erases braking
+  authority (feedforward saturates the voltage circle → pi_limit → 0) and the
+  loop cannot recover — field weakening is future work; sweeps top out at 1200.
+- Protocol channels 15–17: `theta_est`, `omega_est`, `theta_err`
+  (MAX_CHANNELS 16 → 24); dashboard charts "Angle estimate error" and
+  "Electrical speed estimate".
+
+**Landed (hardware):** the G474 firmware now runs the observer in **shadow**
+during volt/I-f drives (Rs = 1.0 Ω from bring-up, Ls still assumed 0.6 mH) and
+streams the estimate. Stage E capture (I-f 0.3 A @ 20 Hz elec):
+`omega_est` = 125.7 rad/s — *exactly* the forced frequency (σ 10.8); the
+1.30 rad `theta_err` vs the forced frame is the expected I-f hang angle
+(rotor d-axis aligns with the current vector ≈ π/2 ahead of the forced frame,
+less ~0.27 rad of load angle), i.e. **the observer measures the true rotor
+angle**; estimator noise ≈ 0.11 rad. Hardware handoff is what the Sequencer's
+blend exists for.
+
+**Next:** close the loop on hardware — port the Sequencer+SpeedLoop into
+`mmc-fw-g474` as a `sensorless` drive mode (Stage F), ideally after a scripted
+locked-rotor/L measurement; then MS6 profiler.
+
 ## 2026-07-10 — session 3: G474 + IHM16M1 preliminary motor bring-up (MS5 pulled early)
 
 **Hardware:** NUCLEO-G474RE + X-NUCLEO-IHM16M1 (STSPIN830) + small BLDC on a

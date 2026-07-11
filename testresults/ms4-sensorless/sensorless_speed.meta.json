@@ -1,0 +1,16 @@
+{
+  "command": "mmc-host sim --scenario sensorless-speed --duration 2 --omega-e 800 --load 0.005 --load-step 0.03",
+  "description": "I-f startup, blend to the flux observer at 150 rad/s elec, speed loop to 800 rad/s elec, +0.03 N·m load step at 60% — angle estimate vs sim truth is the regression that MS4 lives by.",
+  "notes": [
+    "Sensorless: handoff at 0.425 s; post-handoff angle error max 0.227 rad / rms 0.079 rad; final speed estimate 800 rad/s elec (target 800)."
+  ],
+  "order": 0,
+  "params": {
+    "duration_s": 2.0,
+    "load_Nm": 0.004999999888241291,
+    "load_step_Nm": 0.029999999329447746,
+    "omega_e_rad_s": 800.0
+  },
+  "title": "Sensorless startup + load step",
+  "unix_time": 1783766520
+}

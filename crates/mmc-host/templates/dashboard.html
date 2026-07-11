@@ -129,6 +129,12 @@ const CHART_SPECS = [
   { title: "Mechanical speed", unit: "rpm", series: [
       { col: "omega_m", name: "speed", color: "var(--s1)", scale: RPM },
   ]},
+  { title: "Angle estimate error", unit: "rad", series: [
+      { col: "theta_err", name: "θ̂ − θ", color: "var(--s1)" },
+  ]},
+  { title: "Electrical speed estimate", unit: "rad/s", series: [
+      { col: "omega_est", name: "ω̂ (elec)", color: "var(--s1)" },
+  ]},
   { title: "Phase currents", unit: "A", series: [
       { col: "i_a", name: "i_a", color: "var(--s1)" },
       { col: "i_b", name: "i_b", color: "var(--s2)" },
@@ -141,7 +147,7 @@ const CHART_SPECS = [
   ]},
 ];
 /* High-frequency wrapped signals that chart as noise; the table still has them. */
-const NO_AUTOCHART = new Set(["t", "theta_e"]);
+const NO_AUTOCHART = new Set(["t", "theta_e", "theta_est"]);
 
 /* ---------- tiny DOM helpers (textContent only — labels are data) ---------- */
 function h(tag, cls, text) {

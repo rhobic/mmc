@@ -6,8 +6,8 @@ use crate::{cobs, crc::crc16};
 /// (`t_us` + mask + [`MAX_CHANNELS`] × f32).
 pub const MAX_PAYLOAD: usize = 8 + MAX_CHANNELS * 4;
 
-/// Cap on simultaneously streamed channels (mask bits 0..16).
-pub const MAX_CHANNELS: usize = 16;
+/// Cap on simultaneously streamed channels (mask bits 0..24).
+pub const MAX_CHANNELS: usize = 24;
 
 mod ty {
     pub const PING: u8 = 0x01;
