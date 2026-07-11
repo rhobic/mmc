@@ -32,7 +32,7 @@ mod deframe;
 mod msg;
 
 pub use deframe::Deframer;
-pub use msg::{encode, DeviceInfo, DeviceKind, FrameError, Message, TelemetryFrame};
+pub use msg::{encode, DeviceInfo, DeviceKind, DriveMode, FrameError, Message, TelemetryFrame};
 
 /// Protocol version reported in [`DeviceInfo`]; bump on breaking wire changes.
 pub const PROTO_VERSION: u8 = 1;

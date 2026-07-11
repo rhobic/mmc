@@ -11,6 +11,7 @@
 
 mod capture;
 mod link;
+mod panel;
 mod report;
 mod scenario;
 mod server;
@@ -40,6 +41,26 @@ enum Command {
     Serve(ServeArgs),
     /// Capture telemetry from a device (sim over TCP, hardware over serial).
     Capture(CaptureArgs),
+    /// Serve a local web control panel for live testing (drive modes, charts).
+    Panel(PanelArgs),
+}
+
+#[derive(clap::Args)]
+struct PanelArgs {
+    /// TCP address of a sim server (e.g. 127.0.0.1:7770).
+    #[arg(long, conflicts_with = "serial")]
+    addr: Option<String>,
+    /// Serial port of a hardware device (COMx, or `auto` for the first ST-Link).
+    #[arg(long)]
+    serial: Option<String>,
+    #[arg(long, default_value_t = 115_200)]
+    baud: u32,
+    /// Telemetry divider (device control periods per sample).
+    #[arg(long, default_value_t = 40)]
+    divider: u16,
+    /// HTTP bind address for the panel UI.
+    #[arg(long, default_value = "127.0.0.1:8484")]
+    http: String,
 }
 
 #[derive(clap::Args)]
@@ -76,6 +97,16 @@ struct CaptureArgs {
     /// Send a q-axis current step of this amplitude [A] at 10% of the capture.
     #[arg(long)]
     iq: Option<f32>,
+    /// Command a drive mode at 10% of the capture: `volt` (open-loop voltage)
+    /// or `if` (I-f current). Requires --amp and --hz; Off is sent at the end.
+    #[arg(long, value_parser = ["volt", "if"], conflicts_with = "iq")]
+    drive: Option<String>,
+    /// Drive amplitude: volts (--drive volt) or amps (--drive if).
+    #[arg(long, requires = "drive")]
+    amp: Option<f32>,
+    /// Drive electrical frequency [Hz].
+    #[arg(long, requires = "drive")]
+    hz: Option<f32>,
     /// Output CSV path.
     #[arg(long, default_value = "capture.csv")]
     out: PathBuf,
@@ -199,6 +230,23 @@ fn main() -> std::io::Result<()> {
                     .map(|s| s.to_string_lossy().replace('_', " "))
                     .unwrap_or_else(|| "capture".into())
             });
+            let drive = match args.drive.as_deref() {
+                None => None,
+                Some(kind) => {
+                    let (Some(amp), Some(hz)) = (args.amp, args.hz) else {
+                        eprintln!("--drive requires --amp and --hz");
+                        std::process::exit(2);
+                    };
+                    let omega_e = 2.0 * std::f32::consts::PI * hz;
+                    Some(match kind {
+                        "volt" => mmc_proto::DriveMode::OpenLoopVoltage {
+                            volts: amp,
+                            omega_e,
+                        },
+                        _ => mmc_proto::DriveMode::IfCurrent { amps: amp, omega_e },
+                    })
+                }
+            };
             let summary = capture::run(
                 &mut link,
                 &capture::CaptureCfg {
@@ -206,6 +254,7 @@ fn main() -> std::io::Result<()> {
                     mask: args.mask,
                     duration: args.duration,
                     iq: args.iq,
+                    drive,
                     title: &title,
                     description: "Ad-hoc telemetry capture.",
                     order: 100,
@@ -220,6 +269,23 @@ fn main() -> std::io::Result<()> {
                 args.out.display()
             );
             Ok(())
+        }
+        Command::Panel(args) => {
+            let link = match (&args.addr, &args.serial) {
+                (Some(addr), _) => link::Link::tcp(addr)?,
+                (None, Some(port)) => link::Link::serial(port, args.baud)?,
+                (None, None) => {
+                    eprintln!("pass --addr host:port (sim) or --serial COMx|auto (hardware)");
+                    std::process::exit(2);
+                }
+            };
+            panel::run(
+                link,
+                &panel::PanelCfg {
+                    http: args.http.clone(),
+                    divider: args.divider,
+                },
+            )
         }
     }
 }
@@ -324,6 +390,7 @@ fn suite_tcp_capture(dir: &std::path::Path) -> std::io::Result<()> {
             mask: mmc_proto::channel::ALL,
             duration: 1.0,
             iq: Some(0.5),
+            drive: None,
             title: "TCP live capture — 0.5 A step",
             description: "End-to-end protocol regression: the sim runs behind the mmc-proto \
                           TCP server, the host connects like it would to hardware, streams \

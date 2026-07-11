@@ -129,6 +129,11 @@ const CHART_SPECS = [
   { title: "Mechanical speed", unit: "rpm", series: [
       { col: "omega_m", name: "speed", color: "var(--s1)", scale: RPM },
   ]},
+  { title: "Phase currents", unit: "A", series: [
+      { col: "i_a", name: "i_a", color: "var(--s1)" },
+      { col: "i_b", name: "i_b", color: "var(--s2)" },
+      { col: "i_c", name: "i_c", color: "var(--s3)" },
+  ]},
   { title: "PWM duty cycles", unit: "0–1", series: [
       { col: "duty_a", name: "phase a", color: "var(--s1)" },
       { col: "duty_b", name: "phase b", color: "var(--s2)" },

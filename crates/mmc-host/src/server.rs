@@ -196,6 +196,7 @@ fn telemetry(
     i_ref: Dq,
     mask: u32,
 ) -> mmc_proto::TelemetryFrame {
+    let i_abc = rig.motor.phase_currents();
     let mut values = [0f32; channel::COUNT];
     let mut n = 0;
     for id in 0..channel::COUNT as u8 {
@@ -214,6 +215,10 @@ fn telemetry(
             channel::OMEGA_M => rig.motor.omega_m,
             channel::THETA_E => rig.motor.theta_e(),
             channel::VBUS => rig.v_bus,
+            channel::I_A => i_abc.a,
+            channel::I_B => i_abc.b,
+            channel::I_C => i_abc.c,
+            channel::STATE => 1.0, // the sim's stage is always "running"
             _ => 0.0,
         };
         n += 1;

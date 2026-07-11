@@ -18,6 +18,7 @@ for the running log.
 | `mmc-sim` | Virtual PMSM + inverter + sensors, implementing the `mmc-hal` traits |
 | `mmc-host` | Host CLI: sim scenarios, TCP sim server, telemetry capture (TCP/serial), dashboard |
 | `mmc-fw-g0b1` | NUCLEO-G0B1RE protocol firmware (Cortex-M0+, embassy) — outside the host workspace |
+| `mmc-fw-g474` | NUCLEO-G474RE + X-NUCLEO-IHM16M1 motor firmware: TIM1 PWM, injected-ADC shunt sensing, open-loop/I-f drive, protection trips |
 
 ## Quickstart
 
@@ -40,6 +41,23 @@ cargo run -p mmc-host -- capture --addr 127.0.0.1:7770 --iq 0.5 --out step.csv
 # NUCLEO-G0B1RE running mmc-fw-g0b1 (flash: cd crates/mmc-fw-g0b1 && cargo run --release)
 cargo run -p mmc-host -- capture --serial auto --baud 1000000 --iq 1.0 --out g0b1.csv
 ```
+
+## Motor bring-up (G474 + IHM16M1)
+
+`mmc-fw-g474` drives the X-NUCLEO-IHM16M1 (STSPIN830) power stage; every test
+is instrumented through the same protocol. The capture tool can command a
+drive mid-recording, and `mmc-host panel` serves a local web control panel
+(mode buttons, live charts, STOP, watchdog auto-off):
+
+```sh
+cd crates/mmc-fw-g474 && cargo run --release       # flash via probe-rs
+cargo run -p mmc-host -- panel --serial auto --baud 1000000   # http://127.0.0.1:8484
+cargo run -p mmc-host -- capture --serial auto --baud 1000000 \
+    --drive if --amp 0.3 --hz 15 --duration 6 --out testresults/ms5-g474-bringup/d_if_current.csv
+```
+
+Firmware safety: zero-current calibration at boot, |i| > 1.5 A / VBUS-window /
+gate-driver-fault trips, 2 s host-silence deadman, on-device amplitude clamps.
 
 ## Test results
 

@@ -125,9 +125,14 @@ sync — normal for motor control in any language.
   `AngleEstimator`, I-f open-loop startup and handoff, sensorless speed loop.
   Regression tests compare estimated angle/speed against sim truth across load
   and speed sweeps.
-- **MS5 — G474 bring-up, sensorless**: clocks, TIM1 PWM + injected ADC current
-  sense, zero-current calibration, open-loop spin; measure R/L via locked-rotor
-  steps; close the loop — sensorless torque and speed on the real motor.
+- **MS5 — G474 bring-up, sensorless** 🟡 *(hardware layer done early,
+  2026-07-10)*: clocks (170 MHz), TIM1 center-aligned PWM + injected-ADC shunt
+  sensing on the IHM16M1, zero-current calibration, protection trips
+  (overcurrent / VBUS / gate fault / host deadman), open-loop spin **✅ and
+  I-f closed current loop ✅ verified on the real motor** (0.3 A tracking,
+  7 mA RMS). A manual web control panel (`mmc-host panel`) exercises it live.
+  *Remaining for MS5 proper:* R/L measurement via locked-rotor steps, then the
+  sensorless observer closes the loop (after MS4 proves it in sim).
 - **MS6 — Profiler/auto-tune**: full test-sequence execution + Python system-ID
   (flux linkage, inertia, friction) + gain calculation and writeback.
 - **MS7 — Encoder config + position control**: encoder as second

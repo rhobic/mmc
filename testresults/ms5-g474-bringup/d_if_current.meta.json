@@ -1,0 +1,16 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 20 --duration 6",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 6019 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 20,
+    "drive": "IfCurrent { amps: 0.3, omega_e: 94.24778 }",
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "Stage D — I-f closed current loop, 0.3 A @ 15 Hz elec",
+  "unix_time": 1783734661
+}

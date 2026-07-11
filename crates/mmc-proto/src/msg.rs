@@ -15,11 +15,48 @@ mod ty {
     pub const SET_TELEMETRY: u8 = 0x03;
     pub const STREAM: u8 = 0x04;
     pub const SET_IQ_REF: u8 = 0x05;
+    pub const SET_DRIVE: u8 = 0x06;
     pub const PONG: u8 = 0x81;
     pub const INFO: u8 = 0x82;
     pub const TELEMETRY: u8 = 0x83;
     pub const ACK: u8 = 0x84;
     pub const NAK: u8 = 0x85;
+}
+
+/// Power-stage drive request. `Off` is always accepted; a faulted device NAKs
+/// everything else until it sees `Off` (the fault re-arm).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum DriveMode {
+    /// Power stage disabled (outputs high-impedance).
+    Off,
+    /// Open-loop rotating voltage vector: `amplitude` volts at `omega_e`
+    /// rad/s electrical. The first spin of a bring-up.
+    OpenLoopVoltage { volts: f32, omega_e: f32 },
+    /// I-f drive: closed current loop on a forced rotating angle —
+    /// `amplitude` amps q-axis at `omega_e` rad/s electrical.
+    IfCurrent { amps: f32, omega_e: f32 },
+}
+
+impl DriveMode {
+    fn to_wire(self) -> (u8, f32, f32) {
+        match self {
+            DriveMode::Off => (0, 0.0, 0.0),
+            DriveMode::OpenLoopVoltage { volts, omega_e } => (1, volts, omega_e),
+            DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
+        }
+    }
+
+    fn from_wire(mode: u8, amp: f32, omega_e: f32) -> Result<Self, FrameError> {
+        match mode {
+            0 => Ok(DriveMode::Off),
+            1 => Ok(DriveMode::OpenLoopVoltage {
+                volts: amp,
+                omega_e,
+            }),
+            2 => Ok(DriveMode::IfCurrent { amps: amp, omega_e }),
+            _ => Err(FrameError::Malformed),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -134,6 +171,8 @@ pub enum Message {
     SetIqRef {
         iq: f32,
     },
+    /// Power-stage drive request (hardware bring-up and open-loop testing).
+    SetDrive(DriveMode),
     Ack {
         of: u8,
     },
@@ -211,6 +250,12 @@ pub fn parse(raw: &[u8]) -> Result<Message, FrameError> {
             enable: r.u8()? != 0,
         },
         ty::SET_IQ_REF => Message::SetIqRef { iq: r.f32()? },
+        ty::SET_DRIVE => {
+            let mode = r.u8()?;
+            let amp = r.f32()?;
+            let omega_e = r.f32()?;
+            Message::SetDrive(DriveMode::from_wire(mode, amp, omega_e)?)
+        }
         ty::ACK => Message::Ack { of: r.u8()? },
         ty::NAK => Message::Nak {
             of: r.u8()?,
@@ -269,6 +314,13 @@ fn serialize(msg: &Message, raw: &mut [u8]) -> Option<usize> {
             w.u8(ty::SET_IQ_REF)?;
             w.f32(*iq)?;
         }
+        Message::SetDrive(mode) => {
+            let (m, amp, omega_e) = mode.to_wire();
+            w.u8(ty::SET_DRIVE)?;
+            w.u8(m)?;
+            w.f32(amp)?;
+            w.f32(omega_e)?;
+        }
         Message::Ack { of } => {
             w.u8(ty::ACK)?;
             w.u8(*of)?;
@@ -301,6 +353,7 @@ impl Message {
             Message::SetTelemetry { .. } => ty::SET_TELEMETRY,
             Message::Stream { .. } => ty::STREAM,
             Message::SetIqRef { .. } => ty::SET_IQ_REF,
+            Message::SetDrive(_) => ty::SET_DRIVE,
             Message::Ack { .. } => ty::ACK,
             Message::Nak { .. } => ty::NAK,
             Message::Telemetry(_) => ty::TELEMETRY,
@@ -400,6 +453,15 @@ mod tests {
         });
         round_trip(Message::Stream { enable: true });
         round_trip(Message::SetIqRef { iq: -1.25 });
+        round_trip(Message::SetDrive(DriveMode::Off));
+        round_trip(Message::SetDrive(DriveMode::OpenLoopVoltage {
+            volts: 1.5,
+            omega_e: 125.6,
+        }));
+        round_trip(Message::SetDrive(DriveMode::IfCurrent {
+            amps: 0.4,
+            omega_e: -62.8,
+        }));
         round_trip(Message::Ack { of: 0x03 });
         round_trip(Message::Nak { of: 0x05, err: 2 });
         round_trip(Message::Telemetry(

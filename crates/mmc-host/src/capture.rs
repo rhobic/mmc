@@ -6,7 +6,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mmc_proto::{channel, DeviceInfo, Message};
+use mmc_proto::{channel, DeviceInfo, DriveMode, Message};
 
 use crate::link::Link;
 
@@ -20,6 +20,9 @@ pub struct CaptureCfg<'a> {
     /// If set, a q-axis current step to this value is sent at 10% of the
     /// capture, so the trace records a live step response.
     pub iq: Option<f32>,
+    /// If set, this drive mode is commanded at 10% of the capture and
+    /// `DriveMode::Off` is always sent at the end (power-stage bring-up).
+    pub drive: Option<DriveMode>,
     pub title: &'a str,
     pub description: &'a str,
     /// Dashboard sort key within the group.
@@ -70,23 +73,37 @@ pub fn run(link: &mut Link, cfg: &CaptureCfg, out: &Path) -> std::io::Result<Cap
     let start_stream = Message::Stream { enable: true };
     link.request(&start_stream, ack(&start_stream), t)?;
 
-    // Collect. The step reference (if any) goes out 10% into the capture.
+    // Collect. The step/drive command (if any) goes out 10% into the capture.
+    let step_msg = match (cfg.iq, cfg.drive) {
+        (Some(iq), _) => Some(Message::SetIqRef { iq }),
+        (None, Some(mode)) => Some(Message::SetDrive(mode)),
+        (None, None) => None,
+    };
     let started = Instant::now();
     let capture_len = Duration::from_secs_f32(cfg.duration);
     let step_at = capture_len.mul_f32(0.1);
-    let mut step_sent = cfg.iq.is_none();
+    let mut step_sent = step_msg.is_none();
     let mut frames: Vec<(u32, u32, Vec<f32>)> = Vec::new();
+    let mut last_ping = Instant::now();
     while started.elapsed() < capture_len {
         if !step_sent && started.elapsed() >= step_at {
-            link.send(&Message::SetIqRef {
-                iq: cfg.iq.unwrap(),
-            })?;
+            link.send(step_msg.as_ref().unwrap())?;
             step_sent = true;
+        }
+        // Keep-alive so the device's deadman knows the host is still here
+        // (the pongs are skipped by the telemetry match below).
+        if last_ping.elapsed() >= Duration::from_millis(500) {
+            link.send(&Message::Ping { nonce: 0 })?;
+            last_ping = Instant::now();
         }
         if let Some(Message::Telemetry(f)) = link.recv(Duration::from_millis(50))? {
             frames.push((f.t_us, f.mask, f.values().to_vec()));
         }
         // Acks and anything else mid-stream are simply skipped.
+    }
+    // Safety before tidiness: the power stage goes off first.
+    if cfg.drive.is_some() {
+        link.send(&Message::SetDrive(DriveMode::Off))?;
     }
     link.send(&Message::Stream { enable: false })?;
     if cfg.iq.is_some() {
@@ -173,6 +190,7 @@ fn write_meta(
             "divider": cfg.divider,
             "duration_s": cfg.duration,
             "iq_A": cfg.iq,
+            "drive": cfg.drive.map(|d| format!("{d:?}")),
         },
         "notes": notes,
     });

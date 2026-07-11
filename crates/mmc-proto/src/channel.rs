@@ -16,13 +16,20 @@ pub const DUTY_C: u8 = 7;
 pub const OMEGA_M: u8 = 8;
 pub const THETA_E: u8 = 9;
 pub const VBUS: u8 = 10;
+/// Raw phase currents (hardware shunt measurements).
+pub const I_A: u8 = 11;
+pub const I_B: u8 = 12;
+pub const I_C: u8 = 13;
+/// Drive state: 0 = off, 1 = running, 2 = overcurrent fault, 3 = gate-driver
+/// fault, 4 = bus-voltage fault.
+pub const STATE: u8 = 14;
 
-pub const COUNT: usize = 11;
+pub const COUNT: usize = 15;
 
 /// Wire names, indexed by channel id; used as CSV headers by the host.
 pub const NAMES: [&str; COUNT] = [
     "iq_ref", "i_d", "i_q", "v_d", "v_q", "duty_a", "duty_b", "duty_c", "omega_m", "theta_e",
-    "vbus",
+    "vbus", "i_a", "i_b", "i_c", "state",
 ];
 
 /// Selection mask with every defined channel enabled.

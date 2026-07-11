@@ -1,0 +1,29 @@
+[package]
+name = "mmc-fw-g474"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "STM32G474RE + X-NUCLEO-IHM16M1 motor bring-up firmware: FOC hardware layer + mmc-proto over the ST-Link VCP"
+
+# Detached from the root workspace: always builds for thumbv7em-none-eabihf
+# (see .cargo/config.toml).
+[workspace]
+
+[dependencies]
+mmc-core = { path = "../mmc-core" }
+mmc-proto = { path = "../mmc-proto" }
+
+embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
+embassy-futures = "0.1.2"
+embassy-stm32 = { version = "0.6.0", features = ["stm32g474re", "memory-x", "rt", "time-driver-any", "unstable-pac", "dual-bank"] }
+embassy-sync = "0.8.0"
+embassy-time = { version = "0.5.1", features = ["tick-hz-1_000_000"] }
+
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7.5"
+panic-halt = "1.0.0"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 2

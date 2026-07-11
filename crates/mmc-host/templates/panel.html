@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mmc control panel</title>
+<style>
+  :root {
+    --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+    --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
+    --s1:#2a78d6; --s2:#1baf7a; --s3:#eda100; --ref:#898781;
+    --good:#0ca30c; --critical:#d03b3b; --warning:#fab219;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
+      --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
+      --s1:#3987e5; --s2:#199e70; --s3:#c98500;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--page); color:var(--ink);
+         font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:1160px; margin:0 auto; padding:18px 20px 40px; }
+  h1 { font-size:18px; font-weight:650; margin:0; }
+  .sub { color:var(--muted); font-size:12.5px; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:stretch; margin-top:14px; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:14px 18px; }
+  .tile { min-width:120px; }
+  .tile .tl { color:var(--ink2); font-size:12px; }
+  .tile .tv { font-size:22px; font-weight:600; margin-top:1px; }
+  .tile .tv .tu { font-size:12px; font-weight:500; color:var(--ink2); margin-left:2px; }
+  .chip { display:inline-block; padding:2px 12px; border-radius:999px; font-weight:650; font-size:13px;
+          border:1px solid var(--border); }
+  .chip.off  { color:var(--ink2); }
+  .chip.run  { color:#fff; background:var(--good); border-color:transparent; }
+  .chip.cal  { color:var(--ink2); }
+  .chip.fault{ color:#fff; background:var(--critical); border-color:transparent; }
+  .controls { display:flex; flex-wrap:wrap; gap:14px; align-items:flex-end; }
+  .field { display:flex; flex-direction:column; gap:3px; }
+  .field label { color:var(--ink2); font-size:12px; }
+  .field input, .field select {
+    width:110px; padding:6px 8px; font:inherit; color:var(--ink);
+    background:var(--page); border:1px solid var(--axis); border-radius:8px;
+  }
+  button { font:inherit; font-weight:600; padding:8px 16px; border-radius:9px;
+           border:1px solid var(--axis); background:var(--surface); color:var(--ink); cursor:pointer; }
+  button:hover { border-color:var(--ink2); }
+  button.primary { background:var(--s1); border-color:transparent; color:#fff; }
+  button.stop { background:var(--critical); border-color:transparent; color:#fff;
+                font-size:16px; padding:10px 26px; }
+  .charts { display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:14px 18px; margin-top:14px; }
+  .chart h4 { font-size:13px; font-weight:600; margin:0 0 1px; }
+  .chart h4 .unit { color:var(--muted); font-weight:500; }
+  .legend { display:flex; gap:12px; color:var(--ink2); font-size:12px; margin-bottom:2px; }
+  .legend .key { display:inline-block; width:13px; border-top:2.5px solid; border-radius:2px;
+                 vertical-align:middle; margin-right:4px; }
+  .legend .key.dashed { border-top-style: dashed; }
+  .chart svg { width:100%; height:auto; display:block; }
+  #faultbar { display:none; margin-top:12px; padding:10px 14px; border-radius:10px;
+              background:var(--critical); color:#fff; font-weight:600; }
+  .hint { color:var(--muted); font-size:12px; margin-top:10px; }
+</style>
+</head>
+<body>
+<main>
+  <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+    <h1>mmc — control panel</h1>
+    <span class="sub" id="devline">connecting…</span>
+  </div>
+
+  <div id="faultbar"></div>
+
+  <div class="row">
+    <div class="card tile"><div class="tl">State</div><div class="tv"><span class="chip off" id="state">—</span></div></div>
+    <div class="card tile"><div class="tl">Bus voltage</div><div class="tv" id="vbus">—<span class="tu">V</span></div></div>
+    <div class="card tile"><div class="tl">Speed</div><div class="tv" id="rpm">—<span class="tu">rpm</span></div></div>
+    <div class="card tile"><div class="tl">i_q</div><div class="tv" id="iq">—<span class="tu">A</span></div></div>
+    <div class="card tile"><div class="tl">i peak</div><div class="tv" id="ipk">—<span class="tu">A</span></div></div>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div class="controls">
+      <button class="stop" id="stop">■ STOP</button>
+      <div class="field"><label>Mode</label>
+        <select id="mode">
+          <option value="volt">Open-loop voltage</option>
+          <option value="if">I-f current</option>
+        </select>
+      </div>
+      <div class="field"><label id="amplabel">Amplitude [V]</label>
+        <input id="amp" type="number" step="0.1" min="0" max="3" value="0.5"></div>
+      <div class="field"><label>Frequency [Hz elec]</label>
+        <input id="hz" type="number" step="1" min="-300" max="300" value="15"></div>
+      <button class="primary" id="apply">Apply drive</button>
+      <div class="field"><label>i_q target [A] (I-f, live)</label>
+        <input id="iqset" type="number" step="0.05" min="-1" max="1" value="0.2"></div>
+      <button id="iqbtn">Set i_q</button>
+    </div>
+    <p class="hint">Space bar = STOP. Firmware trips: |i| &gt; 1.5 A, VBUS &gt; 30 V, driver fault,
+      2 s host silence. Amplitude is clamped on-device (3 V / 1 A). After a fault, STOP re-arms.</p>
+  </div>
+
+  <div class="charts">
+    <div class="chart" id="c-phase"></div>
+    <div class="chart" id="c-dq"></div>
+    <div class="chart" id="c-speed"></div>
+    <div class="chart" id="c-vbus"></div>
+  </div>
+</main>
+<script>
+"use strict";
+const STATE_NAMES = { 0:["off","chip off"], 1:["running","chip run"], 2:["FAULT: overcurrent","chip fault"],
+                      3:["FAULT: gate driver","chip fault"], 4:["FAULT: bus voltage","chip fault"], 5:["calibrating","chip cal"] };
+const WINDOW_S = 5.0;
+let columns = [], buf = [], lastT = -1;
+const ci = n => columns.indexOf(n);
+
+function post(o) { fetch("/cmd", { method: "POST", body: JSON.stringify(o) }); }
+function stop() { post({ cmd: "drive", mode: "off" }); }
+document.getElementById("stop").onclick = stop;
+window.addEventListener("keydown", e => { if (e.code === "Space") { e.preventDefault(); stop(); } });
+document.getElementById("apply").onclick = () => {
+  post({ cmd: "drive", mode: document.getElementById("mode").value,
+         amp: +document.getElementById("amp").value, hz: +document.getElementById("hz").value });
+};
+document.getElementById("iqbtn").onclick = () => post({ cmd: "iq", iq: +document.getElementById("iqset").value });
+document.getElementById("mode").onchange = () => {
+  document.getElementById("amplabel").textContent =
+    document.getElementById("mode").value === "if" ? "Amplitude [A]" : "Amplitude [V]";
+};
+
+function h(tag, cls, text) {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (text !== undefined) el.textContent = text;
+  return el;
+}
+const SVGNS = "http://www.w3.org/2000/svg";
+function s(tag, attrs) {
+  const el = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return el;
+}
+const fmt = v => !isFinite(v) ? "–" : Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 10 ? v.toFixed(1) : v.toFixed(2);
+
+/* rolling chart: title, unit, series [{col,name,color,dash,scale}] */
+function chart(el, title, unit, series) {
+  return { el, title, unit, series };
+}
+const CHARTS = [
+  chart(document.getElementById("c-phase"), "Phase currents", "A", [
+    { col: "i_a", name: "i_a", color: "var(--s1)" },
+    { col: "i_b", name: "i_b", color: "var(--s2)" },
+    { col: "i_c", name: "i_c", color: "var(--s3)" }]),
+  chart(document.getElementById("c-dq"), "dq currents", "A", [
+    { col: "i_q", name: "i_q", color: "var(--s1)" },
+    { col: "i_d", name: "i_d", color: "var(--s2)" },
+    { col: "iq_ref", name: "i_q target", color: "var(--ref)", dash: "5 4" }]),
+  chart(document.getElementById("c-speed"), "Speed", "rpm", [
+    { col: "omega_m", name: "speed", color: "var(--s1)", scale: 60 / (2 * Math.PI) }]),
+  chart(document.getElementById("c-vbus"), "Bus voltage", "V", [
+    { col: "vbus", name: "vbus", color: "var(--s1)" }]),
+];
+
+function renderChart(c) {
+  const W = 560, H = 190, ml = 46, mr = 10, mt = 8, mb = 20;
+  const pw = W - ml - mr, ph = H - mt - mb;
+  const el = c.el;
+  el.textContent = "";
+  const title = h("h4", null, c.title + " ");
+  title.appendChild(h("span", "unit", "[" + c.unit + "]"));
+  el.appendChild(title);
+  if (c.series.length >= 2) {
+    const lg = h("div", "legend");
+    for (const sr of c.series) {
+      const item = h("span");
+      const key = h("span", "key" + (sr.dash ? " dashed" : ""));
+      key.style.borderTopColor = sr.color;
+      item.appendChild(key);
+      item.appendChild(document.createTextNode(sr.name));
+      lg.appendChild(item);
+    }
+    el.appendChild(lg);
+  }
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}` });
+  el.appendChild(svg);
+  if (!buf.length) return;
+
+  const tEnd = buf[buf.length - 1][0], tStart = tEnd - WINDOW_S;
+  const rows = buf;
+  let lo = Infinity, hi = -Infinity;
+  const cols = c.series.map(sr => ({ i: ci(sr.col), k: sr.scale || 1 }));
+  for (const r of rows) for (const cc of cols) {
+    if (cc.i < 1) continue;
+    const v = r[cc.i] * cc.k;
+    if (v < lo) lo = v; if (v > hi) hi = v;
+  }
+  if (!isFinite(lo)) { lo = 0; hi = 1; }
+  lo = Math.min(lo, 0); hi = Math.max(hi, 0);
+  const pad = (hi - lo || 1) * 0.08; lo -= pad; hi += pad;
+  const X = t => ml + (t - tStart) / WINDOW_S * pw;
+  const Y = v => mt + (hi - v) / (hi - lo) * ph;
+
+  for (const v of [lo + pad, 0, hi - pad]) {
+    svg.append(s("line", { x1: ml, x2: ml + pw, y1: Y(v), y2: Y(v),
+      style: `stroke:var(${v === 0 ? "--axis" : "--grid"});stroke-width:1` }));
+    const lbl = s("text", { x: ml - 6, y: Y(v) + 3.5, "text-anchor": "end",
+      style: "fill:var(--muted);font-size:11px;font-variant-numeric:tabular-nums" });
+    lbl.textContent = fmt(v);
+    svg.append(lbl);
+  }
+  const xt = s("text", { x: ml + pw, y: H - 6, "text-anchor": "end",
+    style: "fill:var(--muted);font-size:11px" });
+  xt.textContent = "last " + WINDOW_S + " s";
+  svg.append(xt);
+
+  for (let si = 0; si < c.series.length; si++) {
+    const sr = c.series[si], cc = cols[si];
+    if (cc.i < 1) continue;
+    let d = "", pen = false;
+    for (const r of rows) {
+      if (r[0] < tStart) continue;
+      d += (pen ? "L" : "M") + X(r[0]).toFixed(1) + " " + Y(r[cc.i] * cc.k).toFixed(1);
+      pen = true;
+    }
+    svg.append(s("path", { d, fill: "none",
+      style: `stroke:${sr.color};stroke-width:2;stroke-linecap:round;stroke-linejoin:round` +
+             (sr.dash ? `;stroke-dasharray:${sr.dash}` : "") }));
+  }
+}
+
+function renderTiles() {
+  if (!buf.length) return;
+  const last = buf[buf.length - 1];
+  const v = n => { const i = ci(n); return i >= 1 ? last[i] : NaN; };
+  const st = v("state");
+  const [name, cls] = STATE_NAMES[st] || ["?", "chip off"];
+  const chip = document.getElementById("state");
+  chip.textContent = name; chip.className = cls;
+  const fb = document.getElementById("faultbar");
+  if (st >= 2 && st <= 4) {
+    fb.style.display = "block";
+    fb.textContent = name + " — outputs are off. Press STOP to re-arm, then re-apply.";
+  } else fb.style.display = "none";
+  document.getElementById("vbus").childNodes[0].nodeValue = fmt(v("vbus"));
+  document.getElementById("rpm").childNodes[0].nodeValue = fmt(v("omega_m") * 60 / (2 * Math.PI));
+  document.getElementById("iq").childNodes[0].nodeValue = fmt(v("i_q"));
+  const ipk = Math.max(Math.abs(v("i_a")), Math.abs(v("i_b")), Math.abs(v("i_c")));
+  document.getElementById("ipk").childNodes[0].nodeValue = fmt(ipk);
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/data?since=" + lastT);
+    const d = await r.json();
+    columns = d.columns;
+    for (const row of d.rows) buf.push(row);
+    if (d.rows.length) lastT = buf[buf.length - 1][0];
+    const cutoff = (buf.length ? buf[buf.length - 1][0] : 0) - WINDOW_S - 1;
+    while (buf.length && buf[0][0] < cutoff) buf.shift();
+    document.getElementById("devline").textContent =
+      d.device + "  ·  " + d.frames.toLocaleString() + " frames" +
+      (d.errors ? "  ·  " + d.errors + " rejected" : "");
+    renderTiles();
+    for (const c of CHARTS) renderChart(c);
+  } catch (e) {
+    document.getElementById("devline").textContent = "connection lost — retrying…";
+  }
+  setTimeout(poll, 150);
+}
+poll();
+</script>
+</body>
+</html>

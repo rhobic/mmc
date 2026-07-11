@@ -3,6 +3,66 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-07-10 — session 3: G474 + IHM16M1 preliminary motor bring-up (MS5 pulled early)
+
+**Hardware:** NUCLEO-G474RE + X-NUCLEO-IHM16M1 (STSPIN830) + small BLDC on a
+12 V supply, pre-validated sensorless with ST firmware. Schematics + a working
+CubeMX config live in `hw/`.
+
+**Pin map extracted from schematics** (see `mmc-fw-g474` doc header for the
+full table): TIM1 CH1-3 on PA8-10 → STSPIN IN U/V/W; EN on PB13-15; STBY PB5;
+shunt amps (TSV994 ×2, 0.33 Ω, 0.504 V/A around a 1.558 V offset) on
+PA1/PB1/PB0 = ADC1 IN2/12/15; VBUS ÷16 on PA0 = IN1; VCP = LPUART1 PA2/PA3;
+current-ref PB4 held high = weakest STSPIN limit (≈1.5 A). EN_FAULT is read on
+**both PA11 and PB12 with internal pull-ups** — the shield populates different
+0R routes per Nucleo variant and a floating pin false-faulted (found the hard
+way).
+
+**Landed:**
+- `mmc-proto`: channels `i_a/i_b/i_c` + `state` (off/run/fault-oc/fault-drv/
+  fault-vbus/cal), `SetDrive` command (Off / OpenLoopVoltage / IfCurrent).
+- `mmc-fw-g474`: 170 MHz, 20 kHz center-aligned TIM1, injected ADC sequence
+  (iU,iV,iW,VBUS) triggered at the counter peak via CC4 (JQDIS! the G4
+  injected queue silently eats JSQR otherwise), control loop in the JEOS ISR,
+  zero-current calibration at boot, software trips (|i|>1.5 A ×2 samples,
+  VBUS window, gate fault, 2 s host-silence deadman), slew-limited open-loop
+  voltage and I-f drives, `ISR_MAX_CYCLES` DWT diagnostic readable by probe.
+- `mmc-host panel`: local web control panel (mode buttons, amplitude/Hz, live
+  charts, STOP + space bar, browser-absent auto-off watchdog) over one `Link`
+  — works against sim TCP and hardware serial identically. `capture` gained
+  `--drive volt|if --amp --hz` and keep-alive pings.
+- Staged bring-up, all curated on the dashboard (`ms5-g474-bringup/`):
+  A: VBUS 12.06 V ±30 mV, zero-current σ ≈ 3 mA. B: stage live at 50/50/50,
+  currents unchanged. C: open-loop 0.5 V @ 15 Hz — motor spins 129 rpm,
+  i_d = +0.50 A ⇒ R ≈ 1.0 Ω and current-sense sign/scale confirmed.
+  D: **I-f closed current loop — i_q 0.300 A on target, 7 mA RMS error,
+  i_d = 0.000** at 129 rpm forced.
+
+**The big find — libm trig is f64-emulated:** `libm::sinf/cosf` reduce
+arguments through f64 arithmetic; on single-precision FPUs (M4F!) that is
+soft-float and cost **~100 µs per control tick** — the ISR ate the whole CPU,
+starved both UART tasks, the deadman fired, and I-f "died" 2 s after engage.
+Diagnosed live via probe-rs memory reads (`CONTROL_TICKS` advancing,
+`LAST_RX_TICK` frozen, `ISR_MAX_CYCLES` = 17 052) plus a duty-discard bisect.
+Fix: fast f32 polynomial `sin_cos` + `%`-free `wrap_angle` in `mmc-core::math`
+(err ≤ 3e-5, tested against libm) → ISR worst-case **13.9 µs**; 1 kHz
+telemetry now lossless in every mode (was 43 % loss even in volt mode). This
+also explains why the G0B1 needed its 64 MHz PLL, and it retroactively fixed
+the earlier "frame loss mystery."
+
+**Also fixed:** capture keep-alive pings (device deadman used to end long
+drive captures at exactly 2 s); stale omega telemetry after stop; sim serves
+the new channels.
+
+**Open items:** TIM1_BKIN2 hardware break on PA11 (ST's ioc does this; we poll
+in software), table-CRC16 if more UART headroom is ever needed, `libm::sqrtf`
+is also software (≈2 calls/tick, tolerable), pole-pair count is assumed 7 for
+the rpm channel until the profiler measures it.
+
+**Next:** MS4 — flux observer + PLL in sim, then close the loop sensorless on
+this hardware (MS5 completion); R/L measurement can now be scripted through
+`SetDrive` + captures.
+
 ## 2026-07-10 — session 2: cleanup, dashboard, MS3 kickoff
 
 **Context:** previous session crashed after committing the MS1+MS2 baseline

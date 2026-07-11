@@ -39,3 +39,13 @@ jobs:
           targets: thumbv6m-none-eabi
       - run: cargo build --release
         working-directory: crates/mmc-fw-g0b1
+
+  firmware-g474:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - run: cargo build --release
+        working-directory: crates/mmc-fw-g474
