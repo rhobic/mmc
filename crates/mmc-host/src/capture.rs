@@ -23,6 +23,9 @@ pub struct CaptureCfg<'a> {
     /// If set, this drive mode is commanded at 10% of the capture and
     /// `DriveMode::Off` is always sent at the end (power-stage bring-up).
     pub drive: Option<DriveMode>,
+    /// If set, a second drive command at 60% of the capture (e.g. a speed
+    /// retarget for a step-response trace).
+    pub drive_step: Option<DriveMode>,
     pub title: &'a str,
     pub description: &'a str,
     /// Dashboard sort key within the group.
@@ -82,13 +85,19 @@ pub fn run(link: &mut Link, cfg: &CaptureCfg, out: &Path) -> std::io::Result<Cap
     let started = Instant::now();
     let capture_len = Duration::from_secs_f32(cfg.duration);
     let step_at = capture_len.mul_f32(0.1);
+    let step2_at = capture_len.mul_f32(0.6);
     let mut step_sent = step_msg.is_none();
+    let mut step2_sent = cfg.drive_step.is_none();
     let mut frames: Vec<(u32, u32, Vec<f32>)> = Vec::new();
     let mut last_ping = Instant::now();
     while started.elapsed() < capture_len {
         if !step_sent && started.elapsed() >= step_at {
             link.send(step_msg.as_ref().unwrap())?;
             step_sent = true;
+        }
+        if !step2_sent && started.elapsed() >= step2_at {
+            link.send(&Message::SetDrive(cfg.drive_step.unwrap()))?;
+            step2_sent = true;
         }
         // Keep-alive so the device's deadman knows the host is still here
         // (the pongs are skipped by the telemetry match below).
@@ -191,6 +200,7 @@ fn write_meta(
             "duration_s": cfg.duration,
             "iq_A": cfg.iq,
             "drive": cfg.drive.map(|d| format!("{d:?}")),
+            "drive_step": cfg.drive_step.map(|d| format!("{d:?}")),
         },
         "notes": notes,
     });

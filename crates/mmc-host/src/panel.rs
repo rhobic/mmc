@@ -240,6 +240,10 @@ fn parse_cmd(v: &serde_json::Value) -> Option<Message> {
                     amps: f("amp")?,
                     omega_e: f("hz")? * core::f32::consts::TAU,
                 },
+                "sl" => DriveMode::Sensorless {
+                    amps: f("amp")?,
+                    omega_e: f("hz")? * core::f32::consts::TAU,
+                },
                 _ => return None,
             };
             Some(Message::SetDrive(mode))

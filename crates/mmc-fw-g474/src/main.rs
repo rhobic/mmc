@@ -1,10 +1,12 @@
 //! STM32G474RE + X-NUCLEO-IHM16M1 (STSPIN830) motor bring-up firmware.
 //!
-//! MS5 preliminary hardware layer: center-aligned TIM1 PWM, PWM-synchronized
+//! MS5 hardware layer: center-aligned TIM1 PWM, PWM-synchronized
 //! injected-ADC shunt current sensing, zero-current calibration, software
-//! protection trips, and open-loop / I-f drive modes — all instrumented over
-//! `mmc-proto` on the ST-Link VCP so every test is a dashboard capture.
-//! True sensorless (flux observer) arrives with MS4/MS6.
+//! protection trips, and open-loop / I-f / **closed-loop sensorless** drive
+//! modes — all instrumented over `mmc-proto` on the ST-Link VCP so every
+//! test is a dashboard capture. Sensorless (Stage F) runs MS4's stack in
+//! the control ISR: I-f startup, blend handoff to the flux observer, then
+//! the speed loop commands i_q on the estimated angle.
 //!
 //! ## Pin map (from hw/x-nucleo-ihm16m1_schematic.pdf + mb1367 Nucleo)
 //!
@@ -44,9 +46,11 @@ use embassy_time::{Duration, Ticker};
 use panic_halt as _;
 
 use mmc_core::angle::AngleEstimator;
-use mmc_core::foc::Foc;
+use mmc_core::foc::{Decoupling, Foc};
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
+use mmc_core::pi::PiGains;
+use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
 use mmc_core::svpwm::svpwm;
 use mmc_core::transforms::{clarke, inverse_park, park, Abc, Dq};
 use mmc_core::tuning::current_pi_gains;
@@ -84,12 +88,25 @@ const POLE_PAIRS: f32 = 7.0;
 const DEADMAN_TICKS: u32 = 2 * 20_000;
 const CAL_TICKS: u32 = 8192;
 
-// Conservative textbook gains for the I-f current loop until the profiler
-// measures the real R/L. Rs was measured during bring-up (stage C: i_d at
-// steady v_d gave ≈1.0 Ω); L is still assumed.
-const IF_BANDWIDTH: f32 = 500.0;
+// Motor parameters measured on this bench (Stage F0 rotating I-f sweep,
+// `tools/fit_params.py`): flux 0.894 ± 0.04 mWb, apparent R 0.97 Ω
+// (locked-rotor R = 1.0), friction ≈ 0.8 mN·m, J ≈ 0.31 µN·m·s² (rough).
+// L was ill-conditioned in that test (0.05 ± 0.10 mH; hang angle near π/2
+// hides it) — 0.1 mH is a robust design center, and it only sets the
+// current-PI zero and a small observer flux correction.
+const CUR_BANDWIDTH: f32 = 1000.0;
 const MOTOR_RS: f32 = 1.0;
-const MOTOR_LS: f32 = 0.6e-3;
+const MOTOR_LS: f32 = 0.1e-3;
+const MOTOR_FLUX: f32 = 0.894e-3;
+// Speed loop at ~40 rad/s (electrical) from the fitted J and kt; J is the
+// least-trusted number, so these are deliberately conservative.
+const SPEED_KP: f32 = 2.0e-4;
+const SPEED_KI: f32 = 2.0e-3;
+/// Speed-loop i_q authority [A].
+const SL_IQ_LIMIT: f32 = 0.8;
+/// I-f speed at which sensorless startup hands off to the observer
+/// [rad/s electrical] — comfortably above the observer's ~4·leak floor.
+const SL_OMEGA_HANDOFF: f32 = 150.0;
 
 // drive state values (channel::STATE)
 const ST_OFF: u8 = 0;
@@ -98,11 +115,15 @@ const ST_FAULT_OC: u8 = 2;
 const ST_FAULT_DRV: u8 = 3;
 const ST_FAULT_VBUS: u8 = 4;
 const ST_CAL: u8 = 5;
+// Sensorless startup phases on the telemetry STATE channel (same codes the
+// host sim scenario writes, so dashboards read identically): Closed = ST_RUN.
+const ST_SL_RAMP: u8 = 6;
+const ST_SL_BLEND: u8 = 7;
 
 // ------------------------------------------------------------ shared state
 
 // Host command → control ISR.
-static CMD_MODE: AtomicU8 = AtomicU8::new(0); // 0 off, 1 volt, 2 i-f
+static CMD_MODE: AtomicU8 = AtomicU8::new(0); // 0 off, 1 volt, 2 i-f, 3 sensorless
 static CMD_AMP: AtomicU32 = AtomicU32::new(0);
 static CMD_OMEGA: AtomicU32 = AtomicU32::new(0);
 static CMD_EPOCH: AtomicU32 = AtomicU32::new(0);
@@ -140,10 +161,17 @@ struct IsrState {
     omega: f32,
     amp: f32,
     foc: Option<Foc>,
-    /// Shadow flux observer: estimates the rotor angle from v/i while the
-    /// forced-angle drives run — MS4's estimator proving itself on hardware
-    /// before it closes the loop.
+    /// Flux observer: shadow-instrumented during the forced-angle drives,
+    /// the angle source in sensorless mode.
     obs: Option<FluxObserver>,
+    // Sensorless mode (MS4 stack): startup sequencer + speed loop.
+    seq: Option<Sequencer>,
+    speed: Option<SpeedLoop>,
+    /// Slewed speed-loop reference [rad/s electrical].
+    omega_ref_cur: f32,
+    /// Signed startup current, consumed as the speed-PI preload on the
+    /// first closed-loop tick (0.0 = already consumed).
+    sl_preload: f32,
     oc_strikes: u8,
     vbus_filt: f32,
 }
@@ -163,6 +191,10 @@ static ISR_STATE: IsrCell = IsrCell(UnsafeCell::new(IsrState {
     amp: 0.0,
     foc: None,
     obs: None,
+    seq: None,
+    speed: None,
+    omega_ref_cur: 0.0,
+    sl_preload: 0.0,
     oc_strikes: 0,
     vbus_filt: 0.0,
 }));
@@ -387,7 +419,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 1, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 2, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -403,6 +435,7 @@ fn handle(msg: &Message) -> Message {
                 DriveMode::Off => (0u8, 0.0f32, 0.0f32),
                 DriveMode::OpenLoopVoltage { volts, omega_e } => (1, volts, omega_e),
                 DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
+                DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
             };
             if m != 0 {
                 if state == ST_CAL {
@@ -437,7 +470,7 @@ fn handle(msg: &Message) -> Message {
 }
 
 fn amp_limit(mode: u8) -> f32 {
-    if mode == 2 {
+    if mode >= 2 {
         I_AMP_MAX
     } else {
         V_AMP_MAX
@@ -600,8 +633,45 @@ unsafe extern "C" fn ADC1_2() {
                     s.omega = 0.0;
                     s.amp = 0.0;
                     s.oc_strikes = 0;
-                    s.foc = Some(Foc::new(current_pi_gains(MOTOR_RS, MOTOR_LS, IF_BANDWIDTH)));
+                    let gains = current_pi_gains(MOTOR_RS, MOTOR_LS, CUR_BANDWIDTH);
                     s.obs = Some(FluxObserver::new(FluxObserverCfg::new(MOTOR_RS, MOTOR_LS)));
+                    if mode == 3 {
+                        // Sensorless: feedforward FOC (flux is measured now),
+                        // I-f sequencer toward the commanded direction, speed
+                        // loop preloaded with the startup current at handoff.
+                        s.foc = Some(Foc::with_feedforward(
+                            gains,
+                            Decoupling {
+                                ld: MOTOR_LS,
+                                lq: MOTOR_LS,
+                                flux: MOTOR_FLUX,
+                            },
+                        ));
+                        let omega_t = f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed));
+                        let dir = if omega_t < 0.0 { -1.0 } else { 1.0 };
+                        let i_start = f32::from_bits(CMD_AMP.load(Ordering::Relaxed))
+                            .abs()
+                            .clamp(0.1, SL_IQ_LIMIT);
+                        s.seq = Some(Sequencer::new(SequencerCfg {
+                            i_start,
+                            omega_handoff: SL_OMEGA_HANDOFF * dir,
+                            ..SequencerCfg::default()
+                        }));
+                        s.speed = Some(SpeedLoop::new(
+                            PiGains {
+                                kp: SPEED_KP,
+                                ki: SPEED_KI,
+                            },
+                            SL_IQ_LIMIT,
+                        ));
+                        s.omega_ref_cur = SL_OMEGA_HANDOFF * dir;
+                        s.sl_preload = i_start * dir;
+                    } else {
+                        s.foc = Some(Foc::new(gains));
+                        s.seq = None;
+                        s.speed = None;
+                        s.sl_preload = 0.0;
+                    }
                     stage_on();
                 }
                 s.mode = mode;
@@ -654,29 +724,38 @@ unsafe extern "C" fn ADC1_2() {
     let mut theta_err = 0.0f32;
 
     if s.mode != 0 {
-        // Ramp the forced electrical frequency and the amplitude.
         let omega_target = f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed));
         let amp_target = f32::from_bits(CMD_AMP.load(Ordering::Relaxed));
-        let d_omega = (omega_target - s.omega).clamp(-OMEGA_SLEW * CTRL_DT, OMEGA_SLEW * CTRL_DT);
-        s.omega += d_omega;
-        let slew = if s.mode == 2 { I_SLEW } else { V_SLEW };
-        let d_amp = (amp_target - s.amp).clamp(-slew * CTRL_DT, slew * CTRL_DT);
-        s.amp += d_amp;
-        s.theta = wrap_angle(s.theta + s.omega * CTRL_DT);
-
-        let sc = sin_cos(s.theta);
         let i_ab = clarke(i_abc);
-        i_dq = park(i_ab, sc);
 
-        let v_ab = if s.mode == 1 {
-            // Open-loop rotating voltage vector.
-            v_dq = Dq { d: s.amp, q: 0.0 };
-            let v_ab = inverse_park(v_dq, sc);
-            duties = svpwm(v_ab, s.vbus_filt.max(1.0));
-            v_ab
-        } else {
-            // I-f: closed current loop on the forced angle.
-            iq_ref = s.amp;
+        let v_ab = if s.mode == 3 {
+            // Sensorless: the sequencer owns the angle (I-f ramp → blend →
+            // observer), the speed loop owns i_q once closed. The observer
+            // state is one tick old here; it is fed below, same as the rig.
+            let seq_out = s
+                .seq
+                .as_mut()
+                .unwrap()
+                .update(s.obs.as_ref().unwrap(), CTRL_DT);
+            iq_ref = match seq_out.iq_open {
+                Some(iq) => iq,
+                None => {
+                    let speed = s.speed.as_mut().unwrap();
+                    if s.sl_preload != 0.0 {
+                        // Bumpless takeover from the startup current.
+                        speed.preload(s.sl_preload);
+                        s.sl_preload = 0.0;
+                    }
+                    // Slew the reference from the handoff speed toward the
+                    // (live-retargetable) command.
+                    let d = (omega_target - s.omega_ref_cur)
+                        .clamp(-OMEGA_SLEW * CTRL_DT, OMEGA_SLEW * CTRL_DT);
+                    s.omega_ref_cur += d;
+                    speed.update(s.omega_ref_cur, seq_out.omega, CTRL_DT)
+                }
+            };
+            s.theta = seq_out.theta;
+            s.omega = seq_out.omega;
             let out = s.foc.as_mut().unwrap().step(
                 i_abc,
                 s.theta,
@@ -689,11 +768,47 @@ unsafe extern "C" fn ADC1_2() {
             v_dq = out.v_dq;
             i_dq = out.i_dq;
             out.v_ab
+        } else {
+            // Forced-frame modes: ramp the electrical frequency + amplitude.
+            let d_omega =
+                (omega_target - s.omega).clamp(-OMEGA_SLEW * CTRL_DT, OMEGA_SLEW * CTRL_DT);
+            s.omega += d_omega;
+            let slew = if s.mode == 2 { I_SLEW } else { V_SLEW };
+            let d_amp = (amp_target - s.amp).clamp(-slew * CTRL_DT, slew * CTRL_DT);
+            s.amp += d_amp;
+            s.theta = wrap_angle(s.theta + s.omega * CTRL_DT);
+
+            let sc = sin_cos(s.theta);
+            i_dq = park(i_ab, sc);
+
+            if s.mode == 1 {
+                // Open-loop rotating voltage vector.
+                v_dq = Dq { d: s.amp, q: 0.0 };
+                let v_ab = inverse_park(v_dq, sc);
+                duties = svpwm(v_ab, s.vbus_filt.max(1.0));
+                v_ab
+            } else {
+                // I-f: closed current loop on the forced angle.
+                iq_ref = s.amp;
+                let out = s.foc.as_mut().unwrap().step(
+                    i_abc,
+                    s.theta,
+                    s.omega,
+                    Dq { d: 0.0, q: iq_ref },
+                    s.vbus_filt.max(1.0),
+                    CTRL_DT,
+                );
+                duties = out.duties;
+                v_dq = out.v_dq;
+                i_dq = out.i_dq;
+                out.v_ab
+            }
         };
         set_duties(duties);
 
-        // Shadow observer: estimate the rotor angle from what was applied
-        // and measured; theta_err compares against the forced angle.
+        // Observer update from what was applied and measured. In the forced
+        // modes it runs in shadow and theta_err is the (wrong-frame) hang
+        // angle; in sensorless mode theta_err is the one-tick innovation.
         if let Some(obs) = s.obs.as_mut() {
             obs.update(i_ab, v_ab, CTRL_DT);
             theta_est = obs.electrical_angle();
@@ -720,7 +835,13 @@ unsafe extern "C" fn ADC1_2() {
     put(channel::I_A, i_abc.a);
     put(channel::I_B, i_abc.b);
     put(channel::I_C, i_abc.c);
-    put(channel::STATE, STATE.load(Ordering::Relaxed) as f32);
+    // While sensorless runs, the state channel reports the startup phase.
+    let state_telem = match (s.mode, s.seq.as_ref().map(|q| q.phase())) {
+        (3, Some(Phase::Ramp)) => ST_SL_RAMP,
+        (3, Some(Phase::Blend)) => ST_SL_BLEND,
+        _ => STATE.load(Ordering::Relaxed),
+    };
+    put(channel::STATE, state_telem as f32);
     put(channel::THETA_EST, theta_est);
     put(channel::OMEGA_EST, omega_est);
     put(channel::THETA_ERR, theta_err);

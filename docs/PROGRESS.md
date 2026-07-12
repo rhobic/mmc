@@ -3,6 +3,70 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-07-11 — session 5: Stage F — closed-loop sensorless on hardware (MS5 complete)
+
+**F0 — motor parameters measured from rotating I-f sweeps** (no firmware
+change needed; `tools/fit_params.py`):
+- Method: at steady I-f with fixed i_q, sweep speed and fit the `v_d`/`v_q`
+  slopes vs ω — resistance and dead-time distortion land in the intercepts,
+  physics in the slopes. Captures: 0.3 A × {150,250,350,450} rad/s el, plus
+  0.45 A × {150,450} and a 0.2 A sync test (`f_paramid_*` on the dashboard).
+- **The trap (documented in the script):** in I-f the frame is *forced*, not
+  rotor-aligned — the rotor rides a hang angle δ ahead, so the v_d slope is
+  `−(L·i_q + ψ·cos γ)` and the v_q slope is `ψ·sin γ`. The naive rotor-aligned
+  fit reported Lq = 2.9 mH and ψ = 0.21 mWb — a *perfectly self-consistent
+  wrong answer*. Two discriminators split it: the low-ψ model required
+  pull-out at 0.2 A (sin γ = 1.45) yet the motor held sync, and the 0.45 A
+  v_d slope matched the high-ψ model within 5 %.
+- **Fitted (joint, all current levels):** ψ = **0.894 ± 0.04 mWb**
+  (kt = 9.39 mN·m/A, bemf 6.26 mV/(rad/s mech)), R_apparent = 0.97 Ω
+  (matches the 1.0 Ω locked measurement), friction ≈ 0.78 mN·m (large — the
+  rotor hangs ~1.29 rad ahead at 0.3 A, pull-out margin 3.6×),
+  J ≈ 0.31 µN·m·s² (rough; accel torque is 3 % of friction).
+  **L is ill-conditioned in this test** (0.05 ± 0.10 mH; ψ·cos γ dominates the
+  v_d slope near δ ≈ π/2) — bounded "small", design-centered at 0.1 mH; a
+  locked-rotor/HF probe is the right instrument (MS6). The old assumed 0.6 mH
+  was ~6× high but only biased the shadow observer ~0.05 rad (L·i ≪ ψ).
+
+**F1 — `DriveMode::Sensorless` end to end:**
+- `mmc-proto`: `Sensorless { amps, omega_e }` (wire mode 3) — startup current
+  + live-retargetable speed target.
+- `mmc-fw-g474` (fw v2): MS4's `Sequencer` + `SpeedLoop` in the 20 kHz ISR,
+  feedforward FOC with the measured flux, current loop redesigned at
+  1000 rad/s on the fitted parameters, conservative speed PI (kp 2e-4,
+  ki 2e-3, ±0.8 A). Startup phases stream on the `state` channel with the
+  sim's codes (Ramp 6 / Blend 7 / Closed 1).
+- Host: `capture --drive sl --amp --hz` plus `--step-hz` (drive retarget at
+  60 % for live speed-step traces); panel gained a "Sensorless speed" mode.
+
+**Hardware results (dashboard `ms5-g474-bringup/g,h,i_*`):**
+- Startup to 600 rad/s el: ramp 0.375 s → 50 ms blend → closed; ω̂ = 600.0
+  (σ 5), **i_q settles at 77 mA — the friction current the F0 fit predicted
+  (83 mA)**. Zero faults.
+- Live speed step 400 → 800 rad/s el: tracks the 500 rad/s² reference slew
+  (90 % in 0.72 s), 9.7 % overshoot, i_q peaks at only 0.10 A.
+- Reverse to −600: **first attempt failed and taught the real lesson** — the
+  sequencer's startup current was unsigned, and the instant the blend reaches
+  the *rotor* angle, +q current is pure torque *against* reverse motion
+  (≈ 10⁵ rad/s² el on this 0.31 µN·m·s² rotor). The rotor was flung forward
+  and the loop trapped: observer in its blind zone (+12 rad/s < leak), speed
+  PI railed at −0.8 A. The sim never saw it — its rotor is ~10⁴× heavier
+  relative to torque. Fix in `mmc-core`: `iq_open = i_start·signum(ω_handoff)`
+  through Ramp *and* Blend (test now asserts the sign). After the fix,
+  reverse mirrors forward exactly: −600.0 (σ 4.6), i_q −77 mA.
+- The forward handoff spike (ω̂ briefly ~1300 rad/s, caught in < 0.5 s) is the
+  same max-torque blend kick pointed *with* the motion — acceptable, noted
+  below as a refinement.
+
+**Open items (new):** soften the blend kick (taper i_start toward the
+friction current during Blend, or hand the speed loop over mid-blend); stall
+detector (ω̂ below observer floor + railed i_q for N ms → fault) — the reverse
+failure showed the trap exists; proper L measurement in MS6.
+
+**Next:** MS6 profiler — locked-rotor R/L steps, flux + inertia sequences,
+Python fitting + gain writeback (fit_params.py is the seed); the blend
+refinement above; then MS7 encoder.
+
 ## 2026-07-11 — session 4: MS4 sensorless foundation + observer shadow-validated on hardware
 
 **Landed (sim / core):**

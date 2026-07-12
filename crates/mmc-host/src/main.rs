@@ -100,16 +100,21 @@ struct CaptureArgs {
     /// Send a q-axis current step of this amplitude [A] at 10% of the capture.
     #[arg(long)]
     iq: Option<f32>,
-    /// Command a drive mode at 10% of the capture: `volt` (open-loop voltage)
-    /// or `if` (I-f current). Requires --amp and --hz; Off is sent at the end.
-    #[arg(long, value_parser = ["volt", "if"], conflicts_with = "iq")]
+    /// Command a drive mode at 10% of the capture: `volt` (open-loop voltage),
+    /// `if` (I-f current) or `sl` (closed-loop sensorless). Requires --amp and
+    /// --hz; Off is sent at the end.
+    #[arg(long, value_parser = ["volt", "if", "sl"], conflicts_with = "iq")]
     drive: Option<String>,
-    /// Drive amplitude: volts (--drive volt) or amps (--drive if).
+    /// Drive amplitude: volts (--drive volt) or amps (--drive if / sl startup).
     #[arg(long, requires = "drive")]
     amp: Option<f32>,
-    /// Drive electrical frequency [Hz].
+    /// Drive electrical frequency [Hz] (sl: speed target).
     #[arg(long, requires = "drive")]
     hz: Option<f32>,
+    /// Retarget the drive to this electrical frequency [Hz] at 60% of the
+    /// capture — records a live speed-step response.
+    #[arg(long, requires = "drive")]
+    step_hz: Option<f32>,
     /// Output CSV path.
     #[arg(long, default_value = "capture.csv")]
     out: PathBuf,
@@ -260,21 +265,28 @@ fn main() -> std::io::Result<()> {
                     .map(|s| s.to_string_lossy().replace('_', " "))
                     .unwrap_or_else(|| "capture".into())
             });
-            let drive = match args.drive.as_deref() {
-                None => None,
+            let mode_for = |kind: &str, amp: f32, hz: f32| {
+                let omega_e = 2.0 * std::f32::consts::PI * hz;
+                match kind {
+                    "volt" => mmc_proto::DriveMode::OpenLoopVoltage {
+                        volts: amp,
+                        omega_e,
+                    },
+                    "sl" => mmc_proto::DriveMode::Sensorless { amps: amp, omega_e },
+                    _ => mmc_proto::DriveMode::IfCurrent { amps: amp, omega_e },
+                }
+            };
+            let (drive, drive_step) = match args.drive.as_deref() {
+                None => (None, None),
                 Some(kind) => {
                     let (Some(amp), Some(hz)) = (args.amp, args.hz) else {
                         eprintln!("--drive requires --amp and --hz");
                         std::process::exit(2);
                     };
-                    let omega_e = 2.0 * std::f32::consts::PI * hz;
-                    Some(match kind {
-                        "volt" => mmc_proto::DriveMode::OpenLoopVoltage {
-                            volts: amp,
-                            omega_e,
-                        },
-                        _ => mmc_proto::DriveMode::IfCurrent { amps: amp, omega_e },
-                    })
+                    (
+                        Some(mode_for(kind, amp, hz)),
+                        args.step_hz.map(|hz2| mode_for(kind, amp, hz2)),
+                    )
                 }
             };
             let summary = capture::run(
@@ -285,6 +297,7 @@ fn main() -> std::io::Result<()> {
                     duration: args.duration,
                     iq: args.iq,
                     drive,
+                    drive_step,
                     title: &title,
                     description: "Ad-hoc telemetry capture.",
                     order: 100,
@@ -443,6 +456,7 @@ fn suite_tcp_capture(dir: &std::path::Path) -> std::io::Result<()> {
             duration: 1.0,
             iq: Some(0.5),
             drive: None,
+            drive_step: None,
             title: "TCP live capture — 0.5 A step",
             description: "End-to-end protocol regression: the sim runs behind the mmc-proto \
                           TCP server, the host connects like it would to hardware, streams \

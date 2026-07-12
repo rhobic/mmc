@@ -86,6 +86,7 @@
         <select id="mode">
           <option value="volt">Open-loop voltage</option>
           <option value="if">I-f current</option>
+          <option value="sl">Sensorless speed</option>
         </select>
       </div>
       <div class="field"><label id="amplabel">Amplitude [V]</label>
@@ -111,7 +112,8 @@
 <script>
 "use strict";
 const STATE_NAMES = { 0:["off","chip off"], 1:["running","chip run"], 2:["FAULT: overcurrent","chip fault"],
-                      3:["FAULT: gate driver","chip fault"], 4:["FAULT: bus voltage","chip fault"], 5:["calibrating","chip cal"] };
+                      3:["FAULT: gate driver","chip fault"], 4:["FAULT: bus voltage","chip fault"], 5:["calibrating","chip cal"],
+                      6:["sensorless: I-f ramp","chip run"], 7:["sensorless: handoff","chip run"] };
 const WINDOW_S = 5.0;
 let columns = [], buf = [], lastT = -1;
 const ci = n => columns.indexOf(n);
@@ -126,8 +128,9 @@ document.getElementById("apply").onclick = () => {
 };
 document.getElementById("iqbtn").onclick = () => post({ cmd: "iq", iq: +document.getElementById("iqset").value });
 document.getElementById("mode").onchange = () => {
+  const m = document.getElementById("mode").value;
   document.getElementById("amplabel").textContent =
-    document.getElementById("mode").value === "if" ? "Amplitude [A]" : "Amplitude [V]";
+    m === "volt" ? "Amplitude [V]" : m === "if" ? "Amplitude [A]" : "Startup current [A]";
 };
 
 function h(tag, cls, text) {

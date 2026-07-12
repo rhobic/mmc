@@ -128,14 +128,20 @@ sync — normal for motor control in any language.
   < 0.3 rad vs sim truth. Observer also **shadow-validated on the real motor**
   (exact ω̂, θ̂ = true rotor angle incl. I-f hang angle, noise ≈ 0.11 rad).
   *Known limit:* no field weakening — usable ceiling ≈ 0.7 × (V_bus/√3)/ψ.
-- **MS5 — G474 bring-up, sensorless** 🟡 *(hardware layer done early,
-  2026-07-10)*: clocks (170 MHz), TIM1 center-aligned PWM + injected-ADC shunt
-  sensing on the IHM16M1, zero-current calibration, protection trips
-  (overcurrent / VBUS / gate fault / host deadman), open-loop spin **✅ and
-  I-f closed current loop ✅ verified on the real motor** (0.3 A tracking,
-  7 mA RMS). A manual web control panel (`mmc-host panel`) exercises it live.
-  *Remaining for MS5 proper:* R/L measurement via locked-rotor steps, then the
-  sensorless observer closes the loop (after MS4 proves it in sim).
+- **MS5 — G474 bring-up, sensorless** ✅ *(2026-07-11)*: clocks (170 MHz),
+  TIM1 center-aligned PWM + injected-ADC shunt sensing on the IHM16M1,
+  zero-current calibration, protection trips (overcurrent / VBUS / gate fault
+  / host deadman), open-loop spin, I-f closed current loop (0.3 A, 7 mA RMS),
+  a manual web control panel (`mmc-host panel`) — and **closed-loop sensorless
+  on the real motor**: motor parameters measured from rotating I-f sweeps
+  (ψ = 0.894 mWb, R ≈ 1.0 Ω, friction 0.78 mN·m; `tools/fit_params.py` —
+  beware the I-f hang-angle fit trap documented there), then
+  `DriveMode::Sensorless` runs MS4's Sequencer + SpeedLoop in the 20 kHz ISR:
+  600 rad/s el held to σ 5, live speed steps track the slew, reverse mirrors
+  forward after sign-matching the startup current (the blend turns it into
+  pure torque — hardware-only find, sim rotor too heavy to show it).
+  *Deferred:* proper L measurement (ill-conditioned in the rotating fit),
+  blend-kick softening, stall detector → MS6.
 - **MS6 — Profiler/auto-tune**: full test-sequence execution + Python system-ID
   (flux linkage, inertia, friction) + gain calculation and writeback.
 - **MS7 — Encoder config + position control**: encoder as second

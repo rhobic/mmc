@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 6",
+  "description": "Stage F1: first closed-loop sensorless run. I-f ramp 0.375 s, 50 ms blend, then the flux observer + speed loop hold 600.0 rad/s el (std 5); i_q settles at 77 mA \u2014 exactly the friction current the F0 fit predicted.",
+  "notes": [
+    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 7080 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 10,
+    "drive": "Sensorless { amps: 0.5, omega_e: 600.0002 }",
+    "drive_step": null,
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "F1 sensorless: startup to 600 rad/s el",
+  "unix_time": 1783813936
+}

@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 6",
+  "description": "Stage F1: reverse sensorless to -600 rad/s el. First attempt failed \u2014 unsigned startup current becomes max torque against the motion once the blend reaches the rotor angle; after sign-matching i_start in the Sequencer this mirrors forward exactly (-600.0, std 4.6, i_q -77 mA).",
+  "notes": [
+    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 7079 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 10,
+    "drive": "Sensorless { amps: 0.5, omega_e: -600.0002 }",
+    "drive_step": null,
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "F1 sensorless: reverse to -600 rad/s el",
+  "unix_time": 1783814292
+}

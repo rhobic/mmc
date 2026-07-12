@@ -35,6 +35,10 @@ pub enum DriveMode {
     /// I-f drive: closed current loop on a forced rotating angle —
     /// `amplitude` amps q-axis at `omega_e` rad/s electrical.
     IfCurrent { amps: f32, omega_e: f32 },
+    /// Closed-loop sensorless: I-f startup at `amps`, handoff to the flux
+    /// observer, then the on-device speed loop regulates to `omega_e` rad/s
+    /// electrical (sign sets direction; retargetable while running).
+    Sensorless { amps: f32, omega_e: f32 },
 }
 
 impl DriveMode {
@@ -43,6 +47,7 @@ impl DriveMode {
             DriveMode::Off => (0, 0.0, 0.0),
             DriveMode::OpenLoopVoltage { volts, omega_e } => (1, volts, omega_e),
             DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
+            DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
         }
     }
 
@@ -54,6 +59,7 @@ impl DriveMode {
                 omega_e,
             }),
             2 => Ok(DriveMode::IfCurrent { amps: amp, omega_e }),
+            3 => Ok(DriveMode::Sensorless { amps: amp, omega_e }),
             _ => Err(FrameError::Malformed),
         }
     }
@@ -461,6 +467,10 @@ mod tests {
         round_trip(Message::SetDrive(DriveMode::IfCurrent {
             amps: 0.4,
             omega_e: -62.8,
+        }));
+        round_trip(Message::SetDrive(DriveMode::Sensorless {
+            amps: 0.5,
+            omega_e: 600.0,
         }));
         round_trip(Message::Ack { of: 0x03 });
         round_trip(Message::Nak { of: 0x05, err: 2 });

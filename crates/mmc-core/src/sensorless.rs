@@ -26,7 +26,12 @@ pub enum Phase {
 
 #[derive(Copy, Clone, Debug)]
 pub struct SequencerCfg {
-    /// I-f startup current [A].
+    /// I-f startup current magnitude [A]. The sequencer applies it signed
+    /// with the startup direction: during the blend the drive angle becomes
+    /// the *rotor* angle, where q-axis current is pure torque — against the
+    /// motion, an unsigned current flings a low-inertia rotor backwards
+    /// (found the hard way on hardware; the sim's rotor was too heavy to
+    /// show it).
     pub i_start: f32,
     /// Forced acceleration [rad/s² electrical].
     pub accel: f32,
@@ -88,6 +93,7 @@ impl Sequencer {
     /// Advance one control period against the (already-updated) observer.
     pub fn update(&mut self, observer: &impl AngleEstimator, dt: f32) -> SequencerOut {
         let target = self.cfg.omega_handoff;
+        let iq_start = self.cfg.i_start * target.signum();
         match self.phase {
             Phase::Ramp => {
                 let step = self.cfg.accel * dt * target.signum();
@@ -104,7 +110,7 @@ impl Sequencer {
                 SequencerOut {
                     theta: self.theta_f,
                     omega: self.omega_f,
-                    iq_open: Some(self.cfg.i_start),
+                    iq_open: Some(iq_start),
                     phase: Phase::Ramp,
                 }
             }
@@ -123,7 +129,7 @@ impl Sequencer {
                 SequencerOut {
                     theta,
                     omega,
-                    iq_open: Some(self.cfg.i_start),
+                    iq_open: Some(iq_start),
                     phase: Phase::Blend,
                 }
             }
@@ -239,6 +245,12 @@ mod tests {
         for _ in 0..20_000 {
             let out = seq.update(&obs, 1e-4);
             min_omega = min_omega.min(out.omega);
+            if let Some(iq) = out.iq_open {
+                // Startup torque must point in the startup direction: on the
+                // blended (rotor) angle, +q against a reverse spin flings the
+                // rotor forward.
+                assert!(iq < 0.0, "startup current not sign-matched: {iq}");
+            }
         }
         assert!(min_omega <= -199.0, "reached {min_omega}");
         assert_eq!(seq.phase(), Phase::Closed);

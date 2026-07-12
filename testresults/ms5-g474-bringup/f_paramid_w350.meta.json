@@ -1,0 +1,16 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 4",
+  "description": "Stage F0 parameter-ID input: I-f 0.3 A at 350 rad/s el.",
+  "notes": [
+    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 4721 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 10,
+    "drive": "IfCurrent { amps: 0.3, omega_e: 349.99857 }",
+    "duration_s": 4.0,
+    "iq_A": null
+  },
+  "title": "F0 param-ID: I-f 0.3 A @ 350 rad/s",
+  "unix_time": 1783811429
+}
