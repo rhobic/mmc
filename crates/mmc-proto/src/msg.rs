@@ -16,11 +16,76 @@ mod ty {
     pub const STREAM: u8 = 0x04;
     pub const SET_IQ_REF: u8 = 0x05;
     pub const SET_DRIVE: u8 = 0x06;
+    pub const RUN_TEST: u8 = 0x07;
+    pub const READ_BURST: u8 = 0x08;
+    pub const SET_PARAM: u8 = 0x09;
+    pub const GET_PARAM: u8 = 0x0A;
     pub const PONG: u8 = 0x81;
     pub const INFO: u8 = 0x82;
     pub const TELEMETRY: u8 = 0x83;
     pub const ACK: u8 = 0x84;
     pub const NAK: u8 = 0x85;
+    pub const BURST_DATA: u8 = 0x86;
+    pub const PARAM_VALUE: u8 = 0x87;
+}
+
+/// Profiler test-sequence ids for [`Message::RunTest`] (MS6). The firmware
+/// executes the sequence and records per-control-tick samples into its burst
+/// buffer; the host reads them back with [`Message::ReadBurst`] and does the
+/// fitting (`tools/profile.py`).
+pub mod test {
+    /// Locked-rotor R/L probe: align the rotor with `a` volts on the d-axis,
+    /// then step (unslewed) to `b` volts, recording (i_d, v_d) per tick.
+    /// The two levels make the fit differential — dead-time distortion and
+    /// offsets cancel.
+    pub const RL_STEP: u8 = 0;
+}
+
+/// Runtime device parameter ids for [`Message::SetParam`] / `GetParam` —
+/// the profiler's writeback target. Values apply at the next clean drive
+/// start; they live in RAM (flash persistence is future work).
+pub mod param {
+    pub const R: u8 = 0; // stator resistance [Ω]
+    pub const L: u8 = 1; // stator inductance [H]
+    pub const FLUX: u8 = 2; // rotor flux linkage [Wb]
+    pub const CUR_BW: u8 = 3; // current-loop bandwidth [rad/s]
+    pub const SPEED_KP: u8 = 4; // speed PI kp [A/(rad/s el)]
+    pub const SPEED_KI: u8 = 5; // speed PI ki
+    pub const COUNT: usize = 6;
+    pub const NAMES: [&str; COUNT] = ["r", "l", "flux", "cur_bw", "speed_kp", "speed_ki"];
+}
+
+/// Max f32 values per [`BurstChunk`] frame (fits [`MAX_PAYLOAD`]).
+pub const BURST_CHUNK: usize = 20;
+
+/// One slice of the device's burst buffer: `values` are `total` samples long
+/// overall, this frame carrying `values.len()` of them starting at `offset`.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct BurstChunk {
+    pub offset: u16,
+    pub total: u16,
+    count: u8,
+    values: [f32; BURST_CHUNK],
+}
+
+impl BurstChunk {
+    pub fn new(offset: u16, total: u16, values: &[f32]) -> Option<Self> {
+        if values.len() > BURST_CHUNK {
+            return None;
+        }
+        let mut buf = [0f32; BURST_CHUNK];
+        buf[..values.len()].copy_from_slice(values);
+        Some(Self {
+            offset,
+            total,
+            count: values.len() as u8,
+            values: buf,
+        })
+    }
+
+    pub fn values(&self) -> &[f32] {
+        &self.values[..self.count as usize]
+    }
 }
 
 /// Power-stage drive request. `Off` is always accepted; a faulted device NAKs
@@ -179,6 +244,31 @@ pub enum Message {
     },
     /// Power-stage drive request (hardware bring-up and open-loop testing).
     SetDrive(DriveMode),
+    /// Run a profiler test sequence (see [`test`]); `a`/`b` are
+    /// sequence-defined. Device must be calibrated, off and unfaulted.
+    RunTest {
+        kind: u8,
+        a: f32,
+        b: f32,
+    },
+    /// Read `BURST_CHUNK` samples of the burst buffer starting at `offset`.
+    /// NAKed until the armed test has finished recording.
+    ReadBurst {
+        offset: u16,
+    },
+    /// Write a runtime parameter (see [`param`]); applied at next drive start.
+    SetParam {
+        id: u8,
+        value: f32,
+    },
+    GetParam {
+        id: u8,
+    },
+    ParamValue {
+        id: u8,
+        value: f32,
+    },
+    BurstData(BurstChunk),
     Ack {
         of: u8,
     },
@@ -256,6 +346,39 @@ pub fn parse(raw: &[u8]) -> Result<Message, FrameError> {
             enable: r.u8()? != 0,
         },
         ty::SET_IQ_REF => Message::SetIqRef { iq: r.f32()? },
+        ty::RUN_TEST => Message::RunTest {
+            kind: r.u8()?,
+            a: r.f32()?,
+            b: r.f32()?,
+        },
+        ty::READ_BURST => Message::ReadBurst { offset: r.u16()? },
+        ty::SET_PARAM => Message::SetParam {
+            id: r.u8()?,
+            value: r.f32()?,
+        },
+        ty::GET_PARAM => Message::GetParam { id: r.u8()? },
+        ty::PARAM_VALUE => Message::ParamValue {
+            id: r.u8()?,
+            value: r.f32()?,
+        },
+        ty::BURST_DATA => {
+            let offset = r.u16()?;
+            let total = r.u16()?;
+            let count = r.u8()?;
+            if count as usize > BURST_CHUNK {
+                return Err(FrameError::Malformed);
+            }
+            let mut values = [0f32; BURST_CHUNK];
+            for v in values.iter_mut().take(count as usize) {
+                *v = r.f32()?;
+            }
+            Message::BurstData(BurstChunk {
+                offset,
+                total,
+                count,
+                values,
+            })
+        }
         ty::SET_DRIVE => {
             let mode = r.u8()?;
             let amp = r.f32()?;
@@ -327,6 +450,39 @@ fn serialize(msg: &Message, raw: &mut [u8]) -> Option<usize> {
             w.f32(amp)?;
             w.f32(omega_e)?;
         }
+        Message::RunTest { kind, a, b } => {
+            w.u8(ty::RUN_TEST)?;
+            w.u8(*kind)?;
+            w.f32(*a)?;
+            w.f32(*b)?;
+        }
+        Message::ReadBurst { offset } => {
+            w.u8(ty::READ_BURST)?;
+            w.u16(*offset)?;
+        }
+        Message::SetParam { id, value } => {
+            w.u8(ty::SET_PARAM)?;
+            w.u8(*id)?;
+            w.f32(*value)?;
+        }
+        Message::GetParam { id } => {
+            w.u8(ty::GET_PARAM)?;
+            w.u8(*id)?;
+        }
+        Message::ParamValue { id, value } => {
+            w.u8(ty::PARAM_VALUE)?;
+            w.u8(*id)?;
+            w.f32(*value)?;
+        }
+        Message::BurstData(c) => {
+            w.u8(ty::BURST_DATA)?;
+            w.u16(c.offset)?;
+            w.u16(c.total)?;
+            w.u8(c.count)?;
+            for &v in c.values() {
+                w.f32(v)?;
+            }
+        }
         Message::Ack { of } => {
             w.u8(ty::ACK)?;
             w.u8(*of)?;
@@ -360,6 +516,12 @@ impl Message {
             Message::Stream { .. } => ty::STREAM,
             Message::SetIqRef { .. } => ty::SET_IQ_REF,
             Message::SetDrive(_) => ty::SET_DRIVE,
+            Message::RunTest { .. } => ty::RUN_TEST,
+            Message::ReadBurst { .. } => ty::READ_BURST,
+            Message::SetParam { .. } => ty::SET_PARAM,
+            Message::GetParam { .. } => ty::GET_PARAM,
+            Message::ParamValue { .. } => ty::PARAM_VALUE,
+            Message::BurstData(_) => ty::BURST_DATA,
             Message::Ack { .. } => ty::ACK,
             Message::Nak { .. } => ty::NAK,
             Message::Telemetry(_) => ty::TELEMETRY,
@@ -472,6 +634,27 @@ mod tests {
             amps: 0.5,
             omega_e: 600.0,
         }));
+        round_trip(Message::RunTest {
+            kind: test::RL_STEP,
+            a: 0.5,
+            b: 1.0,
+        });
+        round_trip(Message::ReadBurst { offset: 4090 });
+        round_trip(Message::SetParam {
+            id: param::FLUX,
+            value: 0.894e-3,
+        });
+        round_trip(Message::GetParam { id: param::L });
+        round_trip(Message::ParamValue {
+            id: param::R,
+            value: 1.0,
+        });
+        round_trip(Message::BurstData(
+            BurstChunk::new(40, 8192, &[0.25; BURST_CHUNK]).unwrap(),
+        ));
+        round_trip(Message::BurstData(
+            BurstChunk::new(8190, 8192, &[1.0, 2.0]).unwrap(),
+        ));
         round_trip(Message::Ack { of: 0x03 });
         round_trip(Message::Nak { of: 0x05, err: 2 });
         round_trip(Message::Telemetry(

@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host profile",
+  "description": "Profiler inertia/friction input: i_q during the 500 rad/s^2 reference slew vs the steady levels.",
+  "notes": [
+    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 8028 frames."
+  ],
+  "order": 10,
+  "params": {
+    "divider": 20,
+    "drive": "Sensorless { amps: 0.5, omega_e: 300.0 }",
+    "drive_step": "Sensorless { amps: 0.5, omega_e: 900.0 }",
+    "duration_s": 8.0,
+    "iq_A": null
+  },
+  "title": "Accel run: sensorless 300 -> 900 rad/s el",
+  "unix_time": 1783963374
+}

@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host profile",
+  "description": "Profiler flux-sweep input (hang-angle-aware fit).",
+  "notes": [
+    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 4114 frames."
+  ],
+  "order": 2,
+  "params": {
+    "divider": 20,
+    "drive": "IfCurrent { amps: 0.3, omega_e: 300.0 }",
+    "drive_step": null,
+    "duration_s": 4.099999904632568,
+    "iq_A": null
+  },
+  "title": "Flux sweep: I-f 0.3 A @ 300 rad/s",
+  "unix_time": 1783963352
+}

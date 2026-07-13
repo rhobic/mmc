@@ -12,3 +12,10 @@ This should be the best, most versatile motor control firmware ever!
 * Decide on the best language for the job
 * It needs to be scaleable for low resource systems like an M0 ARM or a fast GPU
 * Multiple control methodolgies would be nice to make this scaleable, traditional low resource and cutting edge advanced
+
+
+Potential furture projects
+* Javascript motor virtualization/sim and core for HTML version to show/test
+* HSB integration with ethernet based setup
+* observer over HSB/proto
+* 

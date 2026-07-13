@@ -142,8 +142,18 @@ sync — normal for motor control in any language.
   pure torque — hardware-only find, sim rotor too heavy to show it).
   *Deferred:* proper L measurement (ill-conditioned in the rotating fit),
   blend-kick softening, stall detector → MS6.
-- **MS6 — Profiler/auto-tune**: full test-sequence execution + Python system-ID
-  (flux linkage, inertia, friction) + gain calculation and writeback.
+- **MS6 — Profiler/auto-tune** ✅ *(2026-07-13)*: `mmc-host profile` runs the
+  measurement set (rotating I-f flux sweeps, sensorless accel run, locked-rotor
+  R/L probe — a 20 kHz on-device burst capture read back over the protocol,
+  square-wave excitation because τ = L/R undercuts one sample period),
+  `tools/profile.py` fits R/L/ψ/friction/J and computes gains,
+  `mmc-host apply` writes them to the firmware's runtime parameter table
+  (RAM; flash persistence deferred) with read-back verification. Closing
+  proof on the bench: the sensorless loop on its own measured parameters cut
+  the handoff transient 1316 → 527 rad/s and step overshoot 9.7 → 4.8 %.
+  *Sequencing lesson:* the probe parks the rotor on the I-f separatrix, so
+  it runs last. *Deferred:* HF-injection L probe, d-axis-aligned I-f start,
+  param flash persistence.
 - **MS7 — Encoder config + position control**: encoder as second
   `AngleEstimator`, offset auto-calibrated against the observer, position loop
   on top (sim first, then hardware).

@@ -12,6 +12,7 @@
 mod capture;
 mod link;
 mod panel;
+mod profile;
 mod report;
 mod scenario;
 mod server;
@@ -46,6 +47,35 @@ enum Command {
     Capture(CaptureArgs),
     /// Serve a local web control panel for live testing (drive modes, charts).
     Panel(PanelArgs),
+    /// Run the MS6 profiling sequence on hardware (R/L probe, flux sweep,
+    /// accel run); fit the results with tools/profile.py afterwards.
+    Profile(ProfileArgs),
+    /// Apply a fitted motor profile (tools/profile.py JSON) to the device.
+    Apply(ApplyArgs),
+}
+
+#[derive(clap::Args)]
+struct ProfileArgs {
+    /// Serial port of the hardware device (COMx, or `auto` for the first ST-Link).
+    #[arg(long, default_value = "auto")]
+    serial: String,
+    #[arg(long, default_value_t = 1_000_000)]
+    baud: u32,
+    /// Output directory for the profiling captures.
+    #[arg(long, default_value = "testresults/ms6-profile")]
+    dir: PathBuf,
+}
+
+#[derive(clap::Args)]
+struct ApplyArgs {
+    /// Serial port of the hardware device (COMx, or `auto` for the first ST-Link).
+    #[arg(long, default_value = "auto")]
+    serial: String,
+    #[arg(long, default_value_t = 1_000_000)]
+    baud: u32,
+    /// Profile JSON written by tools/profile.py.
+    #[arg(long)]
+    profile: PathBuf,
 }
 
 #[derive(clap::Args)]
@@ -329,6 +359,14 @@ fn main() -> std::io::Result<()> {
                     divider: args.divider,
                 },
             )
+        }
+        Command::Profile(args) => {
+            let mut link = link::Link::serial(&args.serial, args.baud)?;
+            profile::run(&mut link, &args.dir)
+        }
+        Command::Apply(args) => {
+            let mut link = link::Link::serial(&args.serial, args.baud)?;
+            profile::apply(&mut link, &args.profile)
         }
     }
 }

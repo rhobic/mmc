@@ -3,6 +3,77 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-07-12/13 — session 6: MS6 profiler/auto-tune, end to end on hardware
+
+**The MS6 loop is closed: `mmc-host profile` measures the motor,
+`tools/profile.py` fits it, `mmc-host apply` writes the parameters back over
+the protocol (no reflash), and the sensorless controller demonstrably
+improved on its own measured numbers** — handoff transient peak
+1316 → 527 rad/s, speed-step overshoot 9.7 % → 4.8 %
+(`ms6-profile/validate_sensorless`).
+
+**Landed:**
+- `mmc-proto`: `RunTest{kind,a,b}` / `ReadBurst{offset}` / `BurstData`
+  (chunked read-back of an on-device sample buffer, 20 f32s/frame) and
+  `SetParam` / `GetParam` / `ParamValue` — 6 runtime params (r, l, flux,
+  cur_bw, speed_kp, speed_ki; `mmc_proto::param`), range-checked, RAM-only
+  (flash persistence is future work).
+- `mmc-fw-g474` (fw v3): runtime `PARAMS` table replaces the hardcoded motor
+  constants at clean drive-start; drive mode 4 = locked-rotor R/L probe:
+  align the rotor at `a` volts d-axis for 300 ms, then **square-wave**
+  between `a`/`b` (32-tick half-period), recording (i_d, v_d) every 50 µs
+  tick into a 4096-pair burst buffer. Square wave, not a single step,
+  because τ = L/R ≈ 31 µs is *under one sample period* — the host folds
+  ~118 edges and fits the averaged settling fraction (the slope of ln z is
+  immune to the fractional PWM latency). `burst_abort()` on every fault/
+  deadman/off path so a killed probe hands back a partial buffer.
+- `mmc-host profile` — sweeps → accel run → probe, all one command;
+  `mmc-host apply` — JSON in, SetParam + read-back verification out.
+- `tools/profile.py` — R/L fold fit, flux via the hang-angle-aware sweep fit
+  (imports fit_params.py), J/friction from the accel run, speed-gain calc,
+  writes `profile.json`.
+
+**Fitted profile (this bench):** R = 0.904 ± 0.004 Ω (copper, dead-time
+cancelled), **L = 28 µH** (τ = 31 µs — at the resolution floor, ±~30 %),
+ψ = 0.888 ± 0.048 mWb (5/5 sweep points, matches Stage F0's 0.894),
+friction ≈ 0.75 mN·m (matches 0.78), **J = 1.75 µN·m·s²** (5.6× the crude
+Stage-F ramp estimate; trusted more — dedicated slew segment — and the
+validation run's much-improved handoff backs it).
+
+**The debugging story (two false leads, both instructive):**
+1. At the mid-session checkpoint the flux sweeps were all stalling and the
+   suspect was the observer's L default. Wrong on its face: in I-f mode the
+   observer is pure shadow — it cannot stall a rotor. The raw voltages
+   (v_q = R·i_q exactly, v_d ≈ −ω·L·i_q) said the rotor physically never
+   spun.
+2. Power balance then said the load torque was 5.4 mN·m (7× session-5
+   friction) — **artifact**. It used the probe's R (0.896, dead-time
+   cancelled); the *apparent* R at an operating point includes ~0.07 Ω of
+   inverter drop (F0's v_q intercept: 0.966). The phantom torque scaled
+   with i² across two current levels — the signature of a resistance error,
+   not a load. With R_apparent the "heavy load" evaporated.
+3. Real cause, proven by A/B: **the R/L probe parks the rotor aligned to
+   θ = 0, and an I-f start puts its current vector exactly 90° away — the
+   rotor is released on the separatrix of the torque well** (undamped
+   pendulum at marginal capture energy), and the frequency ramp ejects it.
+   Standalone 0.3 A sweeps caught every time (v_d −0.132 V, the session-5
+   value to three digits); probe-first sweeps stalled every time. Fix: the
+   profile sequence runs the probe **last**. (Proper fix some day: start
+   I-f with d-axis current so the rotor aligns to the frame — the canonical
+   self-aligning start; noted, not done.)
+
+**Also:** profile.py fails loudly with hints when sweep points slip or
+accel plateaus are missing (the old cascade of numpy errors was awful).
+
+**Open items:** flash persistence for params; the L probe is at its
+resolution floor (HF injection would do better); d-axis-aligned I-f start;
+the Stage-F leftovers (blend-kick taper, stall detector — the
+fake-lock-on-L·i-artifact behavior seen while debugging is exactly what a
+stall detector should catch).
+
+**Next: MS7 — encoder as the second `AngleEstimator`, auto-calibrated
+against the observer, position loop on top (sim first, then hardware).**
+
 ## 2026-07-11 — session 5: Stage F — closed-loop sensorless on hardware (MS5 complete)
 
 **F0 — motor parameters measured from rotating I-f sweeps** (no firmware

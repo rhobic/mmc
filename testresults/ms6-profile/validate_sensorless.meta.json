@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 8",
+  "description": "MS6 closing proof: sensorless 400->800 rad/s el running on the profiler-measured, protocol-applied parameters (R 0.904, L 28 uH, psi 0.888 mWb, J-derived speed gains). Handoff transient shrank from 1316 to 527 rad/s peak and step overshoot from 9.7 to 4.8 percent vs the hand-guessed gains.",
+  "notes": [
+    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 9440 frames."
+  ],
+  "order": 20,
+  "params": {
+    "divider": 10,
+    "drive": "Sensorless { amps: 0.5, omega_e: 400.00015 }",
+    "drive_step": "Sensorless { amps: 0.5, omega_e: 800.0003 }",
+    "duration_s": 8.0,
+    "iq_A": null
+  },
+  "title": "Validation: sensorless on applied profile (400 to 800)",
+  "unix_time": 1783963466
+}

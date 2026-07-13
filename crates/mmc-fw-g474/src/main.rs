@@ -52,9 +52,11 @@ use mmc_core::observer::{FluxObserver, FluxObserverCfg};
 use mmc_core::pi::PiGains;
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
 use mmc_core::svpwm::svpwm;
-use mmc_core::transforms::{clarke, inverse_park, park, Abc, Dq};
+use mmc_core::transforms::{clarke, inverse_park, park, Abc, AlphaBeta, Dq};
 use mmc_core::tuning::current_pi_gains;
-use mmc_proto::{channel, encode, Deframer, DeviceInfo, DeviceKind, DriveMode, Message};
+use mmc_proto::{
+    channel, encode, param, test, BurstChunk, Deframer, DeviceInfo, DeviceKind, DriveMode, Message,
+};
 
 bind_interrupts!(struct Irqs {
     LPUART1 => usart::InterruptHandler<peripherals::LPUART1>;
@@ -108,6 +110,16 @@ const SL_IQ_LIMIT: f32 = 0.8;
 /// [rad/s electrical] — comfortably above the observer's ~4·leak floor.
 const SL_OMEGA_HANDOFF: f32 = 150.0;
 
+// Locked-rotor R/L probe (RunTest RL_STEP): rotor-align time at the first
+// voltage level, then square-wave excitation between the two levels — τ=L/R
+// sits near the 50 µs sample period, so a single edge has ~2 usable samples;
+// folding ~60 edges recovers it. Half-period 32 ticks = 1.6 ms ≫ τ, so the
+// plateaus settle and R comes out differentially (dead-time cancels).
+const PROBE_ALIGN_TICKS: u32 = 6000; // 300 ms
+const PROBE_HALF_TICKS: u32 = 32;
+const PROBE_PRE_PAIRS: usize = 256;
+const BURST_PAIRS: usize = 4096;
+
 // drive state values (channel::STATE)
 const ST_OFF: u8 = 0;
 const ST_RUN: u8 = 1;
@@ -123,7 +135,7 @@ const ST_SL_BLEND: u8 = 7;
 // ------------------------------------------------------------ shared state
 
 // Host command → control ISR.
-static CMD_MODE: AtomicU8 = AtomicU8::new(0); // 0 off, 1 volt, 2 i-f, 3 sensorless
+static CMD_MODE: AtomicU8 = AtomicU8::new(0); // 0 off, 1 volt, 2 i-f, 3 sensorless, 4 rl-probe
 static CMD_AMP: AtomicU32 = AtomicU32::new(0);
 static CMD_OMEGA: AtomicU32 = AtomicU32::new(0);
 static CMD_EPOCH: AtomicU32 = AtomicU32::new(0);
@@ -146,6 +158,60 @@ static DIVIDER: AtomicU32 = AtomicU32::new(20); // ×50 µs = 1 kHz default
 static STREAMING: AtomicBool = AtomicBool::new(false);
 
 static RESPONSES: Channel<CriticalSectionRawMutex, Message, 8> = Channel::new();
+
+// Runtime parameters (mmc_proto::param ids), profiler-writable over the
+// protocol. Defaults are the Stage F0 bench fits; a new value applies at the
+// next clean drive start. RAM only — flash persistence is future work.
+const fn p32(v: f32) -> AtomicU32 {
+    AtomicU32::new(v.to_bits())
+}
+static PARAMS: [AtomicU32; param::COUNT] = [
+    p32(MOTOR_RS),
+    p32(MOTOR_LS),
+    p32(MOTOR_FLUX),
+    p32(CUR_BANDWIDTH),
+    p32(SPEED_KP),
+    p32(SPEED_KI),
+];
+
+fn param_get(id: u8) -> f32 {
+    f32::from_bits(PARAMS[id as usize].load(Ordering::Relaxed))
+}
+
+/// Sanity window per parameter — a NAK beats bricking the control loop.
+fn param_range(id: u8) -> Option<(f32, f32)> {
+    Some(match id {
+        param::R => (0.05, 20.0),
+        param::L => (5e-6, 0.05),
+        param::FLUX => (1e-5, 0.5),
+        param::CUR_BW => (100.0, 4000.0),
+        param::SPEED_KP => (0.0, 0.1),
+        param::SPEED_KI => (0.0, 10.0),
+        _ => return None,
+    })
+}
+
+// Burst buffer: per-tick (i_d, v_d) pairs recorded by the R/L probe at the
+// full 20 kHz — resolution the telemetry stream can't deliver at 1 Mbaud.
+struct BurstCell(UnsafeCell<[f32; BURST_PAIRS * 2]>);
+// Safety: written only by the ISR while BURST_STATE == 1, read by the rx
+// task only while BURST_STATE == 2.
+unsafe impl Sync for BurstCell {}
+static BURST: BurstCell = BurstCell(UnsafeCell::new([0.0; BURST_PAIRS * 2]));
+/// 0 idle, 1 recording (ISR owns), 2 done (host may read).
+static BURST_STATE: AtomicU8 = AtomicU8::new(0);
+/// f32s recorded so far.
+static BURST_LEN: AtomicU32 = AtomicU32::new(0);
+static PROBE_V_ALIGN: AtomicU32 = AtomicU32::new(0);
+static PROBE_V_STEP: AtomicU32 = AtomicU32::new(0);
+
+/// A drive abort with a probe in flight still hands the (partial) buffer to
+/// the host — a short read beats a hung poll loop.
+fn burst_abort() {
+    if BURST_STATE.load(Ordering::Relaxed) == 1 {
+        BURST_STATE.store(2, Ordering::Release);
+    }
+}
 
 // ---------------------------------------------------------------- ISR state
 
@@ -172,6 +238,8 @@ struct IsrState {
     /// Signed startup current, consumed as the speed-PI preload on the
     /// first closed-loop tick (0.0 = already consumed).
     sl_preload: f32,
+    /// R/L probe tick counter (mode 4).
+    probe_ticks: u32,
     oc_strikes: u8,
     vbus_filt: f32,
 }
@@ -195,6 +263,7 @@ static ISR_STATE: IsrCell = IsrCell(UnsafeCell::new(IsrState {
     speed: None,
     omega_ref_cur: 0.0,
     sl_preload: 0.0,
+    probe_ticks: 0,
     oc_strikes: 0,
     vbus_filt: 0.0,
 }));
@@ -419,7 +488,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 2, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 3, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -456,6 +525,63 @@ fn handle(msg: &Message) -> Message {
             CMD_MODE.store(m, Ordering::Relaxed);
             CMD_EPOCH.fetch_add(1, Ordering::Release);
             ack
+        }
+        Message::RunTest { kind, a, b } => {
+            if kind != test::RL_STEP {
+                return nak(1);
+            }
+            let state = STATE.load(Ordering::Relaxed);
+            if state == ST_CAL {
+                return nak(3);
+            }
+            if state >= ST_FAULT_OC {
+                return nak(2);
+            }
+            // Only from a quiet stage, and not while a probe is recording.
+            if CMD_MODE.load(Ordering::Relaxed) != 0
+                || state == ST_RUN
+                || BURST_STATE.load(Ordering::Relaxed) == 1
+            {
+                return nak(2);
+            }
+            PROBE_V_ALIGN.store(a.clamp(0.05, V_AMP_MAX).to_bits(), Ordering::Relaxed);
+            PROBE_V_STEP.store(b.clamp(0.05, V_AMP_MAX).to_bits(), Ordering::Relaxed);
+            BURST_LEN.store(0, Ordering::Relaxed);
+            BURST_STATE.store(1, Ordering::Relaxed);
+            CMD_MODE.store(4, Ordering::Relaxed);
+            CMD_EPOCH.fetch_add(1, Ordering::Release);
+            ack
+        }
+        Message::ReadBurst { offset } => {
+            if BURST_STATE.load(Ordering::Acquire) != 2 {
+                return nak(4); // no finished recording to read
+            }
+            let len = BURST_LEN.load(Ordering::Relaxed) as usize;
+            let off = (offset as usize).min(len);
+            // Safety: ISR only writes while BURST_STATE == 1.
+            let buf = unsafe { &*BURST.0.get() };
+            let n = (len - off).min(mmc_proto::BURST_CHUNK);
+            match BurstChunk::new(off as u16, len as u16, &buf[off..off + n]) {
+                Some(chunk) => Message::BurstData(chunk),
+                None => nak(1),
+            }
+        }
+        Message::SetParam { id, value } => match param_range(id) {
+            Some((lo, hi)) if (lo..=hi).contains(&value) => {
+                PARAMS[id as usize].store(value.to_bits(), Ordering::Relaxed);
+                ack
+            }
+            _ => nak(1),
+        },
+        Message::GetParam { id } => {
+            if (id as usize) < param::COUNT {
+                Message::ParamValue {
+                    id,
+                    value: param_get(id),
+                }
+            } else {
+                nak(1)
+            }
         }
         // Adjust the I-f current target on the fly; otherwise ignored.
         Message::SetIqRef { iq } => {
@@ -616,6 +742,7 @@ unsafe extern "C" fn ADC1_2() {
             s.omega = 0.0;
             s.amp = 0.0;
             stage_off();
+            burst_abort();
             if state >= ST_FAULT_OC {
                 STATE.store(ST_OFF, Ordering::Relaxed); // fault re-arm
             } else if state == ST_RUN {
@@ -625,16 +752,20 @@ unsafe extern "C" fn ADC1_2() {
             if s.vbus_filt < VBUS_MIN_RUN || s.vbus_filt > VBUS_MAX {
                 s.mode = 0;
                 stage_off();
+                burst_abort();
                 STATE.store(ST_FAULT_VBUS, Ordering::Relaxed);
             } else {
                 if s.mode == 0 {
-                    // clean start
+                    // clean start — control blocks built from the runtime
+                    // parameter table (profiler-writable).
                     s.theta = 0.0;
                     s.omega = 0.0;
                     s.amp = 0.0;
                     s.oc_strikes = 0;
-                    let gains = current_pi_gains(MOTOR_RS, MOTOR_LS, CUR_BANDWIDTH);
-                    s.obs = Some(FluxObserver::new(FluxObserverCfg::new(MOTOR_RS, MOTOR_LS)));
+                    s.probe_ticks = 0;
+                    let (rs, ls) = (param_get(param::R), param_get(param::L));
+                    let gains = current_pi_gains(rs, ls, param_get(param::CUR_BW));
+                    s.obs = Some(FluxObserver::new(FluxObserverCfg::new(rs, ls)));
                     if mode == 3 {
                         // Sensorless: feedforward FOC (flux is measured now),
                         // I-f sequencer toward the commanded direction, speed
@@ -642,9 +773,9 @@ unsafe extern "C" fn ADC1_2() {
                         s.foc = Some(Foc::with_feedforward(
                             gains,
                             Decoupling {
-                                ld: MOTOR_LS,
-                                lq: MOTOR_LS,
-                                flux: MOTOR_FLUX,
+                                ld: ls,
+                                lq: ls,
+                                flux: param_get(param::FLUX),
                             },
                         ));
                         let omega_t = f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed));
@@ -659,8 +790,8 @@ unsafe extern "C" fn ADC1_2() {
                         }));
                         s.speed = Some(SpeedLoop::new(
                             PiGains {
-                                kp: SPEED_KP,
-                                ki: SPEED_KI,
+                                kp: param_get(param::SPEED_KP),
+                                ki: param_get(param::SPEED_KI),
                             },
                             SL_IQ_LIMIT,
                         ));
@@ -699,6 +830,7 @@ unsafe extern "C" fn ADC1_2() {
             s.omega = 0.0;
             s.amp = 0.0;
             stage_off();
+            burst_abort();
             STATE.store(f, Ordering::Relaxed);
             CMD_MODE.store(0, Ordering::Relaxed);
         }
@@ -709,6 +841,7 @@ unsafe extern "C" fn ADC1_2() {
             s.omega = 0.0;
             s.amp = 0.0;
             stage_off();
+            burst_abort();
             STATE.store(ST_OFF, Ordering::Relaxed);
             CMD_MODE.store(0, Ordering::Relaxed);
         }
@@ -728,7 +861,47 @@ unsafe extern "C" fn ADC1_2() {
         let amp_target = f32::from_bits(CMD_AMP.load(Ordering::Relaxed));
         let i_ab = clarke(i_abc);
 
-        let v_ab = if s.mode == 3 {
+        let v_ab = if s.mode == 4 {
+            // Locked-rotor R/L probe: θ held at 0 (rotor aligned during the
+            // first phase), then unslewed square-wave v_d between the two
+            // levels, recording (i_d, v_d) per tick into the burst buffer at
+            // the full 20 kHz.
+            s.probe_ticks += 1;
+            let n = BURST_LEN.load(Ordering::Relaxed) as usize;
+            if n >= BURST_PAIRS * 2 {
+                // Recording complete: stage off, hand the buffer to the host.
+                s.mode = 0;
+                stage_off();
+                STATE.store(ST_OFF, Ordering::Relaxed);
+                CMD_MODE.store(0, Ordering::Relaxed);
+                BURST_STATE.store(2, Ordering::Release);
+                AlphaBeta::default()
+            } else {
+                let v = f32::from_bits(if s.probe_ticks <= PROBE_ALIGN_TICKS {
+                    PROBE_V_ALIGN.load(Ordering::Relaxed)
+                } else {
+                    let half = (s.probe_ticks - PROBE_ALIGN_TICKS - 1) / PROBE_HALF_TICKS;
+                    if half.is_multiple_of(2) {
+                        PROBE_V_STEP.load(Ordering::Relaxed)
+                    } else {
+                        PROBE_V_ALIGN.load(Ordering::Relaxed)
+                    }
+                });
+                let sc = sin_cos(0.0);
+                i_dq = park(i_ab, sc);
+                if s.probe_ticks + PROBE_PRE_PAIRS as u32 > PROBE_ALIGN_TICKS {
+                    // Safety: rx task only reads while BURST_STATE == 2.
+                    let buf = unsafe { &mut *BURST.0.get() };
+                    buf[n] = i_dq.d;
+                    buf[n + 1] = v;
+                    BURST_LEN.store((n + 2) as u32, Ordering::Relaxed);
+                }
+                v_dq = Dq { d: v, q: 0.0 };
+                let v_ab = inverse_park(v_dq, sc);
+                duties = svpwm(v_ab, s.vbus_filt.max(1.0));
+                v_ab
+            }
+        } else if s.mode == 3 {
             // Sensorless: the sequencer owns the angle (I-f ramp → blend →
             // observer), the speed loop owns i_q once closed. The observer
             // state is one tick old here; it is fed below, same as the rig.
