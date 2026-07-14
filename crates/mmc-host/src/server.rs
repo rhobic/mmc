@@ -8,11 +8,24 @@ use std::time::{Duration, Instant};
 
 use mmc_core::angle::AngleEstimator;
 use mmc_core::foc::{Decoupling, Foc, FocOutput};
-use mmc_core::transforms::{Abc, Dq};
-use mmc_core::tuning::current_pi_gains;
+use mmc_core::math::{sin_cos, wrap_angle};
+use mmc_core::observer::{FluxObserver, FluxObserverCfg};
+use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
+use mmc_core::svpwm::svpwm;
+use mmc_core::transforms::{clarke, inverse_park, park, Abc, Dq};
+use mmc_core::tuning::{current_pi_gains, speed_pi_gains};
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
-use mmc_proto::{channel, encode, param, Deframer, DeviceInfo, DeviceKind, Message, MAX_FRAME};
+use mmc_proto::{channel, encode, param, DriveMode, Deframer, DeviceInfo, DeviceKind, Message, MAX_FRAME};
 use mmc_sim::{PmsmParams, TruthAngle, VirtualMotor};
+
+// Drive-mode ramps/limits mirrored from the firmware ISR, so the sim spins up
+// the way the hardware does.
+const OMEGA_SLEW: f32 = 500.0; // rad/s^2 electrical
+const V_SLEW: f32 = 5.0; // V/s
+const I_SLEW: f32 = 2.0; // A/s
+const SL_OMEGA_HANDOFF: f32 = 150.0; // I-f -> observer handoff [rad/s el]
+const SL_IQ_LIMIT: f32 = 0.8; // speed-loop i_q authority [A]
+const SPEED_BW: f32 = 40.0; // speed-loop bandwidth [rad/s el]
 
 pub struct ServeCfg {
     pub ctrl_freq: f32,
@@ -29,6 +42,261 @@ impl Default for ServeCfg {
             bandwidth: 2000.0,
             vbus: 24.0,
             once: false,
+        }
+    }
+}
+
+/// One control period's output, for telemetry.
+struct StepOut {
+    out: FocOutput,
+    iq_ref: f32,
+    theta_est: f32,
+    omega_est: f32,
+    theta_err: f32,
+    /// `channel::STATE` code (1 run, 6 I-f ramp, 7 blend, 0 idle).
+    state: f32,
+}
+
+/// Live control for the sim server. Mirrors the firmware ISR's drive-mode
+/// dispatch against the one virtual rig: mode 0 is the legacy truth-angle torque
+/// mode (`SetIqRef`, used by `capture --iq`); modes 1/2/3 are open-loop voltage,
+/// I-f current, and sensorless — reached via `SetDrive`, exactly like hardware.
+struct SimControl {
+    params: PmsmParams,
+    ctrl_dt: f32,
+    current_bw: f32,
+    mode: u8,
+    // mode 0 (truth-angle torque)
+    angle: TruthAngle,
+    iq_ref_cmd: f32,
+    // forced-frame (1/2) + shared blocks
+    foc: Foc,
+    obs: FluxObserver,
+    theta: f32,
+    omega: f32,
+    amp: f32,
+    omega_target: f32,
+    amp_target: f32,
+    // sensorless (3)
+    seq: Option<Sequencer>,
+    speed: Option<SpeedLoop>,
+    omega_ref_cur: f32,
+    sl_preload: f32,
+}
+
+impl SimControl {
+    fn new(params: PmsmParams, ctrl_dt: f32, current_bw: f32) -> Self {
+        Self {
+            params,
+            ctrl_dt,
+            current_bw,
+            mode: 0,
+            angle: TruthAngle::default(),
+            iq_ref_cmd: 0.0,
+            foc: Foc::with_feedforward(
+                current_pi_gains(params.rs, params.lq, current_bw),
+                Decoupling {
+                    ld: params.ld,
+                    lq: params.lq,
+                    flux: params.flux,
+                },
+            ),
+            obs: FluxObserver::new(FluxObserverCfg::new(params.rs, params.lq)),
+            theta: 0.0,
+            omega: 0.0,
+            amp: 0.0,
+            omega_target: 0.0,
+            amp_target: 0.0,
+            seq: None,
+            speed: None,
+            omega_ref_cur: 0.0,
+            sl_preload: 0.0,
+        }
+    }
+
+    /// Rebuild the current loop from the motor params — a clean start with no
+    /// integrator carryover between mode switches.
+    fn rebuild_foc(&mut self) {
+        let p = self.params;
+        self.foc = Foc::with_feedforward(
+            current_pi_gains(p.rs, p.lq, self.current_bw),
+            Decoupling {
+                ld: p.ld,
+                lq: p.lq,
+                flux: p.flux,
+            },
+        );
+    }
+
+    /// `SetIqRef`: live i_q for I-f, torque command otherwise (legacy path).
+    fn set_iq(&mut self, iq: f32) {
+        if self.mode == 2 {
+            self.amp_target = iq;
+        } else {
+            self.iq_ref_cmd = iq;
+        }
+    }
+
+    /// `SetDrive`: `mode` 0 off, 1 open-loop voltage, 2 I-f, 3 sensorless.
+    /// A new running mode starts from rest with fresh control blocks; a repeat
+    /// of the same mode just retargets amplitude/speed (smooth live changes).
+    fn set_drive(&mut self, mode: u8, amp: f32, omega: f32) {
+        if mode == 0 {
+            self.mode = 0;
+            self.omega = 0.0;
+            self.amp = 0.0;
+            self.iq_ref_cmd = 0.0;
+            self.seq = None;
+            self.speed = None;
+            self.rebuild_foc();
+            return;
+        }
+        let fresh = mode != self.mode;
+        self.mode = mode;
+        self.omega_target = omega;
+        self.amp_target = amp;
+        if !fresh {
+            return;
+        }
+        self.theta = 0.0;
+        self.omega = 0.0;
+        self.amp = 0.0;
+        self.rebuild_foc();
+        self.obs = FluxObserver::new(FluxObserverCfg::new(self.params.rs, self.params.lq));
+        if mode == 3 {
+            let p = self.params;
+            let dir = if omega < 0.0 { -1.0 } else { 1.0 };
+            let i_start = amp.abs().clamp(0.1, SL_IQ_LIMIT);
+            self.seq = Some(Sequencer::new(SequencerCfg {
+                i_start,
+                omega_handoff: SL_OMEGA_HANDOFF * dir,
+                ..SequencerCfg::default()
+            }));
+            self.speed = Some(SpeedLoop::new(
+                speed_pi_gains(p.inertia, p.torque_constant(), p.pole_pairs, SPEED_BW),
+                SL_IQ_LIMIT,
+            ));
+            self.omega_ref_cur = SL_OMEGA_HANDOFF * dir;
+            self.sl_preload = i_start * dir;
+        } else {
+            self.seq = None;
+            self.speed = None;
+        }
+    }
+
+    /// Ramp the forced electrical frequency and amplitude toward their targets.
+    fn ramp_forced(&mut self, amp_slew: f32) {
+        let dt = self.ctrl_dt;
+        let d_omega = (self.omega_target - self.omega).clamp(-OMEGA_SLEW * dt, OMEGA_SLEW * dt);
+        self.omega += d_omega;
+        let d_amp = (self.amp_target - self.amp).clamp(-amp_slew * dt, amp_slew * dt);
+        self.amp += d_amp;
+        self.theta = wrap_angle(self.theta + self.omega * dt);
+    }
+
+    /// One control period against the rig: read currents, compute, apply,
+    /// advance the motor, then update the observer from what was applied.
+    fn step(&mut self, rig: &mut VirtualMotor) -> StepOut {
+        let dt = self.ctrl_dt;
+        let [ia, ib, ic] = rig.phase_currents();
+        let i_abc = Abc { a: ia, b: ib, c: ic };
+        let vbus = rig.vbus().max(1.0);
+        let i_ab = clarke(i_abc);
+
+        let mut iq_ref = 0.0;
+        let mut state = 1.0;
+        let out = match self.mode {
+            1 => {
+                // Open-loop rotating voltage vector.
+                self.ramp_forced(V_SLEW);
+                let sc = sin_cos(self.theta);
+                let v_dq = Dq {
+                    d: self.amp,
+                    q: 0.0,
+                };
+                let v_ab = inverse_park(v_dq, sc);
+                let duties = svpwm(v_ab, vbus);
+                FocOutput {
+                    duties,
+                    i_dq: park(i_ab, sc),
+                    v_dq,
+                    v_ab,
+                    i_ab,
+                }
+            }
+            2 => {
+                // I-f: closed current loop on the forced angle.
+                self.ramp_forced(I_SLEW);
+                iq_ref = self.amp;
+                self.foc.step(
+                    i_abc,
+                    self.theta,
+                    self.omega,
+                    Dq { d: 0.0, q: iq_ref },
+                    vbus,
+                    dt,
+                )
+            }
+            3 => {
+                // Sensorless: sequencer owns the angle (I-f ramp -> blend ->
+                // observer), speed loop owns i_q once closed.
+                let seq_out = self.seq.as_mut().unwrap().update(&self.obs, dt);
+                iq_ref = match seq_out.iq_open {
+                    Some(iq) => iq,
+                    None => {
+                        let speed = self.speed.as_mut().unwrap();
+                        if self.sl_preload != 0.0 {
+                            speed.preload(self.sl_preload);
+                            self.sl_preload = 0.0;
+                        }
+                        let d = (self.omega_target - self.omega_ref_cur)
+                            .clamp(-OMEGA_SLEW * dt, OMEGA_SLEW * dt);
+                        self.omega_ref_cur += d;
+                        speed.update(self.omega_ref_cur, seq_out.omega, dt)
+                    }
+                };
+                self.theta = seq_out.theta;
+                self.omega = seq_out.omega;
+                state = match seq_out.phase {
+                    Phase::Ramp => 6.0,
+                    Phase::Blend => 7.0,
+                    Phase::Closed => 1.0,
+                };
+                self.foc.step(
+                    i_abc,
+                    self.theta,
+                    self.omega,
+                    Dq { d: 0.0, q: iq_ref },
+                    vbus,
+                    dt,
+                )
+            }
+            _ => {
+                // Mode 0: legacy torque on the truth angle (SetIqRef).
+                self.angle.sync(&rig.motor);
+                iq_ref = self.iq_ref_cmd;
+                state = if iq_ref != 0.0 { 1.0 } else { 0.0 };
+                self.foc.step(
+                    i_abc,
+                    self.angle.electrical_angle(),
+                    self.angle.electrical_velocity(),
+                    Dq { d: 0.0, q: iq_ref },
+                    vbus,
+                    dt,
+                )
+            }
+        };
+        rig.set_duties(out.duties);
+        rig.advance(dt);
+        self.obs.update(out.i_ab, out.v_ab, dt);
+        let theta_est = self.obs.electrical_angle();
+        StepOut {
+            iq_ref,
+            theta_est,
+            omega_est: self.obs.electrical_velocity(),
+            theta_err: wrap_angle(theta_est - rig.motor.theta_e()),
+            state,
+            out,
         }
     }
 }
@@ -60,16 +328,7 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
     let ctrl_dt = 1.0 / cfg.ctrl_freq;
     let mut rig = VirtualMotor::new(params, cfg.vbus);
     rig.enable();
-    let mut foc = Foc::with_feedforward(
-        current_pi_gains(params.rs, params.lq, cfg.bandwidth),
-        Decoupling {
-            ld: params.ld,
-            lq: params.lq,
-            flux: params.flux,
-        },
-    );
-    let mut angle = TruthAngle::default();
-    let mut i_ref = Dq::default();
+    let mut control = SimControl::new(params, ctrl_dt, cfg.bandwidth);
 
     let mut deframer = Deframer::new();
     let mut mask = channel::ALL;
@@ -94,7 +353,7 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
                         handle(
                             &msg,
                             &mut stream,
-                            &mut i_ref,
+                            &mut control,
                             &mut mask,
                             &mut divider,
                             &mut streaming,
@@ -112,27 +371,11 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
         let target = (started.elapsed().as_secs_f64() * cfg.ctrl_freq as f64) as u64;
         let burst = (target - steps_done).min(cfg.ctrl_freq as u64 / 10);
         for _ in 0..burst {
-            angle.sync(&rig.motor);
-            let [ia, ib, ic] = rig.phase_currents();
-            let vbus = rig.vbus();
-            let out = foc.step(
-                Abc {
-                    a: ia,
-                    b: ib,
-                    c: ic,
-                },
-                angle.electrical_angle(),
-                angle.electrical_velocity(),
-                i_ref,
-                vbus,
-                ctrl_dt,
-            );
-            rig.set_duties(out.duties);
-            rig.advance(ctrl_dt);
+            let step = control.step(&mut rig);
             steps_done += 1;
 
             if streaming && steps_done.is_multiple_of(divider as u64) {
-                let frame = telemetry(&rig, &out, i_ref, mask);
+                let frame = telemetry(&rig, &step, mask);
                 send(&mut stream, &Message::Telemetry(frame))?;
             }
         }
@@ -142,7 +385,7 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
 fn handle(
     msg: &Message,
     stream: &mut TcpStream,
-    i_ref: &mut Dq,
+    control: &mut SimControl,
     mask: &mut u32,
     divider: &mut u32,
     streaming: &mut bool,
@@ -177,7 +420,22 @@ fn handle(
             )
         }
         Message::SetIqRef { iq } => {
-            i_ref.q = iq;
+            control.set_iq(iq);
+            send(
+                stream,
+                &Message::Ack {
+                    of: msg.wire_type(),
+                },
+            )
+        }
+        Message::SetDrive(mode) => {
+            let (m, amp, omega) = match mode {
+                DriveMode::Off => (0u8, 0.0f32, 0.0f32),
+                DriveMode::OpenLoopVoltage { volts, omega_e } => (1, volts, omega_e),
+                DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
+                DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
+            };
+            control.set_drive(m, amp, omega);
             send(
                 stream,
                 &Message::Ack {
@@ -235,12 +493,8 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
     })
 }
 
-fn telemetry(
-    rig: &VirtualMotor,
-    out: &FocOutput,
-    i_ref: Dq,
-    mask: u32,
-) -> mmc_proto::TelemetryFrame {
+fn telemetry(rig: &VirtualMotor, step: &StepOut, mask: u32) -> mmc_proto::TelemetryFrame {
+    let out = &step.out;
     let i_abc = rig.motor.phase_currents();
     let mut values = [0f32; channel::COUNT];
     let mut n = 0;
@@ -249,7 +503,7 @@ fn telemetry(
             continue;
         }
         values[n] = match id {
-            channel::IQ_REF => i_ref.q,
+            channel::IQ_REF => step.iq_ref,
             channel::I_D => out.i_dq.d,
             channel::I_Q => out.i_dq.q,
             channel::V_D => out.v_dq.d,
@@ -263,7 +517,10 @@ fn telemetry(
             channel::I_A => i_abc.a,
             channel::I_B => i_abc.b,
             channel::I_C => i_abc.c,
-            channel::STATE => 1.0, // the sim's stage is always "running"
+            channel::STATE => step.state,
+            channel::THETA_EST => step.theta_est,
+            channel::OMEGA_EST => step.omega_est,
+            channel::THETA_ERR => step.theta_err,
             _ => 0.0,
         };
         n += 1;

@@ -27,12 +27,23 @@ surfaced in the UI. No firmware change: the wire protocol already had it.
   same 6 params (seeded from the sim motor), mirroring the firmware's
   `param_range`. Makes the whole feature testable/regressable without hardware
   (the sim stores but doesn't yet re-tune its loop from a write — documented).
+- `server.rs`: **the sim now implements `SetDrive` (all three drive modes)** —
+  previously it only handled `SetIqRef`, so the panel's "Apply drive" button
+  silently did nothing against the sim (NAK, ignored). New `SimControl` mirrors
+  the firmware ISR's mode dispatch against the one virtual rig: mode 0 = legacy
+  truth-angle torque (`SetIqRef`, keeps `capture --iq` working), 1 = open-loop
+  voltage, 2 = I-f current, 3 = sensorless (Sequencer → observer handoff →
+  speed loop). STATE channel now reflects the mode (idle/run/if-ramp/blend), and
+  θ̂/ω̂/θ_err estimates stream too. The panel now drives the sim exactly like
+  hardware — the "cannot tell the difference" invariant restored for drive.
 
-**Verified** (scratch build, sim over TCP, panel driving it): startup read
-(r=0.5 Ω, L=0.6 mH, ψ=8 mWb, …), valid write + read-back (r→1.25 Ω,
-ψ→0.9 mWb), out-of-range reject (r=50 → "rejected by device", value unchanged),
-telemetry uninterrupted (61k+ frames), drive/getparams still work. Workspace
-`cargo test` green.
+**Verified** (scratch build, sim over TCP, panel driving it): live params —
+startup read (r=0.5 Ω, L=0.6 mH, ψ=8 mWb), valid write + read-back (r→1.25 Ω,
+ψ→0.9 mWb), out-of-range reject (r=50 → "rejected by device", unchanged).
+Drive modes — I-f 0.3 A @ 188 rad/s el → rotor follows at 26.9 rad/s mech
+(=188/7); sensorless startup → closed loop at the 628 rad/s-el target with
+ω̂ tracking; open-loop voltage rotor follows commanded frequency; STOP coasts
+down. Telemetry uninterrupted; workspace `cargo test` green.
 
 **Decided / deferred:** parameter **flash persistence** (device keeps params
 across power-cycle) is now an explicit [PLAN.md](PLAN.md) backlog item — user
