@@ -14,7 +14,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use mmc_proto::{channel, DriveMode, Message};
+use mmc_proto::{channel, param, DriveMode, Message};
 
 use crate::link::Link;
 
@@ -27,6 +27,15 @@ pub struct PanelCfg {
     pub divider: u16,
 }
 
+/// Command from the HTTP thread to the link pump. Drive/i_q are fire-and-forget;
+/// parameter ops need a synchronous request/response, so the pump runs them
+/// inline (it owns the single `Link`).
+enum Cmd {
+    Send(Message),
+    RefreshParams,
+    SetParam { id: u8, value: f32 },
+}
+
 struct Shared {
     columns: Vec<String>,
     ring: VecDeque<Vec<f32>>,
@@ -35,6 +44,10 @@ struct Shared {
     errors: usize,
     last_poll: Instant,
     drive_on: bool,
+    /// Latest known device parameter values, indexed by `param` id (NaN = unread).
+    params: Vec<f32>,
+    /// Human-readable result of the last parameter read/write, for the UI.
+    param_status: String,
 }
 
 pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
@@ -54,6 +67,35 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
         mask: channel::ALL,
     };
     link.request(&set, |m| matches!(m, Message::Ack { .. }), t)?;
+
+    // Read the device's runtime parameters while the line is still quiet —
+    // `request` discards non-matching frames, so do this before streaming. A
+    // device without a parameter table (the sim, the G0B1) NAKs GetParam;
+    // bail on the first NAK so startup stays instant.
+    let mut params = vec![f32::NAN; param::COUNT];
+    let mut has_params = true;
+    for id in 0..param::COUNT as u8 {
+        match link.request(
+            &Message::GetParam { id },
+            |m| {
+                matches!(m, Message::ParamValue { id: i, .. } if *i == id)
+                    || matches!(m, Message::Nak { of: 0x0A, .. })
+            },
+            t,
+        ) {
+            Ok(Message::ParamValue { value, .. }) => params[id as usize] = value,
+            _ => {
+                has_params = false;
+                break;
+            }
+        }
+    }
+    let param_status = if has_params {
+        "parameters read from device".to_string()
+    } else {
+        "device has no runtime parameters".to_string()
+    };
+
     let stream = Message::Stream { enable: true };
     link.request(&stream, |m| matches!(m, Message::Ack { .. }), t)?;
 
@@ -71,8 +113,10 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
         errors: 0,
         last_poll: Instant::now(),
         drive_on: false,
+        params,
+        param_status,
     }));
-    let (cmd_tx, cmd_rx) = mpsc::channel::<Message>();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
 
     let listener = TcpListener::bind(&cfg.http)?;
     println!(
@@ -90,15 +134,22 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
     let mut acc_us = 0u64;
     let mut last_send = Instant::now();
     loop {
-        while let Ok(msg) = cmd_rx.try_recv() {
-            let mut s = shared.lock().unwrap();
-            match msg {
-                Message::SetDrive(DriveMode::Off) => s.drive_on = false,
-                Message::SetDrive(_) => s.drive_on = true,
-                _ => {}
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            match cmd {
+                Cmd::Send(msg) => {
+                    {
+                        let mut s = shared.lock().unwrap();
+                        match msg {
+                            Message::SetDrive(DriveMode::Off) => s.drive_on = false,
+                            Message::SetDrive(_) => s.drive_on = true,
+                            _ => {}
+                        }
+                    }
+                    link.send(&msg)?;
+                }
+                Cmd::RefreshParams => read_params(&mut link, &shared),
+                Cmd::SetParam { id, value } => set_param(&mut link, &shared, id, value),
             }
-            drop(s);
-            link.send(&msg)?;
             last_send = Instant::now();
         }
         {
@@ -136,7 +187,7 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
     }
 }
 
-fn http_loop(listener: TcpListener, shared: Arc<Mutex<Shared>>, cmd_tx: mpsc::Sender<Message>) {
+fn http_loop(listener: TcpListener, shared: Arc<Mutex<Shared>>, cmd_tx: mpsc::Sender<Cmd>) {
     for conn in listener.incoming() {
         let Ok(conn) = conn else { continue };
         let _ = conn.set_nodelay(true);
@@ -147,7 +198,7 @@ fn http_loop(listener: TcpListener, shared: Arc<Mutex<Shared>>, cmd_tx: mpsc::Se
 fn handle_conn(
     conn: TcpStream,
     shared: &Arc<Mutex<Shared>>,
-    cmd_tx: &mpsc::Sender<Message>,
+    cmd_tx: &mpsc::Sender<Cmd>,
 ) -> std::io::Result<()> {
     conn.set_read_timeout(Some(Duration::from_secs(2)))?;
     let mut reader = BufReader::new(conn);
@@ -205,6 +256,9 @@ fn handle_conn(
                 "device": s.device,
                 "frames": s.frames,
                 "errors": s.errors,
+                "params": s.params,
+                "param_names": param::NAMES,
+                "param_status": s.param_status,
             });
             let body = serde_json::to_vec(&json)?;
             respond(&mut conn, 200, "application/json", &body)
@@ -226,7 +280,7 @@ fn handle_conn(
     }
 }
 
-fn parse_cmd(v: &serde_json::Value) -> Option<Message> {
+fn parse_cmd(v: &serde_json::Value) -> Option<Cmd> {
     let f = |k: &str| v.get(k).and_then(|x| x.as_f64()).map(|x| x as f32);
     match v.get("cmd")?.as_str()? {
         "drive" => {
@@ -246,11 +300,76 @@ fn parse_cmd(v: &serde_json::Value) -> Option<Message> {
                 },
                 _ => return None,
             };
-            Some(Message::SetDrive(mode))
+            Some(Cmd::Send(Message::SetDrive(mode)))
         }
-        "iq" => Some(Message::SetIqRef { iq: f("iq")? }),
+        "iq" => Some(Cmd::Send(Message::SetIqRef { iq: f("iq")? })),
+        "getparams" => Some(Cmd::RefreshParams),
+        "setparam" => Some(Cmd::SetParam {
+            id: v.get("id")?.as_u64()? as u8,
+            value: f("value")?,
+        }),
         _ => None,
     }
+}
+
+/// Read every runtime parameter and stash it for the UI. Briefly discards a
+/// telemetry sample or two while waiting for each reply — negligible.
+fn read_params(link: &mut Link, shared: &Arc<Mutex<Shared>>) {
+    let t = Duration::from_millis(500);
+    for id in 0..param::COUNT as u8 {
+        match link.request(
+            &Message::GetParam { id },
+            |m| {
+                matches!(m, Message::ParamValue { id: i, .. } if *i == id)
+                    || matches!(m, Message::Nak { of: 0x0A, .. })
+            },
+            t,
+        ) {
+            Ok(Message::ParamValue { value, .. }) => shared.lock().unwrap().params[id as usize] = value,
+            Ok(Message::Nak { .. }) => {
+                shared.lock().unwrap().param_status = "device has no runtime parameters".into();
+                return;
+            }
+            _ => {
+                shared.lock().unwrap().param_status =
+                    format!("read of {} timed out", param::NAMES[id as usize]);
+                return;
+            }
+        }
+    }
+    shared.lock().unwrap().param_status = "parameters read from device".into();
+}
+
+/// Set one parameter and verify by read-back. The firmware NAKs out-of-range
+/// values; surface that verbatim rather than pretending the write took.
+fn set_param(link: &mut Link, shared: &Arc<Mutex<Shared>>, id: u8, value: f32) {
+    if id as usize >= param::COUNT {
+        shared.lock().unwrap().param_status = format!("no such parameter #{id}");
+        return;
+    }
+    let name = param::NAMES[id as usize];
+    let t = Duration::from_millis(500);
+    let ack = link.request(
+        &Message::SetParam { id, value },
+        |m| matches!(m, Message::Ack { of: 0x09 } | Message::Nak { of: 0x09, .. }),
+        t,
+    );
+    let status = match ack {
+        Ok(Message::Ack { .. }) => match link.request(
+            &Message::GetParam { id },
+            |m| matches!(m, Message::ParamValue { id: i, .. } if *i == id),
+            t,
+        ) {
+            Ok(Message::ParamValue { value: got, .. }) => {
+                shared.lock().unwrap().params[id as usize] = got;
+                format!("{name} = {got} — applies at next drive start")
+            }
+            _ => format!("{name} set, but read-back timed out"),
+        },
+        Ok(Message::Nak { .. }) => format!("{name}: {value} rejected by device (check range)"),
+        _ => format!("{name}: no response from device"),
+    };
+    shared.lock().unwrap().param_status = status;
 }
 
 fn respond(

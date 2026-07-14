@@ -3,6 +3,45 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-07-13 — session 7: live parameter editing in the control panel
+
+**The panel (`mmc-host panel`) can now read, edit, and apply the profiler's
+6 runtime parameters live** — the same `GetParam`/`SetParam` path `apply` uses,
+but interactive, with read-back verification and firmware range enforcement
+surfaced in the UI. No firmware change: the wire protocol already had it.
+
+**Landed:**
+- `panel.rs`: HTTP thread → pump now carries a `Cmd` enum (`Send` fire-and-forget
+  drive/i_q, `RefreshParams`, `SetParam`). The pump owns the single `Link`, so
+  parameter ops run inline as synchronous request/response (dropping a telemetry
+  sample or two — negligible). Params + names + a status line ride in `/data`;
+  new `/cmd` verbs `getparams` / `setparam`. Startup reads the table *before*
+  streaming (quiet line), and **bails on the first NAK** so a device without a
+  param table (the sim pre-change, the G0B1) starts instantly instead of eating
+  6×500 ms timeouts.
+- `panel.html`: a "Motor parameters" card — 6 rows (R, L, flux, current BW,
+  speed Kp/Ki) with friendlier display units (mH, mWb), per-field range hints,
+  Set / Refresh / "Apply all edited", dirty-field highlighting, and a live
+  status line. Edited/focused fields aren't clobbered by the 150 ms poll.
+- `server.rs`: **the sim is now param-aware** — stores + range-validates the
+  same 6 params (seeded from the sim motor), mirroring the firmware's
+  `param_range`. Makes the whole feature testable/regressable without hardware
+  (the sim stores but doesn't yet re-tune its loop from a write — documented).
+
+**Verified** (scratch build, sim over TCP, panel driving it): startup read
+(r=0.5 Ω, L=0.6 mH, ψ=8 mWb, …), valid write + read-back (r→1.25 Ω,
+ψ→0.9 mWb), out-of-range reject (r=50 → "rejected by device", value unchanged),
+telemetry uninterrupted (61k+ frames), drive/getparams still work. Workspace
+`cargo test` green.
+
+**Decided / deferred:** parameter **flash persistence** (device keeps params
+across power-cycle) is now an explicit [PLAN.md](PLAN.md) backlog item — user
+chose to hold. Today durability = keep `profile.json` and re-`apply` (or re-Set
+in the panel) each boot.
+
+**Next candidates:** flash persistence (§backlog); one-click profile-from-panel
+(run `profile::run` inline + fit + review + apply).
+
 ## 2026-07-12/13 — session 6: MS6 profiler/auto-tune, end to end on hardware
 
 **The MS6 loop is closed: `mmc-host profile` measures the motor,

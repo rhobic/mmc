@@ -11,7 +11,7 @@ use mmc_core::foc::{Decoupling, Foc, FocOutput};
 use mmc_core::transforms::{Abc, Dq};
 use mmc_core::tuning::current_pi_gains;
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
-use mmc_proto::{channel, encode, Deframer, DeviceInfo, DeviceKind, Message, MAX_FRAME};
+use mmc_proto::{channel, encode, param, Deframer, DeviceInfo, DeviceKind, Message, MAX_FRAME};
 use mmc_sim::{PmsmParams, TruthAngle, VirtualMotor};
 
 pub struct ServeCfg {
@@ -75,6 +75,10 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
     let mut mask = channel::ALL;
     let mut divider: u32 = 10;
     let mut streaming = false;
+    // Runtime parameter table (profiler read/apply target), seeded from this
+    // motor and mirroring the firmware's ids. The sim stores and range-validates
+    // them but does not yet re-tune its control loop from a write.
+    let mut sim_params = [params.rs, params.lq, params.flux, cfg.bandwidth, 2.0e-4, 2.0e-3];
 
     let started = Instant::now();
     let mut steps_done: u64 = 0;
@@ -94,6 +98,7 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
                             &mut mask,
                             &mut divider,
                             &mut streaming,
+                            &mut sim_params,
                         )?;
                     }
                     // Frame errors over TCP mean a client bug; ignore & resync.
@@ -141,6 +146,7 @@ fn handle(
     mask: &mut u32,
     divider: &mut u32,
     streaming: &mut bool,
+    params: &mut [f32],
 ) -> std::io::Result<()> {
     match *msg {
         Message::Ping { nonce } => send(stream, &Message::Pong { nonce }),
@@ -179,6 +185,31 @@ fn handle(
                 },
             )
         }
+        Message::GetParam { id } if (id as usize) < params.len() => send(
+            stream,
+            &Message::ParamValue {
+                id,
+                value: params[id as usize],
+            },
+        ),
+        Message::SetParam { id, value } => match sim_param_range(id) {
+            Some((lo, hi)) if (lo..=hi).contains(&value) => {
+                params[id as usize] = value;
+                send(
+                    stream,
+                    &Message::Ack {
+                        of: msg.wire_type(),
+                    },
+                )
+            }
+            _ => send(
+                stream,
+                &Message::Nak {
+                    of: msg.wire_type(),
+                    err: 1,
+                },
+            ),
+        },
         // Device-to-host messages arriving at the device: refuse politely.
         _ => send(
             stream,
@@ -188,6 +219,20 @@ fn handle(
             },
         ),
     }
+}
+
+/// Same acceptance windows as the firmware's `param_range` — the sim rejects
+/// what the device would, so `apply`/panel writes fail identically here.
+fn sim_param_range(id: u8) -> Option<(f32, f32)> {
+    Some(match id {
+        param::R => (0.05, 20.0),
+        param::L => (5e-6, 0.05),
+        param::FLUX => (1e-5, 0.5),
+        param::CUR_BW => (100.0, 4000.0),
+        param::SPEED_KP => (0.0, 0.1),
+        param::SPEED_KI => (0.0, 10.0),
+        _ => return None,
+    })
 }
 
 fn telemetry(

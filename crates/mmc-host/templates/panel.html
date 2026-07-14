@@ -60,6 +60,17 @@
   #faultbar { display:none; margin-top:12px; padding:10px 14px; border-radius:10px;
               background:var(--critical); color:#fff; font-weight:600; }
   .hint { color:var(--muted); font-size:12px; margin-top:10px; }
+  .paramgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr));
+               gap:10px 20px; margin-top:12px; }
+  .prow { display:flex; align-items:center; gap:8px; }
+  .prow label { flex:1 1 auto; min-width:78px; color:var(--ink2); font-size:12.5px; }
+  .prow input { width:92px; padding:6px 8px; font:inherit; color:var(--ink);
+                background:var(--page); border:1px solid var(--axis); border-radius:8px;
+                font-variant-numeric:tabular-nums; }
+  .prow .prange { width:88px; color:var(--muted); font-size:11px;
+                  font-variant-numeric:tabular-nums; }
+  .prow button { padding:6px 12px; }
+  .prow input.dirty { border-color:var(--s3); }
 </style>
 </head>
 <body>
@@ -100,6 +111,21 @@
     </div>
     <p class="hint">Space bar = STOP. Firmware trips: |i| &gt; 1.5 A, VBUS &gt; 30 V, driver fault,
       2 s host silence. Amplitude is clamped on-device (3 V / 1 A). After a fault, STOP re-arms.</p>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+      <h1 style="font-size:15px">Motor parameters</h1>
+      <span class="sub" id="paramstatus">—</span>
+    </div>
+    <div id="params" class="paramgrid"></div>
+    <div style="display:flex;gap:10px;margin-top:14px">
+      <button id="pget">Refresh from device</button>
+      <button class="primary" id="pall">Apply all edited</button>
+    </div>
+    <p class="hint">These are the profiler's runtime parameters. Edits (highlighted) take effect at the
+      next clean drive start and live in <b>RAM only</b> — they reset to firmware defaults on power-cycle.
+      Out-of-range values are rejected by the firmware; the range is shown beside each field.</p>
   </div>
 
   <div class="charts">
@@ -267,11 +293,72 @@ async function poll() {
       (d.errors ? "  ·  " + d.errors + " rejected" : "");
     renderTiles();
     for (const c of CHARTS) renderChart(c);
+    updateParams(d.params, d.param_status);
   } catch (e) {
     document.getElementById("devline").textContent = "connection lost — retrying…";
   }
   setTimeout(poll, 150);
 }
+
+/* ---- motor parameters ----
+   id order and ranges mirror mmc_proto::param / the firmware param_range table;
+   `scale` converts the device's SI value to a friendlier display unit. */
+const PARAMS = [
+  { id: 0, key: "r",        label: "R",          unit: "Ω",     scale: 1,   dp: 3, min: 0.05,  max: 20   },
+  { id: 1, key: "l",        label: "L",          unit: "mH",    scale: 1e3, dp: 4, min: 0.005, max: 50   },
+  { id: 2, key: "flux",     label: "flux λ",     unit: "mWb",   scale: 1e3, dp: 4, min: 0.01,  max: 500  },
+  { id: 3, key: "cur_bw",   label: "current BW", unit: "rad/s", scale: 1,   dp: 0, min: 100,   max: 4000 },
+  { id: 4, key: "speed_kp", label: "speed Kp",   unit: "",      scale: 1,   dp: 6, min: 0,     max: 0.1  },
+  { id: 5, key: "speed_ki", label: "speed Ki",   unit: "",      scale: 1,   dp: 6, min: 0,     max: 10   },
+];
+const dirty = new Set();            // ids the user edited but hasn't applied
+const pin = p => document.getElementById("p" + p.id);
+const fmtParam = (p, si) => String(+(si * p.scale).toFixed(p.dp));
+
+function buildParams() {
+  const grid = document.getElementById("params");
+  grid.textContent = "";
+  for (const p of PARAMS) {
+    const row = h("div", "prow");
+    const lab = h("label", null, p.label + (p.unit ? " [" + p.unit + "]" : ""));
+    lab.htmlFor = "p" + p.id;
+    const inp = document.createElement("input");
+    inp.type = "number"; inp.id = "p" + p.id; inp.autocomplete = "off";
+    inp.oninput = () => { dirty.add(p.id); inp.classList.add("dirty"); };
+    inp.onkeydown = e => { if (e.key === "Enter") setParam(p); };
+    const btn = h("button", null, "Set");
+    btn.onclick = () => setParam(p);
+    row.append(lab, inp, h("span", "prange", p.min + "–" + p.max), btn);
+    grid.append(row);
+  }
+}
+function setParam(p) {
+  const disp = parseFloat(pin(p).value);
+  if (!isFinite(disp)) return;
+  post({ cmd: "setparam", id: p.id, value: disp / p.scale });
+  dirty.delete(p.id);
+  pin(p).classList.remove("dirty");
+}
+function updateParams(vals, status) {
+  if (status != null) document.getElementById("paramstatus").textContent = status;
+  if (!vals) return;
+  for (const p of PARAMS) {
+    const el = pin(p);
+    if (!el || dirty.has(p.id) || document.activeElement === el) continue; // don't clobber an edit
+    const si = vals[p.id];
+    el.value = (si == null || !isFinite(si)) ? "" : fmtParam(p, si);
+  }
+}
+document.getElementById("pget").onclick = () => {
+  dirty.clear();
+  for (const p of PARAMS) pin(p).classList.remove("dirty");
+  post({ cmd: "getparams" });
+};
+document.getElementById("pall").onclick = () => {
+  for (const p of PARAMS) if (dirty.has(p.id)) setParam(p);
+};
+
+buildParams();
 poll();
 </script>
 </body>

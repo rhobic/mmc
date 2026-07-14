@@ -158,6 +158,23 @@ sync — normal for motor control in any language.
   `AngleEstimator`, offset auto-calibrated against the observer, position loop
   on top (sim first, then hardware).
 
+## Backlog (deferred, not yet scheduled)
+
+- **Parameter flash persistence.** Runtime params (`SetParam`/`GetParam`) live in
+  RAM only today, so a profiled motor reverts to compile-time defaults on
+  power-cycle — you must re-`apply` each boot. Plan: reserve the last G474 flash
+  page (dual-bank already enabled), add `SaveParams`/`EraseParams` messages, load
+  + CRC-check the blob at boot (fall back to defaults if blank/bad), and
+  `mmc-host apply --persist`. Consider `sequential-storage` for wear-leveled
+  key/value by param id. *(Deferred from MS6, 2026-07-13; user chose to hold.)*
+- **Profiler ergonomics for a new motor:** `mmc-host profile --only rl|sweep|accel`
+  for the iterative bootstrap (R/L is robust on any seed; the flux sweep needs a
+  working current loop; the accel run needs a working observer), and lift the
+  hard-coded excitation points (`SWEEP`, accel 300→900 rad/s) and `POLE_PAIRS`
+  in `tools/profile.py` out to config so they track the connected motor.
+- From MS5/MS6: HF-injection L probe, d-axis-aligned I-f start, blend-kick
+  softening, stall detector.
+
 ## Verification strategy
 
 - `cargo test` at workspace root: transform round-trips, anti-windup, sim step

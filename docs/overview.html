@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MMC — STM32G474 Firmware Overview</title>
+<style>
+  html { color-scheme: light dark; }
+  :root {
+    --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
+    --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+    /* cool near-black with a cyan bias — a scope-screen ground */
+    --bg: #0a1216;
+    --surface: #0f1b21;
+    --surface-2: #14242b;
+    --border: rgba(88, 198, 194, 0.16);
+    --border-strong: rgba(88, 198, 194, 0.34);
+    --ink: #dceff1;
+    --ink-dim: #9db4b9;
+    --muted: #6b848a;
+
+    /* two-hue system: cyan = measurement/signal, amber = drive/actuation */
+    --signal: #37d3cb;
+    --signal-soft: rgba(55, 211, 203, 0.14);
+    --drive: #f0a94a;
+    --drive-soft: rgba(240, 169, 74, 0.14);
+
+    --good: #4fd097;
+    --warn: #f0bb44;
+    --crit: #f26a5f;
+
+    --track: rgba(140, 170, 175, 0.16);
+    --shadow: 0 1px 0 rgba(255,255,255,0.02) inset, 0 8px 24px rgba(0,0,0,0.35);
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #e9f0f0;
+      --surface: #ffffff;
+      --surface-2: #f1f7f7;
+      --border: rgba(18, 92, 96, 0.16);
+      --border-strong: rgba(18, 92, 96, 0.32);
+      --ink: #0f272c;
+      --ink-dim: #3d585e;
+      --muted: #64797f;
+      --signal: #148b85;
+      --signal-soft: rgba(20, 139, 133, 0.10);
+      --drive: #b26914;
+      --drive-soft: rgba(178, 105, 20, 0.10);
+      --good: #1c9a6a;
+      --warn: #a9760d;
+      --crit: #c0392f;
+      --track: rgba(20, 60, 65, 0.12);
+      --shadow: 0 1px 2px rgba(20,60,65,0.06), 0 8px 22px rgba(20,60,65,0.08);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a1216; --surface: #0f1b21; --surface-2: #14242b;
+    --border: rgba(88,198,194,0.16); --border-strong: rgba(88,198,194,0.34);
+    --ink: #dceff1; --ink-dim: #9db4b9; --muted: #6b848a;
+    --signal: #37d3cb; --signal-soft: rgba(55,211,203,0.14);
+    --drive: #f0a94a; --drive-soft: rgba(240,169,74,0.14);
+    --good: #4fd097; --warn: #f0bb44; --crit: #f26a5f;
+    --track: rgba(140,170,175,0.16);
+    --shadow: 0 1px 0 rgba(255,255,255,0.02) inset, 0 8px 24px rgba(0,0,0,0.35);
+  }
+  :root[data-theme="light"] {
+    --bg: #e9f0f0; --surface: #ffffff; --surface-2: #f1f7f7;
+    --border: rgba(18,92,96,0.16); --border-strong: rgba(18,92,96,0.32);
+    --ink: #0f272c; --ink-dim: #3d585e; --muted: #64797f;
+    --signal: #148b85; --signal-soft: rgba(20,139,133,0.10);
+    --drive: #b26914; --drive-soft: rgba(178,105,20,0.10);
+    --good: #1c9a6a; --warn: #a9760d; --crit: #c0392f;
+    --track: rgba(20,60,65,0.12);
+    --shadow: 0 1px 2px rgba(20,60,65,0.06), 0 8px 22px rgba(20,60,65,0.08);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background:
+      linear-gradient(var(--bg), var(--bg)),
+      repeating-linear-gradient(0deg, transparent 0 39px, var(--border) 39px 40px);
+    background-blend-mode: normal;
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 32px 24px 72px; }
+
+  /* ---- masthead ---- */
+  .mast {
+    display: flex; flex-wrap: wrap; gap: 16px 24px;
+    align-items: flex-end; justify-content: space-between;
+    padding-bottom: 18px; margin-bottom: 22px;
+    border-bottom: 1px solid var(--border-strong);
+  }
+  .mast h1 {
+    font-family: var(--font-mono);
+    font-size: clamp(26px, 4.4vw, 40px);
+    font-weight: 600; letter-spacing: -0.01em; line-height: 1.02;
+    margin: 0; text-wrap: balance;
+  }
+  .mast h1 .dim { color: var(--muted); font-weight: 500; }
+  .mast .sub { color: var(--ink-dim); margin: 8px 0 0; max-width: 52ch; }
+  .badge {
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.02em;
+    color: var(--ink-dim); text-align: right; line-height: 1.7;
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; background: var(--surface); white-space: nowrap;
+  }
+  .badge b { color: var(--signal); font-weight: 600; }
+  .badge .k { color: var(--muted); }
+
+  .eyebrow {
+    font-family: var(--font-mono); font-size: 11px; font-weight: 600;
+    letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted);
+  }
+
+  /* ---- vitals strip ---- */
+  .vitals {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;
+    margin-bottom: 28px;
+  }
+  .vital {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 15px 16px 16px; box-shadow: var(--shadow);
+    position: relative; overflow: hidden;
+  }
+  .vital::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+    background: var(--signal); opacity: 0.85;
+  }
+  .vital.drive::before { background: var(--drive); }
+  .vital .lbl { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--muted); }
+  .vital .big {
+    font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 30px; font-weight: 600; line-height: 1.05; margin-top: 8px;
+  }
+  .vital .big .u { font-size: 15px; color: var(--ink-dim); font-weight: 500; }
+  .vital .meta { font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim);
+    margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+  /* ---- panel grid ---- */
+  .grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 18px 18px 20px; box-shadow: var(--shadow);
+  }
+  .col-6 { grid-column: span 6; }
+  .col-4 { grid-column: span 4; }
+  .col-3 { grid-column: span 3; }
+  .col-2 { grid-column: span 2; }
+
+  .panel > h2 {
+    font-family: var(--font-mono); font-size: 12px; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-dim);
+    margin: 0 0 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 9px;
+  }
+  .panel > h2 .dot { width: 7px; height: 7px; border-radius: 2px; background: var(--signal); flex: none; }
+  .panel > h2 .dot.d { background: var(--drive); }
+
+  /* ---- key/value rows ---- */
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 7px 18px; align-items: baseline; }
+  .kv dt { color: var(--muted); font-size: 13px; }
+  .kv dd { margin: 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    text-align: right; font-size: 13.5px; }
+  .kv dd .u { color: var(--muted); }
+
+  /* ---- spec table ---- */
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+  .scroll { overflow-x: auto; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--border); }
+  th { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  td.num, th.num { text-align: right; font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td .sym { color: var(--signal); font-family: var(--font-mono); }
+  tr:last-child td { border-bottom: 0; }
+  .tol { color: var(--muted); font-size: 12px; }
+
+  .flag { font-family: var(--font-mono); font-size: 10px; font-weight: 600;
+    letter-spacing: 0.04em; padding: 1px 6px; border-radius: 4px; vertical-align: middle;
+    border: 1px solid transparent; }
+  .flag.trust { color: var(--good); background: rgba(79,208,151,0.12); border-color: rgba(79,208,151,0.3); }
+  .flag.soft  { color: var(--warn); background: rgba(240,187,68,0.12); border-color: rgba(240,187,68,0.32); }
+  .flag.rough { color: var(--crit); background: rgba(242,106,95,0.12); border-color: rgba(242,106,95,0.32); }
+
+  /* ---- meters (resource utilization) ---- */
+  .meter { margin-top: 4px; }
+  .meter + .meter { margin-top: 20px; }
+  .meter .head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+  .meter .head .name { font-family: var(--font-mono); font-size: 13px; color: var(--ink); }
+  .meter .head .pct { font-family: var(--font-mono); font-variant-numeric: tabular-nums;
+    font-size: 13px; color: var(--ink-dim); }
+  .bar { height: 22px; border-radius: 6px; background: var(--track);
+    display: flex; overflow: hidden; border: 1px solid var(--border); }
+  .bar span { display: block; height: 100%; }
+  .seg-burst { background: repeating-linear-gradient(135deg, var(--drive), var(--drive) 6px, color-mix(in srgb, var(--drive) 78%, #000) 6px 12px); }
+  .seg-static { background: var(--signal); }
+  .seg-code { background: var(--signal); }
+  .scale { display: flex; justify-content: space-between; font-family: var(--font-mono);
+    font-size: 11px; color: var(--muted); margin-top: 5px; font-variant-numeric: tabular-nums; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 16px;
+    font-family: var(--font-mono); font-size: 12px; color: var(--ink-dim); }
+  .legend .it { display: flex; align-items: center; gap: 7px; }
+  .swatch { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  .sw-static { background: var(--signal); }
+  .sw-burst { background: repeating-linear-gradient(135deg, var(--drive), var(--drive) 4px, color-mix(in srgb, var(--drive) 78%, #000) 4px 8px); }
+  .sw-free { background: var(--track); border: 1px solid var(--border); }
+
+  .note { font-size: 12.5px; color: var(--muted); line-height: 1.5; margin-top: 14px; }
+  .note b { color: var(--ink-dim); font-weight: 600; }
+
+  /* ---- mode list ---- */
+  .modes { display: flex; flex-direction: column; gap: 10px; }
+  .mode { display: grid; grid-template-columns: 30px 1fr; gap: 12px; align-items: start;
+    padding: 11px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-2); }
+  .mode .id { font-family: var(--font-mono); font-weight: 600; font-size: 15px;
+    color: var(--signal); text-align: center; padding-top: 1px; }
+  .mode.act .id { color: var(--drive); }
+  .mode .n { font-family: var(--font-mono); font-size: 13.5px; font-weight: 600; }
+  .mode .d { color: var(--ink-dim); font-size: 12.5px; margin-top: 2px; }
+  .mode .args { color: var(--muted); font-family: var(--font-mono); font-size: 11.5px; }
+
+  /* ---- chips ---- */
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip { font-family: var(--font-mono); font-size: 11.5px; padding: 3px 9px;
+    border-radius: 20px; border: 1px solid var(--border-strong); color: var(--ink-dim);
+    background: var(--surface-2); font-variant-numeric: tabular-nums; }
+  .chip.run { color: var(--good); border-color: rgba(79,208,151,0.4); }
+  .chip.fault { color: var(--crit); border-color: rgba(242,106,95,0.4); }
+  .chip.trans { color: var(--drive); border-color: rgba(240,169,74,0.4); }
+
+  footer { margin-top: 30px; padding-top: 16px; border-top: 1px solid var(--border);
+    color: var(--muted); font-family: var(--font-mono); font-size: 11.5px;
+    display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; }
+
+  @media (max-width: 860px) {
+    .vitals { grid-template-columns: repeat(2, 1fr); }
+    .col-4, .col-3, .col-2 { grid-column: span 6; }
+  }
+  @media (max-width: 480px) {
+    .vitals { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .bar span { animation: grow 0.7s cubic-bezier(.2,.7,.3,1) both; }
+    @keyframes grow { from { width: 0 !important; } }
+  }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+  <header class="mast">
+    <div>
+      <div class="eyebrow">Firmware Configuration Readout</div>
+      <h1 style="margin-top:8px;">MMC <span class="dim">/ sensorless FOC</span></h1>
+      <p class="sub">STM32G474RE + X-NUCLEO-IHM16M1 (STSPIN830) motor bring-up firmware. Field-oriented control instrumented end-to-end over the <code style="font-family:var(--font-mono)">mmc-proto</code> link.</p>
+    </div>
+    <div class="badge">
+      <div><span class="k">build</span> release · <b>MS6</b></div>
+      <div><span class="k">target</span> thumbv7em-none-eabihf</div>
+      <div><span class="k">fw</span> mmc-g474 · <span class="k">date</span> 2026-07-13</div>
+    </div>
+  </header>
+
+  <!-- VITALS -->
+  <section class="vitals" aria-label="Headline metrics">
+    <div class="vital">
+      <div class="lbl">Flash used</div>
+      <div class="big">5.1<span class="u">%</span></div>
+      <div class="meta">26.7 / 512 KB</div>
+    </div>
+    <div class="vital">
+      <div class="lbl">Static RAM</div>
+      <div class="big">26.9<span class="u">%</span></div>
+      <div class="meta">34.4 / 128 KB</div>
+    </div>
+    <div class="vital drive">
+      <div class="lbl">Core clock</div>
+      <div class="big">170<span class="u">MHz</span></div>
+      <div class="meta">Cortex-M4F · single</div>
+    </div>
+    <div class="vital drive">
+      <div class="lbl">Control rate</div>
+      <div class="big">20<span class="u">kHz</span></div>
+      <div class="meta">50 µs ISR window</div>
+    </div>
+  </section>
+
+  <div class="grid">
+
+    <!-- RESOURCE UTILIZATION (headline panel) -->
+    <section class="panel col-6">
+      <h2><span class="dot"></span>Resource Utilization <span style="margin-left:auto;font-weight:400;letter-spacing:0.02em;text-transform:none;color:var(--muted);">measured from release ELF · arm-none-eabi-size</span></h2>
+
+      <div class="meter">
+        <div class="head"><span class="name">FLASH &nbsp;0x08000000 · 512 KB (dual bank)</span><span class="pct">26.7 KB &nbsp;/&nbsp; 5.1%</span></div>
+        <div class="bar" role="img" aria-label="Flash 5.1 percent used">
+          <span class="seg-code" style="width:5.1%"></span>
+        </div>
+        <div class="scale"><span>0</span><span>128</span><span>256</span><span>384</span><span>512 KB</span></div>
+        <div class="note"><b>.text</b> 24.8 KB · <b>.rodata</b> 1.2 KB · <b>.vectors</b> 472 B · <b>.data</b> init 272 B — the entire Embassy + HAL + FOC + observer + protocol stack.</div>
+      </div>
+
+      <div class="meter">
+        <div class="head"><span class="name">RAM (static) &nbsp;0x20000000 · 128 KB</span><span class="pct">34.4 KB &nbsp;/&nbsp; 26.9%</span></div>
+        <div class="bar" role="img" aria-label="RAM: 25 percent profiler buffer, 1.9 percent other static, rest free">
+          <span class="seg-burst" style="width:25.0%"></span>
+          <span class="seg-static" style="width:1.9%"></span>
+        </div>
+        <div class="scale"><span>0</span><span>32</span><span>64</span><span>96</span><span>128 KB</span></div>
+        <div class="legend">
+          <span class="it"><span class="swatch sw-burst"></span>BURST profiler buffer · 32 KB</span>
+          <span class="it"><span class="swatch sw-static"></span>all other static · 2.4 KB</span>
+          <span class="it"><span class="swatch sw-free"></span>free for stack / growth · ~93 KB</span>
+        </div>
+        <div class="note">One <code style="font-family:var(--font-mono)">[f32; 4096·2]</code> capture buffer is <b>93% of static RAM</b>. It only holds (i_d, v_d) pairs during an R/L probe — gate it behind a feature and the resident footprint drops to ~2.4 KB. <b>No heap</b>: allocation is fully static, single executor thread, <code style="font-family:var(--font-mono)">panic-halt</code>.</div>
+      </div>
+    </section>
+
+    <!-- PLATFORM & BUILD -->
+    <section class="panel col-3">
+      <h2><span class="dot"></span>Platform &amp; Build</h2>
+      <dl class="kv">
+        <dt>MCU</dt><dd>STM32G474RE</dd>
+        <dt>Core</dt><dd>Cortex-M4F <span class="u">@170 MHz</span></dd>
+        <dt>Clock tree</dt><dd>HSI16 /4 ×85 /2</dd>
+        <dt>Flash</dt><dd>512 KB <span class="u">dual-bank</span></dd>
+        <dt>RAM</dt><dd>128 KB</dd>
+        <dt>Framework</dt><dd>Embassy async</dd>
+        <dt>embassy-stm32</dt><dd>0.6.0</dd>
+        <dt>Runtime</dt><dd>no_std · no alloc</dd>
+        <dt>Profile</dt><dd>LTO · cg-units 1 · O2</dd>
+        <dt>Runner</dt><dd>probe-rs</dd>
+      </dl>
+    </section>
+
+    <!-- CONTROL & PWM -->
+    <section class="panel col-3">
+      <h2><span class="dot d"></span>Control &amp; Front-End</h2>
+      <dl class="kv">
+        <dt>PWM</dt><dd>TIM1 center-aligned</dd>
+        <dt>Carrier</dt><dd>20 kHz <span class="u">ARR 4250</span></dd>
+        <dt>Loop rate</dt><dd>20 kHz <span class="u">50 µs</span></dd>
+        <dt>Max duty</dt><dd>0.85</dd>
+        <dt>ADC</dt><dd>ADC1 <span class="u">42.5 MHz</span></dd>
+        <dt>Sensing</dt><dd>3× shunt, injected</dd>
+        <dt>Shunt</dt><dd>0.33 Ω <span class="u">0.504 V/A</span></dd>
+        <dt>VBUS</dt><dd>÷ divider <span class="u">×16</span></dd>
+        <dt>Link</dt><dd>LPUART1 VCP</dd>
+        <dt>Baud</dt><dd>1 Mbaud <span class="u">COBS</span></dd>
+      </dl>
+    </section>
+
+    <!-- MOTOR CHARACTERISTICS -->
+    <section class="panel col-4">
+      <h2><span class="dot"></span>Motor Characteristics <span style="margin-left:auto;font-weight:400;text-transform:none;letter-spacing:0.02em;color:var(--muted);">Stage&nbsp;F0 bench fit</span></h2>
+      <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>Parameter</th><th class="num">Value</th><th>Confidence</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Pole pairs <span class="sym">p</span></td><td class="num">7</td><td><span class="flag trust">fixed</span></td></tr>
+          <tr><td>Stator R <span class="sym">R<sub>s</sub></span></td><td class="num">1.00 <span class="tol">Ω</span></td><td><span class="flag trust">locked-rotor</span></td></tr>
+          <tr><td>Apparent R <span class="sym">R'</span></td><td class="num">0.97 <span class="tol">Ω</span></td><td><span class="flag trust">rotating fit</span></td></tr>
+          <tr><td>Stator L <span class="sym">L<sub>s</sub></span></td><td class="num">0.10 <span class="tol">mH</span></td><td><span class="flag soft">design center</span></td></tr>
+          <tr><td>Flux linkage <span class="sym">λ</span></td><td class="num">0.894 <span class="tol">mWb</span></td><td><span class="flag trust">±0.04</span></td></tr>
+          <tr><td>Inertia <span class="sym">J</span></td><td class="num">0.31 <span class="tol">µN·m·s²</span></td><td><span class="flag rough">rough</span></td></tr>
+          <tr><td>Friction</td><td class="num">0.8 <span class="tol">mN·m</span></td><td><span class="flag soft">est.</span></td></tr>
+        </tbody>
+      </table>
+      </div>
+      <div class="note"><b>L was ill-conditioned</b> in the rotating sweep (0.05 ± 0.10 mH — the I-f hang angle near π/2 hides it); 0.1 mH is a robust center that only sets the current-PI zero. <b>J</b> is the least-trusted number, so the speed loop is tuned conservatively.</div>
+    </section>
+
+    <!-- TUNING -->
+    <section class="panel col-2">
+      <h2><span class="dot d"></span>Tuning Setup</h2>
+      <div class="eyebrow" style="margin-bottom:7px;">Current loop · pole-zero</div>
+      <dl class="kv" style="margin-bottom:15px;">
+        <dt>Bandwidth</dt><dd>1 kHz <span class="u">rad/s ω</span></dd>
+        <dt>K<sub>p</sub> = L·ω</dt><dd>0.10</dd>
+        <dt>K<sub>i</sub> = R·ω</dt><dd>1000</dd>
+      </dl>
+      <div class="eyebrow" style="margin-bottom:7px;">Speed loop</div>
+      <dl class="kv" style="margin-bottom:15px;">
+        <dt>~ω<sub>bw</sub></dt><dd>40 <span class="u">rad/s el</span></dd>
+        <dt>K<sub>p</sub></dt><dd>2.0e-4</dd>
+        <dt>K<sub>i</sub></dt><dd>2.0e-3</dd>
+        <dt>i_q limit</dt><dd>±0.8 <span class="u">A</span></dd>
+      </dl>
+      <div class="eyebrow" style="margin-bottom:7px;">Sensorless</div>
+      <dl class="kv">
+        <dt>Observer</dt><dd>flux + PLL</dd>
+        <dt>I-f handoff</dt><dd>150 <span class="u">rad/s el</span></dd>
+      </dl>
+    </section>
+
+    <!-- DRIVE MODES -->
+    <section class="panel col-3">
+      <h2><span class="dot"></span>Drive Modes</h2>
+      <div class="modes">
+        <div class="mode"><div class="id">0</div><div><div class="n">Off</div><div class="d">Stage disabled, phases Hi-Z</div></div></div>
+        <div class="mode"><div class="id">1</div><div><div class="n">Open-loop voltage</div><div class="d">Forced-frame V·∠ω<sub>e</sub>t <span class="args">{ volts, omega_e }</span></div></div></div>
+        <div class="mode"><div class="id">2</div><div><div class="n">I-f current</div><div class="d">Forced-frame current, i_q live-adjustable <span class="args">{ amps, omega_e }</span></div></div></div>
+        <div class="mode act"><div class="id">3</div><div><div class="n">Sensorless <span class="args">← closed loop</span></div><div class="d">I-f start → blend → observer + speed loop <span class="args">{ amps, omega_e }</span></div></div></div>
+        <div class="mode act"><div class="id">4</div><div><div class="n">R/L probe</div><div class="d">Locked-rotor identification (bench test)</div></div></div>
+      </div>
+      <div class="note" style="margin-top:14px;"><b>State channel:</b></div>
+      <div class="chips" style="margin-top:8px;">
+        <span class="chip">OFF</span>
+        <span class="chip run">RUN</span>
+        <span class="chip fault">FAULT_OC</span>
+        <span class="chip fault">FAULT_DRV</span>
+        <span class="chip fault">FAULT_VBUS</span>
+        <span class="chip trans">CAL</span>
+        <span class="chip trans">SL_RAMP</span>
+        <span class="chip trans">SL_BLEND</span>
+      </div>
+    </section>
+
+    <!-- PROFILER -->
+    <section class="panel col-3">
+      <h2><span class="dot d"></span>Profiler / Auto-Tune <span style="margin-left:auto;font-weight:400;text-transform:none;letter-spacing:0.02em;color:var(--muted);">MS6</span></h2>
+      <p style="margin:0 0 14px;color:var(--ink-dim);font-size:13px;">Measure → fit → write back, entirely over the protocol. The R/L probe aligns the rotor, square-wave excites the d-axis, and captures every ISR tick at full 20 kHz into the burst buffer; the host fits R/L and pushes new gains back live.</p>
+      <dl class="kv" style="margin-bottom:14px;">
+        <dt>Align time</dt><dd>300 <span class="u">ms</span></dd>
+        <dt>Excitation ½-period</dt><dd>1.6 <span class="u">ms · 32 tk</span></dd>
+        <dt>Capture</dt><dd>4096 <span class="u">pairs @20 kHz</span></dd>
+        <dt>Records</dt><dd>i_d, v_d</dd>
+      </dl>
+      <div class="eyebrow" style="margin-bottom:8px;">Live-writable parameters (RAM)</div>
+      <div class="chips">
+        <span class="chip">r</span><span class="chip">l</span><span class="chip">flux</span>
+        <span class="chip">cur_bw</span><span class="chip">speed_kp</span><span class="chip">speed_ki</span>
+      </div>
+      <div class="note">Each write is range-checked before it reaches the loop; a new value applies at the next clean drive start.</div>
+    </section>
+
+    <!-- PROTECTION -->
+    <section class="panel col-3">
+      <h2><span class="dot"></span>Protection &amp; Limits</h2>
+      <dl class="kv">
+        <dt>Overcurrent trip</dt><dd>1.5 <span class="u">A · 2 samples</span></dd>
+        <dt>VBUS window</dt><dd>5 – 30 <span class="u">V</span></dd>
+        <dt>Driver fault</dt><dd>EN_FAULT open-drain</dd>
+        <dt>Deadman</dt><dd>2.0 <span class="u">s silence</span></dd>
+        <dt>Boot cal</dt><dd>8192 <span class="u">tk · 0.41 s</span></dd>
+        <dt>V amplitude</dt><dd>≤ 3.0 <span class="u">V</span></dd>
+        <dt>I amplitude</dt><dd>≤ 1.0 <span class="u">A</span></dd>
+        <dt>ω<sub>e</sub> ceiling</dt><dd>2000 <span class="u">rad/s</span></dd>
+        <dt>Slew ω · V · I</dt><dd>500 · 5 · 2</dd>
+      </dl>
+    </section>
+
+    <!-- TELEMETRY -->
+    <section class="panel col-6">
+      <h2><span class="dot d"></span>Telemetry</h2>
+      <div style="display:flex;flex-wrap:wrap;gap:20px 32px;align-items:flex-start;">
+        <dl class="kv" style="min-width:210px;">
+          <dt>Channels</dt><dd>18</dd>
+          <dt>Stream default</dt><dd>1 kHz <span class="u">÷20</span></dd>
+          <dt>Transport</dt><dd>COBS / mmc-proto</dd>
+          <dt>Burst capture</dt><dd>20 kHz <span class="u">i_d, v_d</span></dd>
+          <dt>ISR watchdog</dt><dd>ISR_MAX_CYCLES</dd>
+        </dl>
+        <div style="flex:1;min-width:240px;">
+          <div class="eyebrow" style="margin-bottom:9px;">Live channels</div>
+          <div class="chips">
+            <span class="chip">iq_ref</span><span class="chip">i_d</span><span class="chip">i_q</span>
+            <span class="chip">v_d</span><span class="chip">v_q</span>
+            <span class="chip">duty_a</span><span class="chip">duty_b</span><span class="chip">duty_c</span>
+            <span class="chip">omega_m</span><span class="chip">theta_e</span><span class="chip">vbus</span>
+            <span class="chip">i_a</span><span class="chip">i_b</span><span class="chip">i_c</span>
+            <span class="chip">state</span>
+            <span class="chip trans">theta_est</span><span class="chip trans">omega_est</span><span class="chip trans">theta_err</span>
+          </div>
+          <div class="note">Observer estimates (highlighted) stream alongside their measured counterparts, so every capture doubles as a shadow-validation of the sensorless stack.</div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <footer>
+    <span>MMC · sensorless-first FOC · Rust / Embassy on STM32G474RE</span>
+    <span>Figures measured from the MS6 release build · 2026-07-13</span>
+  </footer>
+
+</div>
+
+</body>
+</html>
