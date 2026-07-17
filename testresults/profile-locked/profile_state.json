@@ -1,0 +1,15 @@
+{
+  "stages": {
+    "rl": {
+      "note": "4096 pairs",
+      "ok": true,
+      "unix_time": 1784287774
+    },
+    "saliency": {
+      "note": "4096 pairs",
+      "ok": true,
+      "unix_time": 1784287775
+    }
+  },
+  "version": 1
+}

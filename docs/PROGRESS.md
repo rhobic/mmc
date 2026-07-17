@@ -3,6 +3,120 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-07-17 — session 9: panel-driven profiler + second motor (4-pole) profiled
+
+**A second, very different motor (4 poles ⇒ 2 pole pairs, rotor free) was
+profiled end-to-end from the control panel** — and it stress-tested every
+assumption the profiler inherited from the first bench motor. Final numbers:
+**R = 1.047 Ω, L = 0.377 mH (τ = 360 µs = 13× motor 1), ψ = 18.74 ± 0.37 mWb
+(≈21× motor 1), kt = 56.2 mN·m/A, saliency |ξ| = 0.036 ± 0.004 → Lq/Ld ≈ 1.07
+(AMBIGUOUS — real but below the 0.05 INFORM line, unlike motor 1's 1.16)**.
+Closing validation on applied params: observer tracks I-f at **0.1% error**,
+mech-speed telemetry correct for p=2, R̂ tile reads +3% ≈ +7 °C.
+
+**Landed:**
+- **`pole_pairs` is runtime param id 6** (fw v4): scales the omega_m telemetry
+  and the host kt/J fits; `profile` snapshots the device param table into
+  `profile_state.json` so `profile.py` tracks the connected motor. Panel param
+  card row added; R̂ uses it. (Sim `sim_params` array grown — the predicted
+  SetParam-panic trap.)
+- **Profiler runs from the panel**: a Profiler card (stage checkboxes → Run →
+  live log → Apply) backed by `Cmd::RunProfile`/`ApplyProfile`; the shared
+  `profile::run_stages` engine serves CLI and panel; Python fits shell out
+  automatically and stream into the card. Telemetry freezes during a run and
+  stale queued commands are dropped after.
+- **τ-adaptive saliency schedule**: half-period picked from live L/R
+  (8/16/32/64 ticks, cycle count keeps the burst exactly full), post-edge fit
+  samples picked from the recorded header; `saliency.py` now declares
+  **MEASUREMENT INVALID** (with remedy) instead of a false "not usable" when
+  plateaus don't settle. Sequencing rule: rl → apply → saliency.
+- **Per-motor excitation (`StageTuning`)**: `--rl-volts`, `--sweep-points
+  a@w,…`, `--accel-targets lo,hi` (also via panel API); accel targets recorded
+  in state for the fit. Closes the "lift hard-coded excitation" backlog item.
+- **Direct back-EMF ψ estimator** in `profile.py` when R/L are known
+  (e = (v_d+ωL·i_q, v_q−R·i_q), |e| = ωψ): the hang-angle joint fit is
+  ill-conditioned when the motor hangs near π/2 (this one: ~78° — heavy
+  friction), where the direct method gave σ = 0.4 mWb vs the joint fit's 12.
+  `fit_params.POLE_PAIRS` threaded from the device snapshot.
+- **R̂ hang-angle fix**: EMF power projected with cos θ_err — in forced-frame
+  I-f a heavily-hanging rotor absorbs only the aligned EMF component; the
+  uncorrected tile read −0.4 Ω on this motor, corrected +1.075 (+3%).
+
+**Motor-2 lessons (all now documented/handled):** from-rest I-f sync is
+ramp-torque-limited (0.3 A stalled; 0.6 A holds to ~60 rad/s el, 0.9 A to
+~90); the ψ ≈ 19 mWb ceiling ω_max ≈ 0.7·(VBUS/√3)/ψ ≈ 240 rad/s el makes
+the old default sweep speeds physically unreachable; first saliency attempt
+ran with stale R/L and the validity detectors caught the unsettled plateaus
+exactly as designed.
+
+**Deferred:** the `accel` stage (and sensorless generally) on motor 2 — the
+sensorless startup's handoff speed (150 rad/s el), ramp slew, and startup
+current are firmware constants sized for motor 1; motor 2 needs them as
+runtime params to reach a reliable handoff. Backlogged in PLAN.md.
+
+## 2026-07-17 — session 8: staged profiler + saliency probe — the bench motor IS salient
+
+**Headline: the zero-speed-sensorless gate came back OPEN.** The new saliency
+probe, run on the real motor with the rotor clamped, measures
+**|ξ| = 0.0737 ± 0.0004 → Lq/Ld ≈ 1.16 — verdict USABLE** — against the
+session-7 analysis's prediction of ≈1.0 (surface BLDC). Likely
+saturation-induced saliency. Every validity check is clean: j=1/j=2 fits agree
+within 1% while the transient amplitude changes 3.7× (a gain artifact cannot
+track the exponential like that), even/odd cycle splits agree to 0.3%, θ_r
+stable at −3.6° el, plateau-step spread 1.2%. *Confirmation still recommended:*
+re-clamp ~45° el away and rerun — real saliency rotates with the rotor.
+A same-day corroboration: the R/L probe read L = 36 µH vs MS6's 28 µH —
+expected, since a clamped rotor defeats its self-alignment so it measured an
+arbitrary d/q mixture.
+
+**Landed:**
+- **Staged, stateful profiler** (`mmc-host profile`): named stages
+  (`sweep`/`accel`/`rl`/`saliency`) each declaring what it measures and what
+  the bench must provide (free-spinning vs parks-rotor — no stage needs a
+  mechanical clamp); `--list`, `--only`, `--redo`, `--yes`, `--addr` (sim);
+  completed stages tracked in `profile_state.json`; enforced ordering
+  (spinning stages before parking probes — the separatrix lesson); NAK codes
+  translated to human-readable reasons. Runbook: [PROFILER.md](PROFILER.md).
+- **Saliency probe** end to end: `test::L_THETA` (fw v4), shared schedule in
+  `mmc-core/src/probe.rs` (16 ±paired angles × 8 interleaved cycles × 32-tick
+  blocks in ONE 205 ms burst — ± pairing cancels net torque so a free rotor
+  only dithers ~1° el; interleaving turns thermal R drift into common mode),
+  (i_d, i_q) recorded in the excitation frame behind a self-describing header
+  (+8 f32 on the burst buffer). The i_q transient is a null channel — it
+  exists only if Ld ≠ Lq. Firmware clamps the sweep voltage to
+  0.75·I_trip·R̂ using the live R param.
+- **`tools/saliency.py`**: rising−falling folding (kills offsets/pedestals),
+  joint linear LSQ over both channels for (P, Q, θ_r), and the exact
+  latency-cancelling estimator ξ = −u/(ln cosh u − ln P), u = atanh(Q/P) —
+  the ±30% absolute-L systematic cancels in ξ identically. Free validity
+  checks: ΔI-vs-angle spread (R is isotropic), even/odd-cycle θ_r drift,
+  j-consistency. Verdict thresholds 0.05/0.02 with a 3σ noise floor.
+- **Sim server runs both probes** (was: NAK) with firmware-identical
+  schedules; `--motor bench` (28 µH τ<Ts regime), `--saliency <ratio>`,
+  `--locked`. **Controls pass: 1.5 → fit 1.484 (free rotor, ~1° dither);
+  1.0 → NOT-USABLE.** RL_STEP is sim-testable for the first time: recovers
+  R = 0.904 / L = 28 µH exactly.
+- **`tools/profile.py` fits partial captures** — missing stages skip with a
+  pointer instead of aborting; partial profile.json is safe (`apply` skips
+  absent keys).
+- **Panel: R̂ apparent tile** — (v·i − ω_e·ψ·i_q)/|i|² over ~1 s of the
+  telemetry already streamed, with ΔT from copper's 0.39%/°C. Winding
+  thermometry with zero firmware cost; exact at standstill, ψ-sensitive at
+  speed; includes the inverter drop (deliberately: it's the R the control
+  loop actually sees). Amber/red past +12%/+25%.
+
+**Verified:** 41 workspace tests green (6 new schedule tests); sim positive +
+negative controls; hardware run on the clamped bench motor (fw v4 flashed;
+first attempt timed out because `probe-rs download` left the core halted —
+`probe-rs reset` fixed it, now in PROFILER.md troubleshooting).
+
+**Consequences:** zero-speed sensorless torque is *physically available* on
+this motor (16% saliency), pending the re-clamp confirmation. Productizing it
+still needs di/dt sampling during active vectors (in-line shunts or clever
+windowing) and INFORM-style estimation — X/R ≈ 2 at Nyquist rules out
+rotating-carrier injection. Encoder (MS7) remains the main path; this probe
+is the INFORM primitive if zero-speed sensing is ever pursued.
+
 ## 2026-07-13 — session 7: live parameter editing in the control panel
 
 **The panel (`mmc-host panel`) can now read, edit, and apply the profiler's

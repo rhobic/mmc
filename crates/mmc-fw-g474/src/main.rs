@@ -50,6 +50,7 @@ use mmc_core::foc::{Decoupling, Foc};
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
 use mmc_core::pi::PiGains;
+use mmc_core::probe;
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
 use mmc_core::svpwm::svpwm;
 use mmc_core::transforms::{clarke, inverse_park, park, Abc, AlphaBeta, Dq};
@@ -172,6 +173,7 @@ static PARAMS: [AtomicU32; param::COUNT] = [
     p32(CUR_BANDWIDTH),
     p32(SPEED_KP),
     p32(SPEED_KI),
+    p32(POLE_PAIRS),
 ];
 
 fn param_get(id: u8) -> f32 {
@@ -187,23 +189,33 @@ fn param_range(id: u8) -> Option<(f32, f32)> {
         param::CUR_BW => (100.0, 4000.0),
         param::SPEED_KP => (0.0, 0.1),
         param::SPEED_KI => (0.0, 10.0),
+        param::POLE_PAIRS => (1.0, 50.0),
         _ => return None,
     })
 }
 
-// Burst buffer: per-tick (i_d, v_d) pairs recorded by the R/L probe at the
-// full 20 kHz — resolution the telemetry stream can't deliver at 1 Mbaud.
-struct BurstCell(UnsafeCell<[f32; BURST_PAIRS * 2]>);
+// Burst buffer: per-tick sample pairs recorded by the probes at the full
+// 20 kHz — resolution the telemetry stream can't deliver at 1 Mbaud. Layout
+// is kind-keyed: RL_STEP records legacy (i_d, v_d) pairs from index 0;
+// L_THETA writes a `probe::SAL_HDR` self-describing header first, then
+// (i_d, i_q) pairs in the excitation frame (hence the +SAL_HDR size).
+const BURST_F32S: usize = BURST_PAIRS * 2 + probe::SAL_HDR;
+struct BurstCell(UnsafeCell<[f32; BURST_F32S]>);
 // Safety: written only by the ISR while BURST_STATE == 1, read by the rx
 // task only while BURST_STATE == 2.
 unsafe impl Sync for BurstCell {}
-static BURST: BurstCell = BurstCell(UnsafeCell::new([0.0; BURST_PAIRS * 2]));
+static BURST: BurstCell = BurstCell(UnsafeCell::new([0.0; BURST_F32S]));
 /// 0 idle, 1 recording (ISR owns), 2 done (host may read).
 static BURST_STATE: AtomicU8 = AtomicU8::new(0);
 /// f32s recorded so far.
 static BURST_LEN: AtomicU32 = AtomicU32::new(0);
 static PROBE_V_ALIGN: AtomicU32 = AtomicU32::new(0);
 static PROBE_V_STEP: AtomicU32 = AtomicU32::new(0);
+/// Which test sequence mode 4 is running (`mmc_proto::test` kind).
+static PROBE_KIND: AtomicU8 = AtomicU8::new(0);
+/// Saliency-sweep half-period [ticks], picked from the live R/L params at
+/// probe start (τ-adaptive; see `mmc_core::probe::sal_half_ticks`).
+static PROBE_HALF: AtomicU32 = AtomicU32::new(8);
 
 /// A drive abort with a probe in flight still hands the (partial) buffer to
 /// the host — a short read beats a hung poll loop.
@@ -488,7 +500,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 3, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 4, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -527,7 +539,7 @@ fn handle(msg: &Message) -> Message {
             ack
         }
         Message::RunTest { kind, a, b } => {
-            if kind != test::RL_STEP {
+            if kind != test::RL_STEP && kind != test::L_THETA {
                 return nak(1);
             }
             let state = STATE.load(Ordering::Relaxed);
@@ -544,8 +556,21 @@ fn handle(msg: &Message) -> Message {
             {
                 return nak(2);
             }
-            PROBE_V_ALIGN.store(a.clamp(0.05, V_AMP_MAX).to_bits(), Ordering::Relaxed);
-            PROBE_V_STEP.store(b.clamp(0.05, V_AMP_MAX).to_bits(), Ordering::Relaxed);
+            // The saliency sweep bounds its steady-state plateau below the
+            // software trip using the live R estimate, and picks its square-
+            // wave half-period from the live τ = L/R so the plateaus settle
+            // (profile + apply R/L before running it). RL_STEP keeps its
+            // hardware-validated V_AMP_MAX clamp unchanged.
+            let v_max = if kind == test::L_THETA {
+                let tau_ticks = param_get(param::L) / param_get(param::R) * CTRL_FREQ;
+                PROBE_HALF.store(probe::sal_half_ticks(tau_ticks) as u32, Ordering::Relaxed);
+                (0.75 * I_TRIP_A * param_get(param::R)).min(V_AMP_MAX)
+            } else {
+                V_AMP_MAX
+            };
+            PROBE_V_ALIGN.store(a.clamp(0.05, v_max).to_bits(), Ordering::Relaxed);
+            PROBE_V_STEP.store(b.clamp(0.05, v_max).to_bits(), Ordering::Relaxed);
+            PROBE_KIND.store(kind, Ordering::Relaxed);
             BURST_LEN.store(0, Ordering::Relaxed);
             BURST_STATE.store(1, Ordering::Relaxed);
             CMD_MODE.store(4, Ordering::Relaxed);
@@ -861,7 +886,62 @@ unsafe extern "C" fn ADC1_2() {
         let amp_target = f32::from_bits(CMD_AMP.load(Ordering::Relaxed));
         let i_ab = clarke(i_abc);
 
-        let v_ab = if s.mode == 4 {
+        let v_ab = if s.mode == 4 && PROBE_KIND.load(Ordering::Relaxed) == test::L_THETA {
+            // Saliency sweep: align at v_low on θ = 0 (parks a free rotor;
+            // a clamped one just stays put and the fit recovers its angle),
+            // then run the shared `mmc_core::probe` schedule — square-wave
+            // v_d along ±paired electrical angles, recording (i_d, i_q) in
+            // the excitation frame behind a self-describing header.
+            s.probe_ticks += 1;
+            let n = BURST_LEN.load(Ordering::Relaxed) as usize;
+            if n >= probe::SAL_HDR + probe::SAL_TICKS * 2 {
+                // Recording complete: stage off, hand the buffer to the host.
+                s.mode = 0;
+                stage_off();
+                STATE.store(ST_OFF, Ordering::Relaxed);
+                CMD_MODE.store(0, Ordering::Relaxed);
+                BURST_STATE.store(2, Ordering::Release);
+                AlphaBeta::default()
+            } else {
+                let v_low = f32::from_bits(PROBE_V_ALIGN.load(Ordering::Relaxed));
+                let v_high = f32::from_bits(PROBE_V_STEP.load(Ordering::Relaxed));
+                let half = PROBE_HALF.load(Ordering::Relaxed) as usize;
+                let (theta_x, v) = if s.probe_ticks <= PROBE_ALIGN_TICKS {
+                    (0.0, v_low)
+                } else {
+                    let t = (s.probe_ticks - PROBE_ALIGN_TICKS - 1) as usize;
+                    // Safety: rx task only reads while BURST_STATE == 2.
+                    let buf = unsafe { &mut *BURST.0.get() };
+                    if t == 0 {
+                        let hdr = probe::sal_header(test::L_THETA, half, v_low, v_high, CTRL_FREQ);
+                        buf[..probe::SAL_HDR].copy_from_slice(&hdr);
+                    }
+                    (
+                        probe::sal_angle(t, half),
+                        if probe::sal_level_is_high(t, half) {
+                            v_high
+                        } else {
+                            v_low
+                        },
+                    )
+                };
+                let sc = sin_cos(theta_x);
+                i_dq = park(i_ab, sc);
+                if s.probe_ticks > PROBE_ALIGN_TICKS {
+                    let t = (s.probe_ticks - PROBE_ALIGN_TICKS - 1) as usize;
+                    let idx = probe::SAL_HDR + 2 * t;
+                    // Safety: rx task only reads while BURST_STATE == 2.
+                    let buf = unsafe { &mut *BURST.0.get() };
+                    buf[idx] = i_dq.d;
+                    buf[idx + 1] = i_dq.q;
+                    BURST_LEN.store((idx + 2) as u32, Ordering::Relaxed);
+                }
+                v_dq = Dq { d: v, q: 0.0 };
+                let v_ab = inverse_park(v_dq, sc);
+                duties = svpwm(v_ab, s.vbus_filt.max(1.0));
+                v_ab
+            }
+        } else if s.mode == 4 {
             // Locked-rotor R/L probe: θ held at 0 (rotor aligned during the
             // first phase), then unslewed square-wave v_d between the two
             // levels, recording (i_d, v_d) per tick into the burst buffer at
@@ -1002,7 +1082,7 @@ unsafe extern "C" fn ADC1_2() {
     put(channel::DUTY_A, duties[0]);
     put(channel::DUTY_B, duties[1]);
     put(channel::DUTY_C, duties[2]);
-    put(channel::OMEGA_M, s.omega / POLE_PAIRS);
+    put(channel::OMEGA_M, s.omega / param_get(param::POLE_PAIRS).max(1.0));
     put(channel::THETA_E, s.theta);
     put(channel::VBUS, s.vbus_filt);
     put(channel::I_A, i_abc.a);

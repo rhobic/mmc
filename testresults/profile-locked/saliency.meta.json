@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host profile",
+  "description": "Square-wave d-axis excitation along +/-paired electrical angles at standstill, (i_d, i_q) in the excitation frame recorded on-device per control tick. The i_q transient is a null channel: it exists only if Ld != Lq. tools/saliency.py fits the ratio and gives the zero-speed-sensorless verdict.",
+  "header": {
+    "block_ticks": 32.0,
+    "ctrl_freq": 20000.0,
+    "cycles": 8.0,
+    "half_ticks": 8.0,
+    "kind": 1.0,
+    "slots": 16.0,
+    "v_high": 0.8999999761581421,
+    "v_low": 0.30000001192092896
+  },
+  "notes": [],
+  "order": 1,
+  "title": "Saliency (Ld/Lq) sweep",
+  "unix_time": 1784287775
+}

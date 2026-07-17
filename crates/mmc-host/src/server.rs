@@ -10,12 +10,16 @@ use mmc_core::angle::AngleEstimator;
 use mmc_core::foc::{Decoupling, Foc, FocOutput};
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
+use mmc_core::probe;
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
 use mmc_core::svpwm::svpwm;
 use mmc_core::transforms::{clarke, inverse_park, park, Abc, Dq};
 use mmc_core::tuning::{current_pi_gains, speed_pi_gains};
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
-use mmc_proto::{channel, encode, param, DriveMode, Deframer, DeviceInfo, DeviceKind, Message, MAX_FRAME};
+use mmc_proto::{
+    channel, encode, param, test, BurstChunk, Deframer, DeviceInfo, DeviceKind, DriveMode, Message,
+    MAX_FRAME,
+};
 use mmc_sim::{PmsmParams, TruthAngle, VirtualMotor};
 
 // Drive-mode ramps/limits mirrored from the firmware ISR, so the sim spins up
@@ -27,12 +31,27 @@ const SL_OMEGA_HANDOFF: f32 = 150.0; // I-f -> observer handoff [rad/s el]
 const SL_IQ_LIMIT: f32 = 0.8; // speed-loop i_q authority [A]
 const SPEED_BW: f32 = 40.0; // speed-loop bandwidth [rad/s el]
 
+// R/L probe schedule mirrored from the firmware (main.rs); the saliency
+// schedule is shared through `mmc_core::probe` and cannot drift. The RL fit
+// (`tools/profile.py`) finds edges from the recorded v column, so these only
+// have to be *close*, but keep them identical anyway.
+const PROBE_ALIGN_TICKS: u32 = 6000;
+const PROBE_HALF_TICKS: u32 = 32;
+const PROBE_PRE_PAIRS: usize = 256;
+const BURST_PAIRS: usize = 4096;
+const I_TRIP_A: f32 = 1.5;
+const V_AMP_MAX: f32 = 3.0;
+
 pub struct ServeCfg {
     pub ctrl_freq: f32,
     pub bandwidth: f32,
     pub vbus: f32,
     /// Exit after the first client disconnects (used by `suite` and tests).
     pub once: bool,
+    /// Virtual motor on the bench.
+    pub params: PmsmParams,
+    /// Mechanically clamp the rotor (locked-rotor test bench).
+    pub locked: bool,
 }
 
 impl Default for ServeCfg {
@@ -42,6 +61,8 @@ impl Default for ServeCfg {
             bandwidth: 2000.0,
             vbus: 24.0,
             once: false,
+            params: PmsmParams::small_bldc(),
+            locked: false,
         }
     }
 }
@@ -82,6 +103,15 @@ struct SimControl {
     speed: Option<SpeedLoop>,
     omega_ref_cur: f32,
     sl_preload: f32,
+    // probes (4): RunTest capture into the burst buffer, firmware-identical
+    probe_kind: u8,
+    probe_ticks: u32,
+    probe_v: (f32, f32),
+    /// Saliency half-period [ticks], τ-picked at start like the firmware.
+    probe_half: usize,
+    burst: Vec<f32>,
+    /// Mirrors the firmware's BURST_STATE: 0 idle, 1 recording, 2 done.
+    burst_state: u8,
 }
 
 impl SimControl {
@@ -111,7 +141,36 @@ impl SimControl {
             speed: None,
             omega_ref_cur: 0.0,
             sl_preload: 0.0,
+            probe_kind: 0,
+            probe_ticks: 0,
+            probe_v: (0.0, 0.0),
+            probe_half: 8,
+            burst: Vec::new(),
+            burst_state: 0,
         }
+    }
+
+    /// `RunTest`: start a probe capture (mode 4). Mirrors the firmware's
+    /// preconditions — quiet stage only — its L_THETA voltage clamp, and its
+    /// τ-adaptive half-period pick. Returns false (→ NAK) when refused.
+    fn start_probe(&mut self, kind: u8, a: f32, b: f32, r_param: f32, l_param: f32) -> bool {
+        if self.mode != 0 || self.burst_state == 1 {
+            return false;
+        }
+        let v_max = if kind == test::L_THETA {
+            let tau_ticks = l_param / r_param / self.ctrl_dt;
+            self.probe_half = probe::sal_half_ticks(tau_ticks);
+            (0.75 * I_TRIP_A * r_param).min(V_AMP_MAX)
+        } else {
+            V_AMP_MAX
+        };
+        self.probe_kind = kind;
+        self.probe_v = (a.clamp(0.05, v_max), b.clamp(0.05, v_max));
+        self.probe_ticks = 0;
+        self.burst.clear();
+        self.burst_state = 1;
+        self.mode = 4;
+        true
     }
 
     /// Rebuild the current loop from the motor params — a clean start with no
@@ -148,6 +207,10 @@ impl SimControl {
             self.iq_ref_cmd = 0.0;
             self.seq = None;
             self.speed = None;
+            // burst_abort(): a killed probe hands back the partial buffer.
+            if self.burst_state == 1 {
+                self.burst_state = 2;
+            }
             self.rebuild_foc();
             return;
         }
@@ -237,6 +300,78 @@ impl SimControl {
                     dt,
                 )
             }
+            4 => {
+                // Probe capture (RunTest), firmware-identical: align on θ=0,
+                // then either the RL square wave at θ=0 (i_d, v_d legacy
+                // layout) or the shared saliency schedule (header + i_d, i_q
+                // in the excitation frame).
+                self.probe_ticks += 1;
+                let (v_a, v_b) = self.probe_v;
+                let saliency = self.probe_kind == test::L_THETA;
+                let total = if saliency {
+                    probe::SAL_HDR + probe::SAL_TICKS * 2
+                } else {
+                    BURST_PAIRS * 2
+                };
+                if self.burst.len() >= total {
+                    // Recording complete: hand the buffer to the host.
+                    self.mode = 0;
+                    self.burst_state = 2;
+                    state = 0.0;
+                    FocOutput {
+                        duties: [0.0; 3],
+                        i_dq: Dq::default(),
+                        v_dq: Dq::default(),
+                        v_ab: Default::default(),
+                        i_ab,
+                    }
+                } else {
+                    let aligning = self.probe_ticks <= PROBE_ALIGN_TICKS;
+                    let (theta_x, v) = if aligning {
+                        (0.0, v_a)
+                    } else {
+                        let t = (self.probe_ticks - PROBE_ALIGN_TICKS - 1) as usize;
+                        if saliency {
+                            let half = self.probe_half;
+                            if t == 0 {
+                                self.burst.extend_from_slice(&probe::sal_header(
+                                    test::L_THETA,
+                                    half,
+                                    v_a,
+                                    v_b,
+                                    1.0 / self.ctrl_dt,
+                                ));
+                            }
+                            let v = if probe::sal_level_is_high(t, half) { v_b } else { v_a };
+                            (probe::sal_angle(t, half), v)
+                        } else {
+                            let half = t as u32 / PROBE_HALF_TICKS;
+                            (0.0, if half.is_multiple_of(2) { v_b } else { v_a })
+                        }
+                    };
+                    let sc = sin_cos(theta_x);
+                    let i_dq = park(i_ab, sc);
+                    if saliency && !aligning {
+                        self.burst.push(i_dq.d);
+                        self.burst.push(i_dq.q);
+                    } else if !saliency
+                        && self.probe_ticks + PROBE_PRE_PAIRS as u32 > PROBE_ALIGN_TICKS
+                    {
+                        self.burst.push(i_dq.d);
+                        self.burst.push(v);
+                    }
+                    let v_dq = Dq { d: v, q: 0.0 };
+                    let v_ab = inverse_park(v_dq, sc);
+                    let duties = svpwm(v_ab, vbus);
+                    FocOutput {
+                        duties,
+                        i_dq,
+                        v_dq,
+                        v_ab,
+                        i_ab,
+                    }
+                }
+            }
             3 => {
                 // Sensorless: sequencer owns the angle (I-f ramp -> blend ->
                 // observer), speed loop owns i_q once closed.
@@ -324,9 +459,10 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(Duration::from_millis(1)))?;
 
-    let params = PmsmParams::small_bldc();
+    let params = cfg.params;
     let ctrl_dt = 1.0 / cfg.ctrl_freq;
     let mut rig = VirtualMotor::new(params, cfg.vbus);
+    rig.motor.locked = cfg.locked;
     rig.enable();
     let mut control = SimControl::new(params, ctrl_dt, cfg.bandwidth);
 
@@ -337,7 +473,16 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
     // Runtime parameter table (profiler read/apply target), seeded from this
     // motor and mirroring the firmware's ids. The sim stores and range-validates
     // them but does not yet re-tune its control loop from a write.
-    let mut sim_params = [params.rs, params.lq, params.flux, cfg.bandwidth, 2.0e-4, 2.0e-3];
+    let mut sim_params = [
+        params.rs,
+        params.lq,
+        params.flux,
+        cfg.bandwidth,
+        2.0e-4,
+        2.0e-3,
+        params.pole_pairs as f32,
+    ];
+    debug_assert_eq!(sim_params.len(), param::COUNT);
 
     let started = Instant::now();
     let mut steps_done: u64 = 0;
@@ -443,6 +588,63 @@ fn handle(
                 },
             )
         }
+        Message::RunTest { kind, a, b } => {
+            if kind != test::RL_STEP && kind != test::L_THETA {
+                return send(
+                    stream,
+                    &Message::Nak {
+                        of: msg.wire_type(),
+                        err: 1,
+                    },
+                );
+            }
+            if control.start_probe(
+                kind,
+                a,
+                b,
+                params[param::R as usize],
+                params[param::L as usize],
+            ) {
+                send(
+                    stream,
+                    &Message::Ack {
+                        of: msg.wire_type(),
+                    },
+                )
+            } else {
+                send(
+                    stream,
+                    &Message::Nak {
+                        of: msg.wire_type(),
+                        err: 2,
+                    },
+                )
+            }
+        }
+        Message::ReadBurst { offset } => {
+            if control.burst_state != 2 {
+                return send(
+                    stream,
+                    &Message::Nak {
+                        of: msg.wire_type(),
+                        err: 4, // no finished recording to read
+                    },
+                );
+            }
+            let len = control.burst.len();
+            let off = (offset as usize).min(len);
+            let n = (len - off).min(mmc_proto::BURST_CHUNK);
+            match BurstChunk::new(off as u16, len as u16, &control.burst[off..off + n]) {
+                Some(chunk) => send(stream, &Message::BurstData(chunk)),
+                None => send(
+                    stream,
+                    &Message::Nak {
+                        of: msg.wire_type(),
+                        err: 1,
+                    },
+                ),
+            }
+        }
         Message::GetParam { id } if (id as usize) < params.len() => send(
             stream,
             &Message::ParamValue {
@@ -487,6 +689,7 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
         param::L => (5e-6, 0.05),
         param::FLUX => (1e-5, 0.5),
         param::CUR_BW => (100.0, 4000.0),
+        param::POLE_PAIRS => (1.0, 50.0),
         param::SPEED_KP => (0.0, 0.1),
         param::SPEED_KI => (0.0, 10.0),
         _ => return None,

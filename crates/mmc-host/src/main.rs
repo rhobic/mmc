@@ -61,9 +61,50 @@ struct ProfileArgs {
     serial: String,
     #[arg(long, default_value_t = 1_000_000)]
     baud: u32,
+    /// TCP address of a sim server instead of hardware (e.g. 127.0.0.1:7770).
+    #[arg(long)]
+    addr: Option<String>,
     /// Output directory for the profiling captures.
     #[arg(long, default_value = "testresults/ms6-profile")]
     dir: PathBuf,
+    /// Comma-separated stage subset (see --list): sweep,accel,rl,saliency.
+    #[arg(long, value_delimiter = ',')]
+    only: Option<Vec<String>>,
+    /// Rerun stages profile_state.json already marks completed.
+    #[arg(long)]
+    redo: bool,
+    /// Skip the interactive bench-setup confirmation.
+    #[arg(long)]
+    yes: bool,
+    /// List the stages, what each measures, and what it expects on the bench.
+    #[arg(long)]
+    list: bool,
+    /// R/L probe align,step voltages — lower for a low-resistance motor
+    /// (default 0.5,1.0).
+    #[arg(long, value_delimiter = ',', num_args = 2, default_values_t = [0.5, 1.0])]
+    rl_volts: Vec<f32>,
+    /// Flux-sweep operating points as amps@omega_e (rad/s el), e.g.
+    /// "0.6@60,0.6@120,0.9@180". Size for the motor: it must hold I-f sync,
+    /// and omega·flux must stay under the bus-voltage ceiling.
+    #[arg(long, value_delimiter = ',')]
+    sweep_points: Option<Vec<String>>,
+    /// Accel-run sensorless speed targets start,step [rad/s el]
+    /// (default 300,900).
+    #[arg(long, value_delimiter = ',', num_args = 2)]
+    accel_targets: Option<Vec<f32>>,
+}
+
+fn parse_sweep_points(specs: &[String]) -> std::io::Result<Vec<(f32, f32)>> {
+    specs
+        .iter()
+        .map(|s| {
+            s.split_once('@')
+                .and_then(|(a, w)| Some((a.parse().ok()?, w.parse().ok()?)))
+                .ok_or_else(|| {
+                    std::io::Error::other(format!("bad sweep point `{s}` (want amps@omega)"))
+                })
+        })
+        .collect()
 }
 
 #[derive(clap::Args)]
@@ -94,6 +135,9 @@ struct PanelArgs {
     /// HTTP bind address for the panel UI.
     #[arg(long, default_value = "127.0.0.1:8484")]
     http: String,
+    /// Output directory for profiler runs started from the panel.
+    #[arg(long, default_value = "testresults/panel-profile")]
+    profile_dir: PathBuf,
 }
 
 #[derive(clap::Args)]
@@ -106,6 +150,17 @@ struct ServeArgs {
     /// Exit after the first client disconnects.
     #[arg(long)]
     once: bool,
+    /// Virtual motor: `small` (0.6 mH hobby BLDC) or `bench` (the profiled
+    /// G474 bench motor, 28 µH — the probes' τ < Ts regime).
+    #[arg(long, value_parser = ["small", "bench"], default_value = "small")]
+    motor: String,
+    /// Saliency ratio Lq/Ld to give the virtual motor (probe positive
+    /// control; 1.0 = non-salient).
+    #[arg(long, default_value_t = 1.0)]
+    saliency: f32,
+    /// Mechanically clamp the virtual rotor (locked-rotor bench).
+    #[arg(long)]
+    locked: bool,
 }
 
 #[derive(clap::Args)]
@@ -271,11 +326,18 @@ fn main() -> std::io::Result<()> {
         }
         Command::Serve(args) => {
             let listener = std::net::TcpListener::bind(("0.0.0.0", args.port))?;
+            let mut params = match args.motor.as_str() {
+                "bench" => mmc_sim::PmsmParams::bench_g474(),
+                _ => mmc_sim::PmsmParams::small_bldc(),
+            };
+            params.lq = params.ld * args.saliency;
             server::serve(
                 listener,
                 &server::ServeCfg {
                     ctrl_freq: args.ctrl_freq,
                     once: args.once,
+                    params,
+                    locked: args.locked,
                     ..Default::default()
                 },
             )
@@ -357,12 +419,39 @@ fn main() -> std::io::Result<()> {
                 &panel::PanelCfg {
                     http: args.http.clone(),
                     divider: args.divider,
+                    profile_dir: args.profile_dir.clone(),
                 },
             )
         }
         Command::Profile(args) => {
-            let mut link = link::Link::serial(&args.serial, args.baud)?;
-            profile::run(&mut link, &args.dir)
+            if args.list {
+                profile::list_stages();
+                return Ok(());
+            }
+            let mut link = match &args.addr {
+                Some(addr) => link::Link::tcp(addr)?,
+                None => link::Link::serial(&args.serial, args.baud)?,
+            };
+            let mut tuning = profile::StageTuning {
+                rl_volts: (args.rl_volts[0], args.rl_volts[1]),
+                ..Default::default()
+            };
+            if let Some(specs) = &args.sweep_points {
+                tuning.sweep = parse_sweep_points(specs)?;
+            }
+            if let Some(t) = &args.accel_targets {
+                tuning.accel = (t[0], t[1]);
+            }
+            profile::run(
+                &mut link,
+                &args.dir,
+                &profile::ProfileOpts {
+                    only: args.only.clone(),
+                    redo: args.redo,
+                    yes: args.yes,
+                    tuning,
+                },
+            )
         }
         Command::Apply(args) => {
             let mut link = link::Link::serial(&args.serial, args.baud)?;

@@ -16,6 +16,7 @@ pub mod foc;
 pub mod math;
 pub mod observer;
 pub mod pi;
+pub mod probe;
 pub mod sensorless;
 pub mod svpwm;
 pub mod transforms;

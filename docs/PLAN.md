@@ -167,13 +167,38 @@ sync — normal for motor control in any language.
   + CRC-check the blob at boot (fall back to defaults if blank/bad), and
   `mmc-host apply --persist`. Consider `sequential-storage` for wear-leveled
   key/value by param id. *(Deferred from MS6, 2026-07-13; user chose to hold.)*
-- **Profiler ergonomics for a new motor:** `mmc-host profile --only rl|sweep|accel`
-  for the iterative bootstrap (R/L is robust on any seed; the flux sweep needs a
-  working current loop; the accel run needs a working observer), and lift the
-  hard-coded excitation points (`SWEEP`, accel 300→900 rad/s) and `POLE_PAIRS`
-  in `tools/profile.py` out to config so they track the connected motor.
+- **Profiler ergonomics for a new motor:** *(done 2026-07-17, sessions 8–9)*
+  staged/stateful profiler (`--only/--redo/--list/--yes`, `profile_state.json`,
+  per-stage bench requirements), per-motor excitation (`--rl-volts`,
+  `--sweep-points`, `--accel-targets`), `pole_pairs` as runtime param id 6
+  snapshotted into the state file, panel Profiler card. See
+  [PROFILER.md](PROFILER.md). Proven on a second motor (4-pole, ψ 21× the
+  first).
+- **Runtime sensorless-startup parameters.** `SL_OMEGA_HANDOFF` (150 rad/s
+  el), `OMEGA_SLEW` (500 rad/s²), and the sequencer startup-current clamp are
+  firmware constants sized for motor 1. Motor 2 (heavy, ψ≈19 mWb) cannot
+  reliably ramp from rest to the 150 handoff at the accel stage's 0.5 A —
+  so its `accel` stage and sensorless mode are blocked until these become
+  params (candidates for ids 7–9). *(Found profiling motor 2, 2026-07-17.)*
 - From MS5/MS6: HF-injection L probe, d-axis-aligned I-f start, blend-kick
   softening, stall detector.
+- **Zero-speed sensorless torque/position — saliency gate MEASURED: OPEN.**
+  The flux observer is useless at ω=0 (no EMF; `observer.rs:18`) and *lies* there
+  (locks to −L·i). The only physics that works at standstill is saliency (Ld≠Lq).
+  The proposed L(θ) sweep gate was **built and run 2026-07-17** (`test::L_THETA`,
+  `mmc-core/src/probe.rs`, `tools/saliency.py`; runbook in
+  [PROFILER.md](PROFILER.md)): on the clamped bench motor
+  **|ξ| = 0.0737 ± 0.0004 → Lq/Ld ≈ 1.16 — USABLE**, against a predicted ≈1.0
+  (likely saturation-induced; all validity checks clean; sim controls recover
+  1.5 → 1.484 and 1.0 → NOT-USABLE). *Recommended confirmation:* re-clamp the
+  rotor ~45° el away and rerun — real saliency rotates with the rotor, a
+  stator-locked gain artifact does not. **Still true:** a production INFORM
+  estimator needs di/dt during *active* vectors — low-side shunts only sample
+  at the PWM peak — so zero-speed sensorless still implies an in-line-shunt
+  front-end (or clever windowing), and X/R ≈ 2 at Nyquist rules out
+  rotating-carrier injection regardless. Encoder (MS7) remains the main path;
+  the probe doubles as the INFORM measurement primitive if pursued. Design
+  notes: `~/.claude/plans/back-to-motor-control-enumerated-hejlsberg.md`.
 
 ## Verification strategy
 

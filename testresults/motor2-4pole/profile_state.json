@@ -1,0 +1,33 @@
+{
+  "device": {
+    "fw": 4,
+    "name": "mmc-g474",
+    "params": {
+      "cur_bw": 1000.0,
+      "flux": 0.01873728819191456,
+      "l": 0.00037663738476112485,
+      "pole_pairs": 2.0,
+      "r": 1.0468000173568726,
+      "speed_ki": 0.0020000000949949026,
+      "speed_kp": 0.00019999999494757503
+    }
+  },
+  "stages": {
+    "rl": {
+      "note": "4096 pairs",
+      "ok": true,
+      "unix_time": 1784324343
+    },
+    "saliency": {
+      "note": "4096 pairs",
+      "ok": true,
+      "unix_time": 1784324345
+    },
+    "sweep": {
+      "note": "5 operating points",
+      "ok": true,
+      "unix_time": 1784324334
+    }
+  },
+  "version": 1
+}

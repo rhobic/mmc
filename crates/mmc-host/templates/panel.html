@@ -71,6 +71,12 @@
                   font-variant-numeric:tabular-nums; }
   .prow button { padding:6px 12px; }
   .prow input.dirty { border-color:var(--s3); }
+  .stagebox { display:flex; align-items:center; gap:6px; font-size:13px; }
+  .stagebox .rotor { color:var(--muted); font-size:11px; }
+  #proflog { font:12px/1.45 ui-monospace,Consolas,monospace; background:var(--page);
+             border:1px solid var(--border); border-radius:8px; padding:10px 12px;
+             margin:12px 0 0; max-height:260px; overflow:auto; white-space:pre-wrap; }
+  #proflog:empty { display:none; }
 </style>
 </head>
 <body>
@@ -87,7 +93,10 @@
     <div class="card tile"><div class="tl">Bus voltage</div><div class="tv" id="vbus">—<span class="tu">V</span></div></div>
     <div class="card tile"><div class="tl">Speed</div><div class="tv" id="rpm">—<span class="tu">rpm</span></div></div>
     <div class="card tile"><div class="tl">i_q</div><div class="tv" id="iq">—<span class="tu">A</span></div></div>
-    <div class="card tile"><div class="tl">i peak</div><div class="tv" id="ipk">—<span class="tu">A</span></div></div>
+    <div class="card tile" title="Apparent winding resistance from live telemetry: (v·i − ω·ψ·i_q)/|i|², averaged over ~1 s. Includes the inverter drop; the EMF correction leans on the ψ parameter, so trust it most at low speed. Copper rises 0.39%/°C — the ΔT readout is a winding-temperature estimate.">
+      <div class="tl">R̂ apparent</div><div class="tv" id="rhat">—<span class="tu">Ω</span></div>
+      <div class="sub" id="rhatsub">&nbsp;</div>
+    </div>
   </div>
 
   <div class="card" style="margin-top:14px">
@@ -126,6 +135,27 @@
     <p class="hint">These are the profiler's runtime parameters. Edits (highlighted) take effect at the
       next clean drive start and live in <b>RAM only</b> — they reset to firmware defaults on power-cycle.
       Out-of-range values are rejected by the firmware; the range is shown beside each field.</p>
+  </div>
+
+  <div class="card" style="margin-top:14px">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+      <h1 style="font-size:15px">Profiler</h1>
+      <span class="sub" id="profstatus">idle</span>
+    </div>
+    <div class="controls" style="margin-top:10px">
+      <label class="stagebox"><input type="checkbox" id="st-sweep" checked> flux sweep <span class="rotor">(spins)</span></label>
+      <label class="stagebox"><input type="checkbox" id="st-accel" checked> accel <span class="rotor">(spins)</span></label>
+      <label class="stagebox"><input type="checkbox" id="st-rl" checked> R/L probe <span class="rotor">(parks)</span></label>
+      <label class="stagebox"><input type="checkbox" id="st-saliency" checked> saliency <span class="rotor">(parks)</span></label>
+      <button class="primary" id="profrun">Run profile</button>
+      <button id="profapply">Apply profile.json</button>
+    </div>
+    <pre id="proflog"></pre>
+    <p class="hint">Set <b>pole pairs</b> above before running — it scales the kt/J fits and the speed
+      display. Spin stages need a free shaft; probe stages park the rotor (a clamp is fine). While the
+      profiler runs, charts freeze and other controls are ignored; captures land in
+      <code>testresults/panel-profile</code>, fits run automatically, and <b>Apply</b> pushes profile.json
+      to the device after your review.</p>
   </div>
 
   <div class="charts">
@@ -277,6 +307,52 @@ function renderTiles() {
   document.getElementById("iq").childNodes[0].nodeValue = fmt(v("i_q"));
   const ipk = Math.max(Math.abs(v("i_a")), Math.abs(v("i_b")), Math.abs(v("i_c")));
   document.getElementById("ipk").childNodes[0].nodeValue = fmt(ipk);
+  renderRhat();
+}
+
+/* Apparent-resistance monitor: R̂ = (v·i − ω_e·ψ·i_q·cos θ_err)/|i|² over the
+   last ~1 s of telemetry. v_d/v_q are commanded, so R̂ includes the inverter
+   drop (the MS6 "apparent R"); ψ comes from the device param table. The
+   cos θ_err factor projects the EMF onto the drive frame — in forced (I-f)
+   mode the rotor hangs behind by the hang angle and only the aligned EMF
+   component absorbs power (a heavily-loaded motor hangs near 90° and the
+   uncorrected term over-subtracts into negative R̂). Exact at ω=0; at speed a
+   ψ error leaks in proportionally to ω·i_q/|i|². */
+function renderRhat() {
+  const rEl = document.getElementById("rhat"), sub = document.getElementById("rhatsub");
+  const idx = { vd: ci("v_d"), vq: ci("v_q"), id: ci("i_d"), iq: ci("i_q"),
+                w: ci("omega_m"), terr: ci("theta_err") };
+  const psi = lastParamVals ? lastParamVals[2] : NaN;
+  const r0 = lastParamVals ? lastParamVals[0] : NaN;
+  const pp = lastParamVals && isFinite(lastParamVals[6]) ? lastParamVals[6] : 7;
+  let num = 0, den = 0, n = 0;
+  if (isFinite(psi) && Object.values(idx).every(i => i >= 1)) {
+    for (let k = Math.max(0, buf.length - 150); k < buf.length; k++) {
+      const r = buf[k];
+      const we = r[idx.w] * pp;
+      const cosErr = Math.max(0, Math.cos(r[idx.terr]));
+      num += r[idx.vd] * r[idx.id] + r[idx.vq] * r[idx.iq] - we * psi * r[idx.iq] * cosErr;
+      den += r[idx.id] * r[idx.id] + r[idx.iq] * r[idx.iq];
+      n++;
+    }
+  }
+  if (!n || den / n < 0.02) { // needs ≥ ~0.14 A RMS to mean anything
+    rEl.childNodes[0].nodeValue = "—";
+    sub.innerHTML = "&nbsp;";
+    sub.style.color = "";
+    return;
+  }
+  const rhat = num / den;
+  rEl.childNodes[0].nodeValue = fmt(rhat);
+  if (isFinite(r0) && r0 > 0) {
+    const dpct = (rhat / r0 - 1) * 100;
+    const dt = dpct / 0.393; // copper tempco %/°C
+    sub.textContent = (dpct >= 0 ? "+" : "") + dpct.toFixed(0) + "% vs r ≈ " +
+                      (dt >= 0 ? "+" : "") + dt.toFixed(0) + " °C";
+    sub.style.color = dpct > 25 ? "var(--critical)" : dpct > 12 ? "var(--warning)" : "";
+  } else {
+    sub.innerHTML = "&nbsp;";
+  }
 }
 
 async function poll() {
@@ -294,6 +370,7 @@ async function poll() {
     renderTiles();
     for (const c of CHARTS) renderChart(c);
     updateParams(d.params, d.param_status);
+    updateProfiler(d.busy, d.plog);
   } catch (e) {
     document.getElementById("devline").textContent = "connection lost — retrying…";
   }
@@ -310,6 +387,7 @@ const PARAMS = [
   { id: 3, key: "cur_bw",   label: "current BW", unit: "rad/s", scale: 1,   dp: 0, min: 100,   max: 4000 },
   { id: 4, key: "speed_kp", label: "speed Kp",   unit: "",      scale: 1,   dp: 6, min: 0,     max: 0.1  },
   { id: 5, key: "speed_ki", label: "speed Ki",   unit: "",      scale: 1,   dp: 6, min: 0,     max: 10   },
+  { id: 6, key: "pole_pairs", label: "pole pairs", unit: "",    scale: 1,   dp: 0, min: 1,     max: 50   },
 ];
 const dirty = new Set();            // ids the user edited but hasn't applied
 const pin = p => document.getElementById("p" + p.id);
@@ -339,9 +417,11 @@ function setParam(p) {
   dirty.delete(p.id);
   pin(p).classList.remove("dirty");
 }
+let lastParamVals = null; // device param values (SI) for the R̂ monitor
 function updateParams(vals, status) {
   if (status != null) document.getElementById("paramstatus").textContent = status;
   if (!vals) return;
+  lastParamVals = vals;
   for (const p of PARAMS) {
     const el = pin(p);
     if (!el || dirty.has(p.id) || document.activeElement === el) continue; // don't clobber an edit
@@ -357,6 +437,27 @@ document.getElementById("pget").onclick = () => {
 document.getElementById("pall").onclick = () => {
   for (const p of PARAMS) if (dirty.has(p.id)) setParam(p);
 };
+
+/* ---- profiler card ---- */
+const PSTAGES = ["sweep", "accel", "rl", "saliency"];
+document.getElementById("profrun").onclick = () => {
+  const stages = PSTAGES.filter(s => document.getElementById("st-" + s).checked);
+  if (stages.length) post({ cmd: "profile", stages });
+};
+document.getElementById("profapply").onclick = () => post({ cmd: "applyprofile" });
+function updateProfiler(busy, plog) {
+  const st = document.getElementById("profstatus");
+  st.textContent = busy ? "RUNNING — charts frozen, controls ignored" : "idle";
+  document.getElementById("profrun").disabled = !!busy;
+  document.getElementById("profapply").disabled = !!busy;
+  const log = document.getElementById("proflog");
+  const text = (plog || []).join("\n");
+  if (log.textContent !== text) {
+    const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+    log.textContent = text;
+    if (stick) log.scrollTop = log.scrollHeight;
+  }
+}
 
 buildParams();
 poll();

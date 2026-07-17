@@ -37,6 +37,23 @@ impl PmsmParams {
         }
     }
 
+    /// The MS6-profiled bench motor on the G474 + IHM16M1 rig: a
+    /// low-inductance surface BLDC with τ = L/R ≈ 31 µs — *under* the 50 µs
+    /// control period, which is the regime the R/L and saliency probes are
+    /// designed for (`small_bldc`'s τ = 1.2 ms is the opposite regime and
+    /// cannot exercise them).
+    pub fn bench_g474() -> Self {
+        Self {
+            rs: 0.904,
+            ld: 28e-6,
+            lq: 28e-6,
+            flux: 0.894e-3,
+            pole_pairs: 7,
+            inertia: 1.75e-6,
+            viscous: 1.0e-6,
+        }
+    }
+
     /// Torque per amp of i_q (surface PMSM, i_d = 0) [N·m/A].
     pub fn torque_constant(&self) -> f32 {
         1.5 * self.pole_pairs as f32 * self.flux

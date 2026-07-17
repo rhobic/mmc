@@ -39,6 +39,14 @@ pub mod test {
     /// The two levels make the fit differential — dead-time distortion and
     /// offsets cancel.
     pub const RL_STEP: u8 = 0;
+    /// Saliency (Ld/Lq) sweep: align at `a` volts on θ=0, then square-wave
+    /// between `a` and `b` volts along a firmware-owned schedule of ±paired
+    /// electrical angles (`mmc_core::probe`), recording (i_d, i_q) in the
+    /// excitation frame per tick behind a self-describing header. The i_q
+    /// transient is a null channel: at DC it is zero at every angle unless
+    /// Ld ≠ Lq. No rotor clamping required — the ± pairing cancels net
+    /// torque impulse and the fit recovers the rotor angle as a parameter.
+    pub const L_THETA: u8 = 1;
 }
 
 /// Runtime device parameter ids for [`Message::SetParam`] / `GetParam` —
@@ -51,8 +59,20 @@ pub mod param {
     pub const CUR_BW: u8 = 3; // current-loop bandwidth [rad/s]
     pub const SPEED_KP: u8 = 4; // speed PI kp [A/(rad/s el)]
     pub const SPEED_KI: u8 = 5; // speed PI ki
-    pub const COUNT: usize = 6;
-    pub const NAMES: [&str; COUNT] = ["r", "l", "flux", "cur_bw", "speed_kp", "speed_ki"];
+    /// Motor pole pairs (f32 on the wire like every param; integer-valued).
+    /// Scales the mechanical-speed telemetry and the host's kt/J fits only —
+    /// the electrical control loops never consume it.
+    pub const POLE_PAIRS: u8 = 6;
+    pub const COUNT: usize = 7;
+    pub const NAMES: [&str; COUNT] = [
+        "r",
+        "l",
+        "flux",
+        "cur_bw",
+        "speed_kp",
+        "speed_ki",
+        "pole_pairs",
+    ];
 }
 
 /// Max f32 values per [`BurstChunk`] frame (fits [`MAX_PAYLOAD`]).

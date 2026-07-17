@@ -25,15 +25,23 @@ pub struct PanelCfg {
     /// HTTP bind address, e.g. `127.0.0.1:8484`.
     pub http: String,
     pub divider: u16,
+    /// Where the profiler card's captures and fits land.
+    pub profile_dir: std::path::PathBuf,
 }
 
 /// Command from the HTTP thread to the link pump. Drive/i_q are fire-and-forget;
 /// parameter ops need a synchronous request/response, so the pump runs them
-/// inline (it owns the single `Link`).
+/// inline (it owns the single `Link`). Profiler runs block the pump for their
+/// duration — telemetry freezes, the browser shows the log instead.
 enum Cmd {
     Send(Message),
     RefreshParams,
     SetParam { id: u8, value: f32 },
+    RunProfile {
+        stages: Vec<String>,
+        tuning: crate::profile::StageTuning,
+    },
+    ApplyProfile,
 }
 
 struct Shared {
@@ -48,6 +56,10 @@ struct Shared {
     params: Vec<f32>,
     /// Human-readable result of the last parameter read/write, for the UI.
     param_status: String,
+    /// Profiler card: run in progress (telemetry frozen while true).
+    busy: bool,
+    /// Profiler card log (stage progress + fit output).
+    plog: Vec<String>,
 }
 
 pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
@@ -115,6 +127,8 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
         drive_on: false,
         params,
         param_status,
+        busy: false,
+        plog: Vec::new(),
     }));
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
 
@@ -149,6 +163,21 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
                 }
                 Cmd::RefreshParams => read_params(&mut link, &shared),
                 Cmd::SetParam { id, value } => set_param(&mut link, &shared, id, value),
+                Cmd::RunProfile { stages, tuning } => {
+                    run_profile(&mut link, cfg, &shared, &stages, &tuning);
+                    // Drop any drive/param commands queued while blocked —
+                    // executing stale controls after ~30 s would surprise.
+                    while cmd_rx.try_recv().is_ok() {}
+                }
+                Cmd::ApplyProfile => {
+                    let path = cfg.profile_dir.join("profile.json");
+                    let msg = match crate::profile::apply(&mut link, &path) {
+                        Ok(()) => "profile applied and verified — takes effect at next drive start".to_string(),
+                        Err(e) => format!("apply failed: {e}"),
+                    };
+                    shared.lock().unwrap().plog.push(msg);
+                    read_params(&mut link, &shared); // refresh the params card
+                }
             }
             last_send = Instant::now();
         }
@@ -250,6 +279,7 @@ fn handle_conn(
                 .partition_point(|row| (row[0] as f64) <= since)
                 .max(s.ring.len().saturating_sub(3000));
             let rows: Vec<&Vec<f32>> = s.ring.iter().skip(start).collect();
+            let plog_tail: Vec<&String> = s.plog.iter().rev().take(120).rev().collect();
             let json = serde_json::json!({
                 "columns": s.columns,
                 "rows": rows,
@@ -259,6 +289,8 @@ fn handle_conn(
                 "params": s.params,
                 "param_names": param::NAMES,
                 "param_status": s.param_status,
+                "busy": s.busy,
+                "plog": plog_tail,
             });
             let body = serde_json::to_vec(&json)?;
             respond(&mut conn, 200, "application/json", &body)
@@ -308,7 +340,119 @@ fn parse_cmd(v: &serde_json::Value) -> Option<Cmd> {
             id: v.get("id")?.as_u64()? as u8,
             value: f("value")?,
         }),
+        "profile" => {
+            let stages = v
+                .get("stages")?
+                .as_array()?
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect::<Vec<_>>();
+            // Optional per-motor excitation overrides:
+            //   "rl_volts": [a, b], "sweep": [[amps, omega_e], ...],
+            //   "accel": [lo, hi]
+            let mut tuning = crate::profile::StageTuning::default();
+            let pair = |x: &serde_json::Value| -> Option<(f32, f32)> {
+                let a = x.as_array()?;
+                Some((a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32))
+            };
+            if let Some(rv) = v.get("rl_volts").and_then(&pair) {
+                tuning.rl_volts = rv;
+            }
+            if let Some(points) = v.get("sweep").and_then(|x| x.as_array()) {
+                let parsed: Vec<_> = points.iter().filter_map(&pair).collect();
+                if !parsed.is_empty() {
+                    tuning.sweep = parsed;
+                }
+            }
+            if let Some(t) = v.get("accel").and_then(&pair) {
+                tuning.accel = t;
+            }
+            (!stages.is_empty()).then_some(Cmd::RunProfile { stages, tuning })
+        }
+        "applyprofile" => Some(Cmd::ApplyProfile),
         _ => None,
+    }
+}
+
+/// Profiler card backend: quiet the telemetry stream, run the requested
+/// stages through the shared `profile::run_stages` engine, shell out to the
+/// Python fits, then restore the panel's telemetry config. Blocks the pump
+/// for the duration — the UI shows the log and a busy flag instead of
+/// charts. The stage code feeds the firmware deadman itself.
+fn run_profile(
+    link: &mut Link,
+    cfg: &PanelCfg,
+    shared: &Arc<Mutex<Shared>>,
+    stages: &[String],
+    tuning: &crate::profile::StageTuning,
+) {
+    let t = Duration::from_secs(2);
+    {
+        let mut s = shared.lock().unwrap();
+        if s.busy {
+            return;
+        }
+        s.busy = true;
+        s.plog.clear();
+        s.drive_on = false; // stages command their own drives and end Off
+    }
+    let _ = link.request(
+        &Message::Stream { enable: false },
+        |m| matches!(m, Message::Ack { .. }),
+        t,
+    );
+
+    let ids: Vec<&str> = stages.iter().map(String::as_str).collect();
+    let log_shared = Arc::clone(shared);
+    let mut log = move |line: &str| {
+        println!("panel-profile: {line}");
+        log_shared.lock().unwrap().plog.push(line.to_string());
+    };
+    match crate::profile::run_stages(link, &cfg.profile_dir, &ids, tuning, &mut log) {
+        Ok(()) => {
+            run_fit("tools/profile.py", &cfg.profile_dir, &mut log);
+            if ids.contains(&"saliency") {
+                run_fit("tools/saliency.py", &cfg.profile_dir, &mut log);
+            }
+            log("done — review the fit above, then Apply to push it to the device");
+        }
+        Err(e) => log(&format!("profiler stopped: {e}")),
+    }
+
+    // Restore the panel's own telemetry configuration.
+    let _ = link.request(
+        &Message::SetTelemetry {
+            divider: cfg.divider,
+            mask: channel::ALL,
+        },
+        |m| matches!(m, Message::Ack { .. }),
+        t,
+    );
+    let _ = link.request(
+        &Message::Stream { enable: true },
+        |m| matches!(m, Message::Ack { .. }),
+        t,
+    );
+    shared.lock().unwrap().busy = false;
+}
+
+/// Run a Python fit script, folding its output into the profiler log. The
+/// panel is a repo tool: the scripts are addressed relative to the working
+/// directory, exactly like the CLI usage they wrap.
+fn run_fit(script: &str, dir: &std::path::Path, log: &mut dyn FnMut(&str)) {
+    log(&format!("$ python {script} {}", dir.display()));
+    match std::process::Command::new("python").arg(script).arg(dir).output() {
+        Ok(out) => {
+            for l in String::from_utf8_lossy(&out.stdout).lines() {
+                log(l);
+            }
+            for l in String::from_utf8_lossy(&out.stderr).lines() {
+                log(l);
+            }
+        }
+        Err(e) => log(&format!(
+            "could not run python ({e}) — run the fit manually from the repo root"
+        )),
     }
 }
 
