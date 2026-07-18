@@ -5,3 +5,6 @@ target/
 !testresults/**/*.csv
 
 tools/__pycache__/
+
+# The panel's default profiler output — scratch runs, curate elsewhere to keep.
+testresults/panel-profile/

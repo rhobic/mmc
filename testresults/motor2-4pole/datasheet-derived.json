@@ -1,0 +1,6 @@
+{
+  "note": "QBL5704 datasheet-derived seeds for values the profiler could not measure on this rig (see datasheet-comparison.md). speed gains assume the -116-04-042 variant's rotor-only J=23e-6 kgm^2 and measured kt=0.0562; coupled load inertia scales kp up proportionally. Apply with: mmc-host apply --profile testresults/motor2-4pole/datasheet-derived.json (after profile.json).",
+  "pole_pairs": 2.0,
+  "speed_kp": 0.0082,
+  "speed_ki": 0.082
+}

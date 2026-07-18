@@ -240,11 +240,30 @@ def main(dir_):
     out = os.path.join(dir_, "profile.json")
     with open(out, "w") as f:
         json.dump(profile, f, indent=2)
+
+    # Summary of what `apply` will push to the device (units for reading).
+    disp = {
+        "r": ("R", "ohm", 1.0),
+        "l": ("L", "mH", 1e3),
+        "flux": ("flux", "mWb", 1e3),
+        "cur_bw": ("current BW", "rad/s", 1.0),
+        "speed_kp": ("speed Kp", "", 1.0),
+        "speed_ki": ("speed Ki", "", 1.0),
+    }
+    print()
+    print(f"Profile (pole pairs = {pole_pairs:.0f}) -- applied by `apply`:")
+    for key, (label, unit, scale) in disp.items():
+        if key in profile:
+            print(f"  {label:11}= {profile[key] * scale:.4g} {unit}".rstrip())
+    if "r" in profile:
+        print("  (R is the drive-path value the control loop sees -- winding plus")
+        print("   shunt and driver FETs -- so it reads several times a datasheet's")
+        print("   winding-only figure. That is correct for control.)")
     print()
     print(f"wrote {out}")
     print(f"apply: mmc-host apply --serial auto --baud 1000000 --profile {out}")
     if os.path.exists(os.path.join(dir_, "saliency.csv")):
-        print(f"saliency verdict: python tools/saliency.py {dir_}")
+        print(f"saliency: python tools/saliency.py {dir_}")
 
 
 if __name__ == "__main__":

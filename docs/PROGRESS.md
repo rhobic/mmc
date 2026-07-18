@@ -3,6 +3,42 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-07-18 — session 10: profiler output neutralized; motor 2 identified as QBL5704, datasheet cross-check
+
+**Motor 2 is a Trinamic QMot QBL5704** (`hw/qbl5704_datasheet_v1.05.pdf`,
+likely the -116-04-042 by the L comparison; check the 94 vs 116 mm body to
+confirm). Full profiler-vs-datasheet comparison in
+`testresults/motor2-4pole/datasheet-comparison.md`. Highlights:
+
+- **Pole pairs = 2 confirmed twice**: the datasheet says 4 poles, and the kt
+  cross-check agrees — 1.5·pp·ψ = 56.2 mN·m/A vs the datasheet's 63 (block
+  convention, −11%); pp=4 would read +78%. ψ also predicts ≈3700 RPM at 36 V
+  vs the 4000 RPM rating.
+- **The R "discrepancy" closes exactly**: profiler R = 1.047–1.057 Ω vs
+  datasheet winding 0.175–0.225 Ω. The gap is the drive path — STSPIN830
+  conducting switch ≈0.5 Ω (R_DSon HS+LS = 1 Ω typ, verified from
+  `hw/stspin830.pdf`) + 0.33 Ω low-side shunt (duty-weighted ≈0.32) — summing
+  to 0.99–1.05 Ω predicted. The profiler's R is what the control loop sees;
+  correct for control, ~5–6× a datasheet winding figure by construction.
+  `profile.py` now says so in its summary.
+- L: 0.377 mH measured vs 0.50 (-116) / 0.70 (-94) per phase — -116 within
+  typical tolerance. J not measured (accel stage blocked by the fixed
+  sensorless handoff + ~30 mN·m bench drag); rotor-only speed-gain seeds from
+  the datasheet J live in `testresults/motor2-4pole/datasheet-derived.json`
+  (apply-able). Hand-tuned gains found live on the device (kp=0.018 ≈ 2.2×
+  the rotor-only seed — consistent with coupled load inertia) were left as-is;
+  the measured R/L/flux were (re)applied around them.
+- Rig context: the IHM16M1's 1.5 A limit drives this 5–6.7 A motor at ≤25%
+  rated current, hence the near-90° hang angles under ~10%-of-rated drag.
+
+**Also landed:** profiler fit output is now *neutral* — `saliency.py` reports
+the measured Lq/Ld, ξ ± σ (with significance) and the R/L/pole-pairs/schedule
+actually used, instead of USABLE/NOT-USABLE application verdicts; the
+unusable-capture path says "measurement invalid", not a motor claim.
+`profile.py` prints the applied-parameter summary (with units) after fitting.
+`testresults/panel-profile/` (the panel's default scratch output) is
+gitignored; the datasheet PDF was renamed to the `hw/` convention.
+
 ## 2026-07-17 — session 9: panel-driven profiler + second motor (4-pole) profiled
 
 **A second, very different motor (4 poles ⇒ 2 pole pairs, rotor free) was

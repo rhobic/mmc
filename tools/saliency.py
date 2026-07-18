@@ -25,10 +25,11 @@ The schedule (angles, levels, timing) is reconstructed from the header the
 firmware wrote into the burst (saved in saliency.meta.json), mirroring
 `mmc-core/src/probe.rs` — the one place the two must agree.
 
-Verdict: |xi| > 0.05 -> saliency usable for INFORM-style zero-speed sensing;
-|xi| < 0.02 -> surface PMSM, zero-speed sensorless is off the table;
-in between -> ambiguous (re-clamp the rotor ~45 deg el away and re-run: real
-saliency rotates with the rotor, a stator-locked artifact does not).
+Output: the measured saliency ratio Lq/Ld (and xi = (Lq-Ld)/(Lq+Ld)) with its
+uncertainty, plus the R/L/pole-pairs used for the run. It is a measurement,
+not a recommendation. A re-run with the rotor re-clamped ~45 deg el away is the
+check that the signal tracks the rotor (real saliency) rather than the stator
+(a gain artifact); the two runs' xi should agree.
 
 Usage: python tools/saliency.py [testresults/ms6-profile]
 """
@@ -41,8 +42,18 @@ import sys
 
 import numpy as np
 
-XI_USABLE = 0.05
-XI_NOT_USABLE = 0.02
+SIGNIF_SIGMA = 3.0  # xi is called significant above this many sigma
+
+
+def used_params(dir_):
+    """The device parameter table snapshotted into profile_state.json when the
+    stages ran — the R/L/pole-pairs the firmware and fits actually used. Empty
+    dict for captures predating the snapshot."""
+    try:
+        with open(os.path.join(dir_, "profile_state.json")) as f:
+            return json.load(f)["device"]["params"]
+    except (OSError, KeyError, ValueError):
+        return {}
 
 
 def j_offsets(half_ticks):
@@ -216,48 +227,50 @@ def main(dir_):
     if invalid:
         print()
         for reason in invalid:
-            print(f"INVALID: {reason}")
+            print(f"  bad: {reason}")
         raise SystemExit(
-            "\nVERDICT: MEASUREMENT INVALID — this says nothing about the motor.\n"
-            "Fix and rerun: profile `rl` first, Apply so the firmware's R/L (and "
-            "so its half-period pick) match this motor, keep the shaft still, "
-            "then `--only saliency --redo`."
+            "\nSaliency not measured: the capture is unusable (see above), which\n"
+            "reflects the measurement, not the motor. Profile `rl` first, Apply so\n"
+            "the firmware's R/L (and its half-period pick) match this motor, keep\n"
+            "the shaft still, then `--only saliency --redo`."
         )
     xi = float(np.mean(xis[: len(js)]))
     sigma = float(np.std(xis)) if len(xis) > 1 else abs(xi)
     theta_spread = math.degrees(max(thetas) - min(thetas)) if len(thetas) > 1 else 0.0
     ratio = (1 + abs(xi)) / (1 - abs(xi))
+    snr = abs(xi) / sigma if sigma > 0 else float("inf")
 
+    # --- Saliency measurement (a number, not a recommendation) --------------
     print()
-    print(f"xi = {xi:+.4f} +- {sigma:.4f}  ->  |Lq/Ld| ratio = {ratio:.3f}")
-    print(f"theta_r spread across splits: {theta_spread:.1f} deg el")
+    print("Saliency (measured):")
+    print(f"  Lq/Ld     = {ratio:.3f}   ({(ratio - 1) * 100:+.1f}% saliency)")
+    print(f"  xi        = {abs(xi):.4f} +- {sigma:.4f}   "
+          f"({snr:.0f} sigma, "
+          f"{'significant' if abs(xi) > SIGNIF_SIGMA * sigma else 'within noise'})")
+    print(f"  rotor axis theta_r spread across splits: {theta_spread:.1f} deg el")
+    print("  note: |xi| only; the axis is ambiguous by 90 deg el for a clamped")
+    print("        rotor at an unknown angle, so the sign is not meaningful.")
     if theta_spread > 15.0:
-        print("WARNING: theta_r drifts between cycle splits — the rotor moved during")
-        print("the sweep; clamp the shaft (or re-run) before trusting the verdict.")
-    print(
-        "note: the fitted axis is ambiguous by 90 deg el (clamped rotor at an "
-        "unknown angle), so the SIGN of xi is not meaningful — the verdict "
-        "uses |xi|."
-    )
+        print("  note: theta_r drifted >15 deg between splits; the rotor likely")
+        print("        moved -- clamp the shaft and re-run for a cleaner number.")
+
+    # --- Key values used in this profiling run ------------------------------
+    dp = used_params(dir_)
     print()
-    if abs(xi) > XI_USABLE and abs(xi) > 3 * sigma:
-        print(
-            f"VERDICT: USABLE saliency (|xi| > {XI_USABLE}). INFORM-style zero-speed "
-            "sensing has signal to work with on this motor; this probe is the "
-            "measurement primitive."
-        )
-    elif abs(xi) < XI_NOT_USABLE or abs(xi) < 3 * sigma:
-        print(
-            f"VERDICT: NOT USABLE (|xi| < {XI_NOT_USABLE} or within noise). Surface-"
-            "PMSM behavior: zero-speed sensorless torque/position is off the "
-            "table on this motor — the encoder (MS7) is the path."
-        )
-    else:
-        print(
-            "VERDICT: AMBIGUOUS. Re-clamp the rotor ~45 deg el away and re-run "
-            "(`--only saliency --redo`): real saliency rotates with the rotor, "
-            "a stator-locked gain artifact does not."
-        )
+    print("Values used this run:")
+    print(f"  R          = {r:.3f} ohm   (from this saliency plateau)")
+    if "r" in dp:
+        print(f"  R (device) = {float(dp['r']):.3f} ohm   (param the firmware used)")
+    if "l" in dp:
+        print(f"  L          = {float(dp['l']) * 1e3:.3f} mH   "
+              "(RL probe; sets the sweep's half-period)")
+    if "flux" in dp:
+        print(f"  flux       = {float(dp['flux']) * 1e3:.3f} mWb")
+    if "pole_pairs" in dp:
+        print(f"  pole pairs = {float(dp['pole_pairs']):.0f}")
+    print(f"  half-period= {int(hdr['half_ticks'])} ticks   "
+          f"({int(hdr['slots'])} angles, {int(hdr['cycles'])} cycle(s), "
+          f"{hdr['v_low']:.2f}->{hdr['v_high']:.2f} V)")
 
 
 if __name__ == "__main__":
