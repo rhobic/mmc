@@ -147,6 +147,7 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
     let mut last_us: Option<u32> = None;
     let mut acc_us = 0u64;
     let mut last_send = Instant::now();
+    let mut last_frame = Instant::now();
     loop {
         while let Ok(cmd) = cmd_rx.try_recv() {
             match cmd {
@@ -168,6 +169,7 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
                     // Drop any drive/param commands queued while blocked —
                     // executing stale controls after ~30 s would surprise.
                     while cmd_rx.try_recv().is_ok() {}
+                    last_frame = Instant::now(); // give the resumed stream a grace period
                 }
                 Cmd::ApplyProfile => {
                     let path = cfg.profile_dir.join("profile.json");
@@ -195,7 +197,21 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
             link.send(&Message::Ping { nonce: 0 })?;
             last_send = Instant::now();
         }
+        // Telemetry watchdog: the device streams continuously while enabled, so
+        // a multi-second gap means streaming silently dropped — a serial/device
+        // hiccup, observed once on a ~13 h session. Re-arm it (fire-and-forget,
+        // so a wedged device can't block the pump) instead of sitting dead.
+        if last_frame.elapsed() > Duration::from_secs(3) {
+            let _ = link.send(&Message::SetTelemetry {
+                divider: cfg.divider,
+                mask: channel::ALL,
+            });
+            let _ = link.send(&Message::Stream { enable: true });
+            last_frame = Instant::now(); // back off ~3 s before retrying
+            println!("panel: telemetry stalled — re-enabling stream");
+        }
         if let Some(Message::Telemetry(f)) = link.recv(Duration::from_millis(20))? {
+            last_frame = Instant::now();
             // Unwrap the device's wrapping-µs clock (same as `capture`).
             if let Some(prev) = last_us {
                 acc_us += f.t_us.wrapping_sub(prev) as u64;

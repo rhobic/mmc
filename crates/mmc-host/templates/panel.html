@@ -71,12 +71,29 @@
                   font-variant-numeric:tabular-nums; }
   .prow button { padding:6px 12px; }
   .prow input.dirty { border-color:var(--s3); }
+  @keyframes flashbg { from { background:var(--s2); border-color:var(--s2); } }
+  .prow input.flash { animation:flashbg .7s ease-out; }
   .stagebox { display:flex; align-items:center; gap:6px; font-size:13px; }
   .stagebox .rotor { color:var(--muted); font-size:11px; }
   #proflog { font:12px/1.45 ui-monospace,Consolas,monospace; background:var(--page);
              border:1px solid var(--border); border-radius:8px; padding:10px 12px;
-             margin:12px 0 0; max-height:260px; overflow:auto; white-space:pre-wrap; }
+             margin:12px 0 0; max-height:300px; overflow:auto; white-space:pre-wrap; }
   #proflog:empty { display:none; }
+  .card.running { border-color:var(--s1); box-shadow:0 0 0 1px var(--s1); }
+  #profstatus.run { color:var(--s1); font-weight:650; }
+  #profstatus.ok  { color:var(--good); font-weight:650; }
+  /* Profiling banner sits where the charts are, since telemetry is paused. */
+  #profbanner { display:none; margin-top:14px; padding:13px 16px; border-radius:10px;
+                background:var(--s1); color:#fff; align-items:center; gap:12px; }
+  #profbanner.on { display:flex; }
+  #profbanner .spin { width:15px; height:15px; flex:none; border-radius:50%;
+                      border:2.5px solid rgba(255,255,255,.35); border-top-color:#fff;
+                      animation:spin .8s linear infinite; }
+  #profbanner .btxt { font-weight:600; }
+  #profbanner .bsub { opacity:.85; font-size:12.5px; font-family:ui-monospace,Consolas,monospace; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { #profbanner .spin { animation:none; } }
+  .charts.paused { opacity:.3; filter:grayscale(.7); transition:opacity .3s; }
 </style>
 </head>
 <body>
@@ -137,7 +154,7 @@
       Out-of-range values are rejected by the firmware; the range is shown beside each field.</p>
   </div>
 
-  <div class="card" style="margin-top:14px">
+  <div class="card" style="margin-top:14px" id="profcard">
     <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
       <h1 style="font-size:15px">Profiler</h1>
       <span class="sub" id="profstatus">idle</span>
@@ -153,9 +170,15 @@
     <pre id="proflog"></pre>
     <p class="hint">Set <b>pole pairs</b> above before running — it scales the kt/J fits and the speed
       display. Spin stages need a free shaft; probe stages park the rotor (a clamp is fine). While the
-      profiler runs, charts freeze and other controls are ignored; captures land in
-      <code>testresults/panel-profile</code>, fits run automatically, and <b>Apply</b> pushes profile.json
-      to the device after your review.</p>
+      profiler runs, live telemetry is <b>paused</b> (one serial link) and the plots resume when it
+      finishes; captures land in <code>testresults/panel-profile</code>, fits run automatically, and
+      <b>Apply</b> pushes profile.json to the device after your review.</p>
+  </div>
+
+  <div id="profbanner">
+    <span class="spin"></span>
+    <span><span class="btxt" id="profbannertext">Profiling…</span>
+      <span class="bsub" id="profbannersub"></span></span>
   </div>
 
   <div class="charts">
@@ -172,6 +195,7 @@ const STATE_NAMES = { 0:["off","chip off"], 1:["running","chip run"], 2:["FAULT:
                       6:["sensorless: I-f ramp","chip run"], 7:["sensorless: handoff","chip run"] };
 const WINDOW_S = 5.0;
 let columns = [], buf = [], lastT = -1;
+let lastFrames = -1, frameStamp = Date.now();  // telemetry-stall detector
 const ci = n => columns.indexOf(n);
 
 function post(o) { fetch("/cmd", { method: "POST", body: JSON.stringify(o) }); }
@@ -356,24 +380,37 @@ function renderRhat() {
 }
 
 async function poll() {
+  let d;
   try {
     const r = await fetch("/data?since=" + lastT);
-    const d = await r.json();
-    columns = d.columns;
-    for (const row of d.rows) buf.push(row);
-    if (d.rows.length) lastT = buf[buf.length - 1][0];
-    const cutoff = (buf.length ? buf[buf.length - 1][0] : 0) - WINDOW_S - 1;
-    while (buf.length && buf[0][0] < cutoff) buf.shift();
-    document.getElementById("devline").textContent =
-      d.device + "  ·  " + d.frames.toLocaleString() + " frames" +
-      (d.errors ? "  ·  " + d.errors + " rejected" : "");
-    renderTiles();
-    for (const c of CHARTS) renderChart(c);
-    updateParams(d.params, d.param_status);
-    updateProfiler(d.busy, d.plog);
+    d = await r.json();
   } catch (e) {
+    // Only a *fetch* failure is a lost connection. A render exception must
+    // never masquerade as one, nor abort the other views (that once left the
+    // whole panel blank — plots, params, and status — behind one stale bug).
     document.getElementById("devline").textContent = "connection lost — retrying…";
+    setTimeout(poll, 300);
+    return;
   }
+  columns = d.columns;
+  for (const row of d.rows || []) buf.push(row);
+  if (d.rows && d.rows.length) lastT = buf[buf.length - 1][0];
+  const cutoff = (buf.length ? buf[buf.length - 1][0] : 0) - WINDOW_S - 1;
+  while (buf.length && buf[0][0] < cutoff) buf.shift();
+  // Stall detector: the server streams continuously, so a frozen frame count
+  // (while not profiling) means telemetry dropped — the pump re-arms it.
+  if (d.frames !== lastFrames) { lastFrames = d.frames; frameStamp = Date.now(); }
+  const stalled = !d.busy && Date.now() - frameStamp > 2500;
+  // Each view is isolated: a bug in one can't take down the others.
+  const safe = (name, fn) => { try { fn(); } catch (e) { console.error("panel " + name, e); } };
+  safe("devline", () => document.getElementById("devline").textContent =
+    d.device + "  ·  " + d.frames.toLocaleString() + " frames" +
+    (d.errors ? "  ·  " + d.errors + " rejected" : "") +
+    (stalled ? "  ·  telemetry stalled — recovering…" : ""));
+  safe("tiles", renderTiles);
+  safe("charts", () => { for (const c of CHARTS) renderChart(c); });
+  safe("params", () => updateParams(d.params, d.param_status));
+  safe("profiler", () => updateProfiler(d.busy, d.plog));
   setTimeout(poll, 150);
 }
 
@@ -418,6 +455,7 @@ function setParam(p) {
   pin(p).classList.remove("dirty");
 }
 let lastParamVals = null; // device param values (SI) for the R̂ monitor
+let flashParams = false;  // pulse the fields on the next refresh
 function updateParams(vals, status) {
   if (status != null) document.getElementById("paramstatus").textContent = status;
   if (!vals) return;
@@ -427,31 +465,85 @@ function updateParams(vals, status) {
     if (!el || dirty.has(p.id) || document.activeElement === el) continue; // don't clobber an edit
     const si = vals[p.id];
     el.value = (si == null || !isFinite(si)) ? "" : fmtParam(p, si);
+    if (flashParams) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
   }
+  flashParams = false;
 }
 document.getElementById("pget").onclick = () => {
   dirty.clear();
   for (const p of PARAMS) pin(p).classList.remove("dirty");
+  // Values rarely change, so give the click its own visible ack: a status
+  // note now, and a field pulse when the read-back lands.
+  document.getElementById("paramstatus").textContent = "reading from device…";
+  flashParams = true;
   post({ cmd: "getparams" });
 };
 document.getElementById("pall").onclick = () => {
   for (const p of PARAMS) if (dirty.has(p.id)) setParam(p);
 };
 
-/* ---- profiler card ---- */
+/* ---- profiler card ----
+   The profiler owns the single serial link for the length of a run, so live
+   telemetry is paused: the plots freeze, a banner takes their place with an
+   elapsed timer + the latest log line, and on completion the plot buffer is
+   reset (the device clock jumped during the pause) so the charts rebuild
+   cleanly rather than blanking on the time gap. */
 const PSTAGES = ["sweep", "accel", "rl", "saliency"];
+let profActive = false, profStart = 0, profPending = false, profPendUntil = 0;
+
 document.getElementById("profrun").onclick = () => {
   const stages = PSTAGES.filter(s => document.getElementById("st-" + s).checked);
-  if (stages.length) post({ cmd: "profile", stages });
+  if (!stages.length) return;
+  profPending = true; profPendUntil = Date.now() + 5000; profStart = Date.now();
+  setProfilerRunning(true);              // optimistic; self-corrects on next poll
+  document.getElementById("profbannersub").textContent = "starting " + stages.join(", ") + "…";
+  post({ cmd: "profile", stages });
 };
-document.getElementById("profapply").onclick = () => post({ cmd: "applyprofile" });
+document.getElementById("profapply").onclick = () => {
+  document.getElementById("profstatus").textContent = "applying profile.json…";
+  post({ cmd: "applyprofile" });
+};
+
+function setProfilerRunning(on) {
+  document.getElementById("profcard").classList.toggle("running", on);
+  document.getElementById("profbanner").classList.toggle("on", on);
+  document.querySelector(".charts").classList.toggle("paused", on);
+  document.getElementById("profrun").disabled = on;
+  document.getElementById("profapply").disabled = on;
+}
+function profSummary(plog) {
+  const pick = k => [...plog].reverse().find(l => l.includes(k));
+  const v = pick("VERDICT") || pick("INVALID") || pick("applied by") || pick("applied") ||
+            pick("R/L probe: R") || pick("flux sweep: psi") || pick("wrote");
+  return v ? v.trim() : "review the log below";
+}
 function updateProfiler(busy, plog) {
-  const st = document.getElementById("profstatus");
-  st.textContent = busy ? "RUNNING — charts frozen, controls ignored" : "idle";
-  document.getElementById("profrun").disabled = !!busy;
-  document.getElementById("profapply").disabled = !!busy;
+  plog = plog || [];
+  if (busy) profPending = false;                       // real run observed
+  else if (profPending && Date.now() > profPendUntil) profPending = false;
+  const active = busy || profPending;
+  setProfilerRunning(active);
+  const status = document.getElementById("profstatus");
+
+  if (active) {
+    const el = ((Date.now() - profStart) / 1000).toFixed(0);
+    status.textContent = "RUNNING · " + el + "s"; status.className = "sub run";
+    document.getElementById("profbannertext").textContent =
+      "Profiling — " + el + "s · live plots paused (single serial link)";
+    if (plog.length) document.getElementById("profbannersub").textContent = plog[plog.length - 1].trim();
+  } else if (profActive) {                             // falling edge: run finished
+    // Drop the stale plot buffer but keep lastT: the device clock jumped
+    // during the pause, so `since=lastT` now returns only fresh rows and the
+    // charts rebuild without a time-gap. (lastT didn't advance while paused —
+    // no telemetry arrived.)
+    buf.length = 0;
+    status.textContent = "done · " + profSummary(plog); status.className = "sub ok";
+    profStart = 0;
+  }
+  profActive = active;
+
   const log = document.getElementById("proflog");
-  const text = (plog || []).join("\n");
+  const text = plog.join("\n");
   if (log.textContent !== text) {
     const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
     log.textContent = text;

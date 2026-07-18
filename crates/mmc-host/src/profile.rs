@@ -291,10 +291,10 @@ pub fn run_stages(
             s.title
         ));
         let note = match s.id {
-            "sweep" => stage_sweep(link, dir, &tuning.sweep)?,
-            "accel" => stage_accel(link, dir, tuning.accel)?,
-            "rl" => stage_rl(link, dir, tuning.rl_volts)?,
-            "saliency" => stage_saliency(link, dir)?,
+            "sweep" => stage_sweep(link, dir, &tuning.sweep, log)?,
+            "accel" => stage_accel(link, dir, tuning.accel, log)?,
+            "rl" => stage_rl(link, dir, tuning.rl_volts, log)?,
+            "saliency" => stage_saliency(link, dir, log)?,
             _ => unreachable!(),
         };
         log(&format!("stage {}: {}", s.id, note));
@@ -346,11 +346,21 @@ fn snapshot_device(link: &mut Link, state: &mut serde_json::Value, log: &mut dyn
 // ------------------------------------------------------------------- stages
 
 /// Rotating I-f flux sweep (host-side captures, hang-angle fit).
-fn stage_sweep(link: &mut Link, dir: &Path, sweep: &[(f32, f32)]) -> std::io::Result<String> {
+fn stage_sweep(
+    link: &mut Link,
+    dir: &Path,
+    sweep: &[(f32, f32)],
+    log: &mut dyn FnMut(&str),
+) -> std::io::Result<String> {
     for (i, &(amps, omega)) in sweep.iter().enumerate() {
         let name = format!("sweep_i{:03}_w{}", (amps * 100.0) as u32, omega as u32);
         let out = dir.join(format!("{name}.csv"));
-        println!("profile: I-f sweep {amps} A @ {omega} rad/s el");
+        log(&format!(
+            "  point {}/{}: I-f {amps} A @ {omega} rad/s el (~{:.0} s)",
+            i + 1,
+            sweep.len(),
+            3.5 + omega / 500.0
+        ));
         capture::run(
             link,
             &CaptureCfg {
@@ -376,8 +386,13 @@ fn stage_sweep(link: &mut Link, dir: &Path, sweep: &[(f32, f32)]) -> std::io::Re
 
 /// Sensorless accel run: J from i_q during the reference slew, friction from
 /// the steady i_q at two speeds.
-fn stage_accel(link: &mut Link, dir: &Path, (lo, hi): (f32, f32)) -> std::io::Result<String> {
-    println!("profile: sensorless accel {lo} -> {hi} rad/s el");
+fn stage_accel(
+    link: &mut Link,
+    dir: &Path,
+    (lo, hi): (f32, f32),
+    log: &mut dyn FnMut(&str),
+) -> std::io::Result<String> {
+    log(&format!("  sensorless accel {lo} -> {hi} rad/s el (~8 s)"));
     let title = format!("Accel run: sensorless {lo} -> {hi} rad/s el");
     capture::run(
         link,
@@ -406,8 +421,15 @@ fn stage_accel(link: &mut Link, dir: &Path, (lo, hi): (f32, f32)) -> std::io::Re
 }
 
 /// Locked-rotor R/L step probe (on-device 20 kHz burst).
-fn stage_rl(link: &mut Link, dir: &Path, (v_align, v_step): (f32, f32)) -> std::io::Result<String> {
-    println!("profile: R/L probe ({v_align} V align -> {v_step} V step, rotor parks)");
+fn stage_rl(
+    link: &mut Link,
+    dir: &Path,
+    (v_align, v_step): (f32, f32),
+    log: &mut dyn FnMut(&str),
+) -> std::io::Result<String> {
+    log(&format!(
+        "  R/L probe ({v_align} V align -> {v_step} V step, ~0.5 s; rotor parks)"
+    ));
     let samples = run_probe(link, test::RL_STEP, v_align, v_step)?;
     let pairs = samples.len() / 2;
     if pairs < 1024 {
@@ -440,11 +462,15 @@ fn stage_rl(link: &mut Link, dir: &Path, (v_align, v_step): (f32, f32)) -> std::
 
 /// Saliency sweep: shared `mmc_core::probe` schedule, (i_d, i_q) pairs in
 /// the excitation frame behind a self-describing header.
-fn stage_saliency(link: &mut Link, dir: &Path) -> std::io::Result<String> {
-    println!(
-        "profile: saliency sweep ({} angles, tau-adaptive half-period, {SAL_V_LOW} -> {SAL_V_HIGH} V)",
+fn stage_saliency(
+    link: &mut Link,
+    dir: &Path,
+    log: &mut dyn FnMut(&str),
+) -> std::io::Result<String> {
+    log(&format!(
+        "  saliency sweep ({} angles, tau-adaptive, {SAL_V_LOW} -> {SAL_V_HIGH} V, ~0.5 s)",
         probe::SAL_SLOTS
-    );
+    ));
     let samples = run_probe(link, test::L_THETA, SAL_V_LOW, SAL_V_HIGH)?;
     if samples.len() < probe::SAL_HDR {
         return Err(std::io::Error::other(format!(
