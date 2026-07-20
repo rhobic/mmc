@@ -30,8 +30,15 @@ pub const OMEGA_EST: u8 = 16;
 /// Estimate minus reference angle, wrapped [rad]. Reference = sim truth on
 /// the simulator, the forced/applied angle on hardware.
 pub const THETA_ERR: u8 = 17;
+/// Phase terminal voltages via the shield's BEMF divider network [V].
+/// With the stage Hi-Z (coasting) these are the pure back-EMFs — a direct
+/// flux measurement; while PWM runs they show the switched rail unless the
+/// divider is filtered. The sim reports the model's EMF.
+pub const VB_U: u8 = 18;
+pub const VB_V: u8 = 19;
+pub const VB_W: u8 = 20;
 
-pub const COUNT: usize = 18;
+pub const COUNT: usize = 21;
 
 /// Wire names, indexed by channel id; used as CSV headers by the host.
 pub const NAMES: [&str; COUNT] = [
@@ -53,6 +60,9 @@ pub const NAMES: [&str; COUNT] = [
     "theta_est",
     "omega_est",
     "theta_err",
+    "vb_u",
+    "vb_v",
+    "vb_w",
 ];
 
 /// Selection mask with every defined channel enabled.

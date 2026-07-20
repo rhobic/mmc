@@ -13,7 +13,7 @@ use mmc_core::observer::{FluxObserver, FluxObserverCfg};
 use mmc_core::probe;
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
 use mmc_core::svpwm::svpwm;
-use mmc_core::transforms::{clarke, inverse_park, park, Abc, Dq};
+use mmc_core::transforms::{clarke, inverse_clarke, inverse_park, park, Abc, Dq};
 use mmc_core::tuning::{current_pi_gains, speed_pi_gains};
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
 use mmc_proto::{
@@ -783,6 +783,24 @@ fn telemetry(rig: &VirtualMotor, step: &StepOut, mask: u32) -> mmc_proto::Teleme
             channel::THETA_EST => step.theta_est,
             channel::OMEGA_EST => step.omega_est,
             channel::THETA_ERR => step.theta_err,
+            // The sim reports the model's per-phase EMF (≡ terminal voltage
+            // when coasting, which is when the hardware channels matter).
+            channel::VB_U | channel::VB_V | channel::VB_W => {
+                let p = rig.motor.params;
+                let we = rig.motor.omega_m * p.pole_pairs as f32;
+                let e = inverse_clarke(inverse_park(
+                    Dq {
+                        d: 0.0,
+                        q: p.flux * we,
+                    },
+                    mmc_core::math::sin_cos(rig.motor.theta_e()),
+                ));
+                match id {
+                    channel::VB_U => e.a,
+                    channel::VB_V => e.b,
+                    _ => e.c,
+                }
+            }
             _ => 0.0,
         };
         n += 1;

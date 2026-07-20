@@ -37,7 +37,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
 use embassy_stm32::mode::Async;
-use embassy_stm32::pac::{self, ADC1, GPIOA, GPIOB, RCC, TIM1};
+use embassy_stm32::pac::{self, ADC1, ADC2, GPIOA, GPIOB, GPIOC, RCC, TIM1};
 use embassy_stm32::usart::{self, Uart, UartRx, UartTx};
 use embassy_stm32::{bind_interrupts, peripherals};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -74,6 +74,8 @@ const CTRL_DT: f32 = 1.0 / CTRL_FREQ;
 const ADC_VOLTS_PER_LSB: f32 = 3.3 / 4096.0;
 const CUR_VOLTS_PER_AMP: f32 = 1.528 * 0.33; // amp gain × shunt
 const VBUS_GAIN: f32 = 16.0; // 180k/12k divider
+/// BEMF divider: OUTx → 10K → 2.2K → IO_BEMF (PC9 low), ratio 2.2/12.2.
+const BEMF_GAIN: f32 = 12.2 / 2.2;
 
 const I_TRIP_A: f32 = 1.5; // software overcurrent, 2 consecutive samples
 const VBUS_MAX: f32 = 30.0;
@@ -345,6 +347,7 @@ fn init_motor_peripherals() {
     RCC.ahb2enr().modify(|w| {
         w.set_gpioaen(true);
         w.set_gpioben(true);
+        w.set_gpiocen(true);
         w.set_adc12en(true);
     });
     RCC.apb2enr().modify(|w| w.set_tim1en(true));
@@ -358,6 +361,12 @@ fn init_motor_peripherals() {
         w.set_moder(0, Moder::ANALOG);
         w.set_moder(1, Moder::ANALOG);
     });
+    // BEMF divider network (shield sheet 4): OUTx → 10K → 2.2K → IO_BEMF,
+    // sensed on PC0..PC3 (BEMF2's exact pin is resolved empirically — the
+    // shield routes it to PC2 or PC3 depending on build), returned through
+    // PC9: drive it LOW to enable the dividers. PC0..3 are analog at reset.
+    GPIOC.bsrr().write(|w| w.set_br(9, true));
+    GPIOC.moder().modify(|w| w.set_moder(9, Moder::OUTPUT));
 
     // TIM1 CH1/2/3 on PA8/PA9/PA10, AF6.
     GPIOA.moder().modify(|w| {
@@ -481,6 +490,41 @@ fn init_motor_peripherals() {
 
         ADC1.ier().modify(|w| w.set_jeosie(true));
         ADC1.cr().modify(|w| w.set_jadstart(true)); // arm the hardware trigger
+
+        // ADC2: BEMF terminal voltages on PC0..PC3 (IN6..IN9), same TIM1_CC4
+        // trigger, running in parallel with ADC1 — zero cost to the current-
+        // sense timing budget. No interrupt: the ADC1-paced ISR reads the
+        // latest JDRs (late channels may be one 50 µs period stale, harmless
+        // for <100 Hz BEMF). 47.5-cycle sampling for the 10K divider source.
+        ADC2.cr().modify(|w| w.set_deeppwd(false));
+        ADC2.cr().modify(|w| w.set_advregen(true));
+        cortex_m::asm::delay(170 * 25);
+
+        ADC2.cr().modify(|w| w.set_adcal(true));
+        while ADC2.cr().read().adcal() {}
+        cortex_m::asm::delay(170);
+
+        ADC2.isr().write(|w| w.set_adrdy(true));
+        ADC2.cr().modify(|w| w.set_aden(true));
+        while !ADC2.isr().read().adrdy() {}
+
+        ADC2.smpr().modify(|w| {
+            w.set_smp(6, SampleTime::CYCLES47_5);
+            w.set_smp(7, SampleTime::CYCLES47_5);
+            w.set_smp(8, SampleTime::CYCLES47_5);
+            w.set_smp(9, SampleTime::CYCLES47_5);
+        });
+        ADC2.cfgr().modify(|w| w.set_jqdis(true));
+        ADC2.jsqr().write(|w| {
+            w.set_jl(3); // 4 conversions
+            w.set_jextsel(1); // tim1_cc4
+            w.set_jexten(Exten::RISING_EDGE);
+            w.set_jsq(0, 6); // BEMF1 PC0
+            w.set_jsq(1, 7); // BEMF3 PC1
+            w.set_jsq(2, 8); // BEMF2 candidate PC2
+            w.set_jsq(3, 9); // BEMF2 candidate PC3
+        });
+        ADC2.cr().modify(|w| w.set_jadstart(true));
     }
 
     unsafe {
@@ -518,7 +562,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 5, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 6, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -1152,6 +1196,15 @@ unsafe extern "C" fn ADC1_2() {
     put(channel::THETA_EST, theta_est);
     put(channel::OMEGA_EST, omega_est);
     put(channel::THETA_ERR, theta_err);
+    // Terminal voltages via the BEMF dividers (ADC2, parallel). Mapping
+    // confirmed on hardware 2026-07-20: BEMF1=U on PC0/jdr0, BEMF3=W on
+    // PC1/jdr1, BEMF2=V on PC3/jdr3 (PC2/jdr2 is the SPEED pot — railed).
+    // The BAT30 clamps rectify these, so they read 0..peak (a zero-cross /
+    // coast-down instrument, not a live terminal-voltage sense under PWM).
+    let vb = |i: usize| ADC2.jdr(i).read().jdata() as f32 * ADC_VOLTS_PER_LSB * BEMF_GAIN;
+    put(channel::VB_U, vb(0));
+    put(channel::VB_V, vb(3));
+    put(channel::VB_W, vb(1));
     TELEM_SEQ.store(seq.wrapping_add(2), Ordering::Release);
 
     let dur = cortex_m::peripheral::DWT::cycle_count().wrapping_sub(isr_t0);

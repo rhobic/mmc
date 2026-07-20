@@ -199,6 +199,7 @@
     <div class="chart" id="c-dq"></div>
     <div class="chart" id="c-speed"></div>
     <div class="chart" id="c-vbus"></div>
+    <div class="chart" id="c-bemf"></div>
   </div>
 </main>
 <script>
@@ -258,6 +259,10 @@ const CHARTS = [
     { col: "omega_m", name: "speed", color: "var(--s1)", scale: 60 / (2 * Math.PI) }]),
   chart(document.getElementById("c-vbus"), "Bus voltage", "V", [
     { col: "vbus", name: "vbus", color: "var(--s1)" }]),
+  chart(document.getElementById("c-bemf"), "Terminal / back-EMF voltage", "V", [
+    { col: "vb_u", name: "vb_u", color: "var(--s1)" },
+    { col: "vb_v", name: "vb_v", color: "var(--s2)" },
+    { col: "vb_w", name: "vb_w", color: "var(--s3)" }]),
 ];
 
 function renderChart(c) {

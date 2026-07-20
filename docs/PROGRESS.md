@@ -3,6 +3,43 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-07-20 — session 13: BEMF terminal-voltage sensing wired + characterized
+
+**Wired the X-NUCLEO-IHM16M1's populated-but-unused BEMF divider network and
+learned what it can (and can't) do.** fw v6: GPIOC + PC9 (divider enable, low),
+ADC2 injected on the same TIM1_CC4 trigger as ADC1 (parallel, zero cost to the
+control-loop timing budget — no ISR), 4 conversions PC0–PC3, scaled by the
+12.2/2.2 divider ratio into three new telemetry channels `vb_u/vb_v/vb_w`
+(ids 18–20) with a matching panel chart. Sim reports the model's ideal EMF
+(clean bipolar sine, verified = 2·ψ·ω).
+
+**Empirical findings (the point of the session):**
+- **Pin mapping resolved on hardware** (the schematic was ambiguous):
+  BEMF1=U→PC0, BEMF3=W→PC1, **BEMF2=V→PC3** (not PC2 — PC2 is the SPEED pot,
+  which read a railed 18.3 V and gave it away). Confirmed in firmware.
+- **All three phases track BEMF in coast, ∝ ω_e**: spin sensorless, cut to
+  Hi-Z, pk-pk = 4.3–5.3 V at 150 rad/s el and 9.5–10.0 V at 300 (2× speed →
+  2× amplitude, clean).
+- **The decisive finding — this network is a *zero-cross / coast-down*
+  instrument, not a live terminal-voltage sense.** The shield's BAT30
+  Schottky clamps rectify the signal (reads 0..peak, not bipolar), and under
+  PWM the channels are dominated by the switched rail (~1.7 V mean, useless).
+  **So the original goal — feed the observer *measured* phase voltage during
+  drive to lower the sensorless floor / kill the 7.8% inverter-drop error —
+  is NOT achievable with this shield.** That needs filtered or in-line
+  terminal-voltage sensing the IHM16M1 doesn't provide. What this hardware
+  *does* give: commutation/spin visualization, a coarse coast-down flux
+  cross-check, and the front-end for six-step BEMF zero-cross (its actual
+  design purpose).
+- **Coast ψ cross-check**: pk-pk/(2·ω) at 300 rad/s el = 16.7 mWb vs the
+  profiled 18.7 — ~11% low, consistent with the ~0.3 V Schottky drop plus
+  divider loss. A sanity check, not a precision source (ψ is already measured
+  better two ways).
+
+**Deferred/next:** six-step trapezoidal drive is now the natural follow-on —
+the BEMF zero-cross front-end it needs is wired and characterized. The
+"BEMF as observer input" idea is closed as hardware-limited on this shield.
+
 ## 2026-07-19 — session 12: sensorless generalized — QBL5704 closes the MS6 loop
 
 **Closed-loop sensorless runs on motor 2, first attempt, and its profile is

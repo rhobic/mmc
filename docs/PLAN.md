@@ -179,8 +179,18 @@ sync — normal for motor control in any language.
   stall fault (state 8) and the load-adaptive blend taper. Motor 2 runs
   closed-loop sensorless on its complete measured profile — J = 25.1
   µN·m·s², 2.0% speed-step overshoot. See PROGRESS session 12.)*
-- From MS5/MS6: HF-injection L probe, d-axis-aligned I-f start, blend-kick
-  softening, stall detector.
+- From MS5/MS6: HF-injection L probe, d-axis-aligned I-f start. *(blend-kick
+  softening + stall detector done in session 12.)*
+- **Six-step / trapezoidal drive** — the second control methodology from the
+  low-resource story. The BEMF zero-cross front-end it needs is now wired and
+  characterized (session 13, fw v6: `vb_u/vb_v/vb_w` channels; BEMF2=V on PC3,
+  divider enable PC9). PWM topology already supports per-phase Hi-Z. Do forced
+  commutation first, then BEMF zero-cross sensorless six-step, then a
+  FOC-vs-six-step bench comparison.
+- ~~BEMF as observer input~~ **closed as hardware-limited** (session 13): the
+  IHM16M1's BEMF net is Schottky-clamped and PWM-corrupted — a coast/zero-cross
+  instrument, not a live terminal-voltage sense. Lowering the observer floor
+  this way would need filtered/in-line voltage sensing this shield lacks.
 - **Zero-speed sensorless torque/position — saliency gate MEASURED: OPEN.**
   The flux observer is useless at ω=0 (no EMF; `observer.rs:18`) and *lies* there
   (locks to −L·i). The only physics that works at standstill is saliency (Ld≠Lq).
