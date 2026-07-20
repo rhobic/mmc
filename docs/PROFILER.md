@@ -21,6 +21,24 @@ Parameters applied with `apply` take effect at the next clean drive start and
 live in **RAM only** — re-apply after a power cycle (flash persistence is a
 backlog item). The panel's parameter card does the same job interactively.
 
+## Startup parameters (new motors without a reflash)
+
+Sensorless startup is governed by three runtime params (set them in the panel
+or via `apply`): **sl_handoff** (I-f→observer handoff speed, rad/s el — above
+the observer's ~80 rad/s floor, below what the motor reaches open-loop from
+rest), **omega_accel** (every commanded ramp's acceleration, rad/s² el — a
+heavy/high-drag rotor needs it lowered; the accel-stage J fit reads the value
+actually used from the capture snapshot), and **iq_limit** (current ceiling
+for I-f/sensorless, ≤1.2 A). The QBL5704 runs at 100 / 250 / 1.0 vs the
+motor-1 defaults 150 / 500 / 0.8.
+
+Two protections ride along: a **stall fault** (state 8) trips ~100 ms after
+the observer's flux magnitude collapses below 0.35·ψ in closed loop — the
+"confident fake lock" a stalled rotor produces — and re-arms via STOP/Off
+like any fault; and the blend now **tapers the startup current adaptively**
+(the ramp's hang angle measures the load, so a light load tapers hard to kill
+the handoff kick while a heavy load keeps full current).
+
 ## The stages
 
 | id | rotor | measures | needs |

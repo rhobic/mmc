@@ -390,6 +390,9 @@ fn parse_cmd(v: &serde_json::Value) -> Option<Cmd> {
             if let Some(t) = v.get("accel").and_then(&pair) {
                 tuning.accel = t;
             }
+            if let Some(a) = v.get("accel_amps").and_then(|x| x.as_f64()) {
+                tuning.accel_amps = a as f32;
+            }
             (!stages.is_empty()).then_some(Cmd::RunProfile { stages, tuning })
         }
         "applyprofile" => Some(Cmd::ApplyProfile),

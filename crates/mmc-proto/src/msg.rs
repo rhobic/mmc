@@ -63,7 +63,19 @@ pub mod param {
     /// Scales the mechanical-speed telemetry and the host's kt/J fits only —
     /// the electrical control loops never consume it.
     pub const POLE_PAIRS: u8 = 6;
-    pub const COUNT: usize = 7;
+    /// Sensorless I-f→observer handoff speed [rad/s electrical]. Must sit
+    /// above the observer's trust floor (~4× its leak) and below what the
+    /// motor can reach open-loop from rest.
+    pub const SL_HANDOFF: u8 = 7;
+    /// Electrical acceleration for every commanded ramp [rad/s²]: forced-mode
+    /// (volt/I-f) frequency slew, the sensorless startup ramp, and speed
+    /// retargets. A heavy or high-drag rotor needs this lowered to hold sync.
+    pub const OMEGA_ACCEL: u8 = 8;
+    /// Current-amplitude ceiling [A] for the I-f/sensorless drives: clamps
+    /// the commanded amplitude, the startup current, and the speed loop's
+    /// i_q authority. Keep under the 1.5 A trips with margin.
+    pub const IQ_LIMIT: u8 = 9;
+    pub const COUNT: usize = 10;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -72,6 +84,9 @@ pub mod param {
         "speed_kp",
         "speed_ki",
         "pole_pairs",
+        "sl_handoff",
+        "omega_accel",
+        "iq_limit",
     ];
 }
 

@@ -121,7 +121,7 @@ def fit_rl(path):
     }
 
 
-def fit_accel(path, kt, pole_pairs, targets=(300.0, 900.0)):
+def fit_accel(path, kt, pole_pairs, targets=(300.0, 900.0), omega_slew=OMEGA_SLEW):
     c = load(path)
     st, w, iq, t = c["state"], c["omega_est"], c["i_q"], c["t"]
     run = st == 1.0
@@ -146,7 +146,7 @@ def fit_accel(path, kt, pole_pairs, targets=(300.0, 900.0)):
         raise SystemExit("accel: no usable slew segment found")
     iq_acc = float(np.mean(iq[seg]))
     iq_fric_mid = (iq_lo + iq_hi) / 2.0
-    alpha_m = OMEGA_SLEW / pole_pairs
+    alpha_m = omega_slew / pole_pairs
     j = kt * (iq_acc - iq_fric_mid) / alpha_m
     return {
         "j": j,
@@ -228,12 +228,17 @@ def main(dir_):
     accel_path = os.path.join(dir_, "accel.csv")
     if os.path.exists(accel_path) and kt is not None:
         targets = (300.0, 900.0)
+        omega_slew = OMEGA_SLEW
         try:
             with open(os.path.join(dir_, "profile_state.json")) as f:
-                targets = tuple(json.load(f)["stages"]["accel"]["targets"])
+                state = json.load(f)
+            targets = tuple(state["stages"]["accel"]["targets"])
+            # The retarget ran at the device's omega_accel param, not the old
+            # firmware constant — J scales directly with it.
+            omega_slew = float(state["device"]["params"].get("omega_accel", OMEGA_SLEW))
         except (OSError, KeyError, ValueError):
             pass
-        acc = fit_accel(accel_path, kt, pole_pairs, targets)
+        acc = fit_accel(accel_path, kt, pole_pairs, targets, omega_slew)
         t_fric = kt * (acc["iq_fric_lo"] + acc["iq_fric_hi"]) / 2.0
         print(f"accel: J = {acc['j'] * 1e6:.3f} uN*m*s^2, friction i_q "
               f"{acc['iq_fric_lo'] * 1e3:.0f}/{acc['iq_fric_hi'] * 1e3:.0f} mA "

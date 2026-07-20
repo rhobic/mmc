@@ -174,12 +174,11 @@ sync — normal for motor control in any language.
   snapshotted into the state file, panel Profiler card. See
   [PROFILER.md](PROFILER.md). Proven on a second motor (4-pole, ψ 21× the
   first).
-- **Runtime sensorless-startup parameters.** `SL_OMEGA_HANDOFF` (150 rad/s
-  el), `OMEGA_SLEW` (500 rad/s²), and the sequencer startup-current clamp are
-  firmware constants sized for motor 1. Motor 2 (heavy, ψ≈19 mWb) cannot
-  reliably ramp from rest to the 150 handoff at the accel stage's 0.5 A —
-  so its `accel` stage and sensorless mode are blocked until these become
-  params (candidates for ids 7–9). *(Found profiling motor 2, 2026-07-17.)*
+- **Runtime sensorless-startup parameters.** *(done 2026-07-19, session 12:
+  `sl_handoff`/`omega_accel`/`iq_limit` = param ids 7–9, fw v5; plus the
+  stall fault (state 8) and the load-adaptive blend taper. Motor 2 runs
+  closed-loop sensorless on its complete measured profile — J = 25.1
+  µN·m·s², 2.0% speed-step overshoot. See PROGRESS session 12.)*
 - From MS5/MS6: HF-injection L probe, d-axis-aligned I-f start, blend-kick
   softening, stall detector.
 - **Zero-speed sensorless torque/position — saliency gate MEASURED: OPEN.**

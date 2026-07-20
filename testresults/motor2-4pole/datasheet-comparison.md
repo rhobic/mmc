@@ -17,7 +17,8 @@ The L comparison below leans toward the **-116-04-042**.
 | R | 1.047 Ω *drive path* | 0.225 Ω winding (0.45 Ω line-line /2) | 0.175 Ω winding | see attribution |
 | L (per phase) | 0.377 mH | 0.70 mH (1.4 line-line /2) | 0.50 mH | −116 within ±30% tol; −94 unlikely |
 | Lq/Ld (saliency) | 1.07, \|ξ\|=0.036±0.004 | not published | not published | (surface-PM family) |
-| Rotor inertia J | not measured (accel blocked) | 17.3 µkg·m² | 23 µkg·m² | use datasheet |
+| Rotor inertia J | **25.1 µN·m·s²** (accel fit, 2026-07-19) | 17.3 µkg·m² | 23 µkg·m² | −116 + ~9% coupling |
+| Friction (150–350 el) | 14.8 mN·m | — | — | bearing + windage |
 | Rated speed | ψ predicts ≈3700 RPM at 36 V (see below) | 4000 RPM @36 V | 4000 RPM @36 V | ~7% |
 
 ## R: the 1.047 Ω is the *drive path*, and it closes numerically
@@ -53,11 +54,14 @@ datasheet directly. On motor 1 the same ~0.8 Ω path resistance dominates its
 - Rated phase current 5.08/6.67 A, peak 16.5/20.5 A; the IHM16M1's 1.5 A trip
   means the rig drives this motor at **≤ 25% of rated current** — torque
   ceiling ≈ 50 mN·m at 0.9 A vs 320/420 mN·m rated.
-- Observed hang angle ~74–78° at 0.6–0.9 A ⇒ static drag ≈ 30 mN·m on the
-  bench (~10% of rated torque — bearing/seal drag plus whatever is coupled).
-  That drag, not inertia, is what limited from-rest I-f sync to ≲90 rad/s el
-  (accelerating the bare rotor at the firmware's 250 rad/s² mech needs only
-  ≈ 4–6 mN·m with the datasheet J).
+- Observed hang angle ~74–78° at 0.6–0.9 A. *Convention note (corrected
+  2026-07-19):* in I-f the current rides the forced frame's q-axis, so an
+  unloaded rotor hangs near 90° and load pulls the angle toward 0 — the load
+  fraction is **cos γ**, not sin γ. cos 76° ≈ 0.24 ⇒ standstill-ish drag
+  ≈ 8–12 mN·m, rising to the measured 14.8 mN·m at 150–350 rad/s el
+  (accel-stage friction fit). From-rest I-f sync at the old fixed
+  500 rad/s² el slew was drag + accel + cogging against a thin margin; the
+  runtime `omega_accel` param (250 for this motor) resolved it.
 - Winding thermal time constant 31/38 min — the panel's R̂/ΔT trend is
   meaningful on exactly these timescales.
 

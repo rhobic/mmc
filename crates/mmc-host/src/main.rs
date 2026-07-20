@@ -92,6 +92,10 @@ struct ProfileArgs {
     /// (default 300,900).
     #[arg(long, value_delimiter = ',', num_args = 2)]
     accel_targets: Option<Vec<f32>>,
+    /// Accel-run startup/authority current [A] (default 0.5) — raise for a
+    /// high-drag or heavy motor.
+    #[arg(long)]
+    accel_amps: Option<f32>,
 }
 
 fn parse_sweep_points(specs: &[String]) -> std::io::Result<Vec<(f32, f32)>> {
@@ -441,6 +445,9 @@ fn main() -> std::io::Result<()> {
             }
             if let Some(t) = &args.accel_targets {
                 tuning.accel = (t[0], t[1]);
+            }
+            if let Some(a) = args.accel_amps {
+                tuning.accel_amps = a;
             }
             profile::run(
                 &mut link,

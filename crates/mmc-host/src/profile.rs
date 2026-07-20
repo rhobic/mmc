@@ -63,6 +63,9 @@ pub struct StageTuning {
     pub sweep: Vec<(f32, f32)>,
     /// Accel-run sensorless speed targets (start, step) [rad/s el].
     pub accel: (f32, f32),
+    /// Accel-run startup/authority current [A] — raise for a high-drag or
+    /// heavy motor that can't reach handoff on the default.
+    pub accel_amps: f32,
 }
 
 impl Default for StageTuning {
@@ -77,6 +80,7 @@ impl Default for StageTuning {
                 (0.45, 450.0),
             ],
             accel: (300.0, 900.0),
+            accel_amps: 0.5,
         }
     }
 }
@@ -311,7 +315,7 @@ pub fn run_stages(
         ));
         let note = match s.id {
             "sweep" => stage_sweep(link, dir, &tuning.sweep, log)?,
-            "accel" => stage_accel(link, dir, tuning.accel, log)?,
+            "accel" => stage_accel(link, dir, tuning.accel, tuning.accel_amps, log)?,
             "rl" => stage_rl(link, dir, tuning.rl_volts, log)?,
             "saliency" => stage_saliency(link, dir, log)?,
             _ => unreachable!(),
@@ -411,9 +415,10 @@ fn stage_accel(
     link: &mut Link,
     dir: &Path,
     (lo, hi): (f32, f32),
+    amps: f32,
     log: &mut dyn FnMut(&str),
 ) -> std::io::Result<String> {
-    log(&format!("  sensorless accel {lo} -> {hi} rad/s el (~8 s)"));
+    log(&format!("  sensorless accel {lo} -> {hi} rad/s el at {amps} A (~8 s)"));
     let title = format!("Accel run: sensorless {lo} -> {hi} rad/s el");
     capture::run(
         link,
@@ -423,11 +428,11 @@ fn stage_accel(
             duration: 8.0,
             iq: None,
             drive: Some(DriveMode::Sensorless {
-                amps: 0.5,
+                amps,
                 omega_e: lo,
             }),
             drive_step: Some(DriveMode::Sensorless {
-                amps: 0.5,
+                amps,
                 omega_e: hi,
             }),
             title: &title,

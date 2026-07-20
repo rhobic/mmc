@@ -80,7 +80,6 @@ const VBUS_MAX: f32 = 30.0;
 const VBUS_MIN_RUN: f32 = 5.0;
 const MAX_DUTY: f32 = 0.85; // keeps the low-side sampling window open
 const V_AMP_MAX: f32 = 3.0;
-const I_AMP_MAX: f32 = 1.0;
 const OMEGA_E_MAX: f32 = 2000.0; // rad/s electrical
 const OMEGA_SLEW: f32 = 500.0; // rad/s²
 const V_SLEW: f32 = 5.0; // V/s
@@ -132,6 +131,12 @@ const ST_CAL: u8 = 5;
 // host sim scenario writes, so dashboards read identically): Closed = ST_RUN.
 const ST_SL_RAMP: u8 = 6;
 const ST_SL_BLEND: u8 = 7;
+/// Stall fault: the observer's flux magnitude collapsed to the L·i artifact
+/// while nominally closed-loop — the rotor is not actually following.
+/// ≥ ST_FAULT_OC, so the fault gating and Off-to-re-arm flow apply.
+const ST_STALL: u8 = 8;
+/// Consecutive low-flux ticks before the stall fault trips (100 ms).
+const STALL_TICKS: u32 = 2000;
 
 // ------------------------------------------------------------ shared state
 
@@ -174,6 +179,9 @@ static PARAMS: [AtomicU32; param::COUNT] = [
     p32(SPEED_KP),
     p32(SPEED_KI),
     p32(POLE_PAIRS),
+    p32(SL_OMEGA_HANDOFF),
+    p32(OMEGA_SLEW),
+    p32(SL_IQ_LIMIT),
 ];
 
 fn param_get(id: u8) -> f32 {
@@ -190,6 +198,13 @@ fn param_range(id: u8) -> Option<(f32, f32)> {
         param::SPEED_KP => (0.0, 0.1),
         param::SPEED_KI => (0.0, 10.0),
         param::POLE_PAIRS => (1.0, 50.0),
+        // Handoff floor sits above the observer's ~4·leak trust floor at the
+        // low end only nominally — going below ~80 is an experiment, allowed
+        // but on the operator's head.
+        param::SL_HANDOFF => (30.0, 1000.0),
+        param::OMEGA_ACCEL => (20.0, 5000.0),
+        // Current ceiling: 1.2 A leaves 20% margin to the 1.5 A trips.
+        param::IQ_LIMIT => (0.05, 1.2),
         _ => return None,
     })
 }
@@ -253,6 +268,8 @@ struct IsrState {
     /// R/L probe tick counter (mode 4).
     probe_ticks: u32,
     oc_strikes: u8,
+    /// Consecutive low-observer-flux ticks in closed-loop sensorless.
+    stall_strikes: u32,
     vbus_filt: f32,
 }
 
@@ -277,6 +294,7 @@ static ISR_STATE: IsrCell = IsrCell(UnsafeCell::new(IsrState {
     sl_preload: 0.0,
     probe_ticks: 0,
     oc_strikes: 0,
+    stall_strikes: 0,
     vbus_filt: 0.0,
 }));
 
@@ -500,7 +518,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 4, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 5, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -611,7 +629,8 @@ fn handle(msg: &Message) -> Message {
         // Adjust the I-f current target on the fly; otherwise ignored.
         Message::SetIqRef { iq } => {
             if CMD_MODE.load(Ordering::Relaxed) == 2 {
-                CMD_AMP.store(iq.clamp(-I_AMP_MAX, I_AMP_MAX).to_bits(), Ordering::Relaxed);
+                let lim = param_get(param::IQ_LIMIT);
+                CMD_AMP.store(iq.clamp(-lim, lim).to_bits(), Ordering::Relaxed);
                 CMD_EPOCH.fetch_add(1, Ordering::Release);
             }
             ack
@@ -622,7 +641,7 @@ fn handle(msg: &Message) -> Message {
 
 fn amp_limit(mode: u8) -> f32 {
     if mode >= 2 {
-        I_AMP_MAX
+        param_get(param::IQ_LIMIT)
     } else {
         V_AMP_MAX
     }
@@ -787,6 +806,7 @@ unsafe extern "C" fn ADC1_2() {
                     s.omega = 0.0;
                     s.amp = 0.0;
                     s.oc_strikes = 0;
+                    s.stall_strikes = 0;
                     s.probe_ticks = 0;
                     let (rs, ls) = (param_get(param::R), param_get(param::L));
                     let gains = current_pi_gains(rs, ls, param_get(param::CUR_BW));
@@ -794,7 +814,10 @@ unsafe extern "C" fn ADC1_2() {
                     if mode == 3 {
                         // Sensorless: feedforward FOC (flux is measured now),
                         // I-f sequencer toward the commanded direction, speed
-                        // loop preloaded with the startup current at handoff.
+                        // loop preloaded with the (blend-tapered) startup
+                        // current at handoff. Handoff speed, ramp accel, and
+                        // the current ceiling are runtime params so a new
+                        // motor tunes without a reflash.
                         s.foc = Some(Foc::with_feedforward(
                             gains,
                             Decoupling {
@@ -805,12 +828,15 @@ unsafe extern "C" fn ADC1_2() {
                         ));
                         let omega_t = f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed));
                         let dir = if omega_t < 0.0 { -1.0 } else { 1.0 };
+                        let iq_lim = param_get(param::IQ_LIMIT);
+                        let handoff = param_get(param::SL_HANDOFF);
                         let i_start = f32::from_bits(CMD_AMP.load(Ordering::Relaxed))
                             .abs()
-                            .clamp(0.1, SL_IQ_LIMIT);
+                            .clamp(0.1, iq_lim);
                         s.seq = Some(Sequencer::new(SequencerCfg {
                             i_start,
-                            omega_handoff: SL_OMEGA_HANDOFF * dir,
+                            accel: param_get(param::OMEGA_ACCEL),
+                            omega_handoff: handoff * dir,
                             ..SequencerCfg::default()
                         }));
                         s.speed = Some(SpeedLoop::new(
@@ -818,9 +844,9 @@ unsafe extern "C" fn ADC1_2() {
                                 kp: param_get(param::SPEED_KP),
                                 ki: param_get(param::SPEED_KI),
                             },
-                            SL_IQ_LIMIT,
+                            iq_lim,
                         ));
-                        s.omega_ref_cur = SL_OMEGA_HANDOFF * dir;
+                        s.omega_ref_cur = handoff * dir;
                         s.sl_preload = i_start * dir;
                     } else {
                         s.foc = Some(Foc::new(gains));
@@ -995,14 +1021,17 @@ unsafe extern "C" fn ADC1_2() {
                 None => {
                     let speed = s.speed.as_mut().unwrap();
                     if s.sl_preload != 0.0 {
-                        // Bumpless takeover from the startup current.
-                        speed.preload(s.sl_preload);
+                        // Bumpless takeover from the (blend-tapered) startup
+                        // current the sequencer actually ended on.
+                        let taper = s.seq.as_ref().map_or(1.0, |q| q.taper_end());
+                        speed.preload(s.sl_preload * taper);
                         s.sl_preload = 0.0;
                     }
                     // Slew the reference from the handoff speed toward the
                     // (live-retargetable) command.
+                    let accel = param_get(param::OMEGA_ACCEL);
                     let d = (omega_target - s.omega_ref_cur)
-                        .clamp(-OMEGA_SLEW * CTRL_DT, OMEGA_SLEW * CTRL_DT);
+                        .clamp(-accel * CTRL_DT, accel * CTRL_DT);
                     s.omega_ref_cur += d;
                     speed.update(s.omega_ref_cur, seq_out.omega, CTRL_DT)
                 }
@@ -1023,8 +1052,8 @@ unsafe extern "C" fn ADC1_2() {
             out.v_ab
         } else {
             // Forced-frame modes: ramp the electrical frequency + amplitude.
-            let d_omega =
-                (omega_target - s.omega).clamp(-OMEGA_SLEW * CTRL_DT, OMEGA_SLEW * CTRL_DT);
+            let accel = param_get(param::OMEGA_ACCEL);
+            let d_omega = (omega_target - s.omega).clamp(-accel * CTRL_DT, accel * CTRL_DT);
             s.omega += d_omega;
             let slew = if s.mode == 2 { I_SLEW } else { V_SLEW };
             let d_amp = (amp_target - s.amp).clamp(-slew * CTRL_DT, slew * CTRL_DT);
@@ -1067,6 +1096,31 @@ unsafe extern "C" fn ADC1_2() {
             theta_est = obs.electrical_angle();
             omega_est = obs.electrical_velocity();
             theta_err = wrap_angle(theta_est - s.theta);
+
+            // Stall detector (closed-loop sensorless only): a stalled rotor
+            // makes no back-EMF, but the observer still "locks" onto the
+            // rotating L·i artifact and reports a confident, wrong speed —
+            // with flux magnitude ≈ L·|i| instead of ψ (an order of
+            // magnitude low; the MS4/MS5 fake-lock lesson). 100 ms below
+            // 0.35·ψ while nominally closed-loop trips a stall fault.
+            if s.mode == 3 && s.seq.as_ref().is_some_and(|q| q.phase() == Phase::Closed) {
+                if obs.flux_mag() < 0.35 * param_get(param::FLUX) {
+                    s.stall_strikes += 1;
+                    if s.stall_strikes >= STALL_TICKS {
+                        s.mode = 0;
+                        s.omega = 0.0;
+                        s.amp = 0.0;
+                        stage_off();
+                        burst_abort();
+                        STATE.store(ST_STALL, Ordering::Relaxed);
+                        CMD_MODE.store(0, Ordering::Relaxed);
+                    }
+                } else {
+                    s.stall_strikes = 0;
+                }
+            } else {
+                s.stall_strikes = 0;
+            }
         }
     }
 

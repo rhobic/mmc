@@ -127,10 +127,13 @@ impl SensorlessSim {
             Some(iq) => iq,
             None => {
                 if !self.speed_preloaded {
-                    // Bumpless transfer from the startup current, torque
-                    // aligned with the rotation direction.
-                    self.speed
-                        .preload(self.cfg.seq.i_start * self.cfg.seq.omega_handoff.signum());
+                    // Bumpless transfer from the (blend-tapered) startup
+                    // current, torque aligned with the rotation direction.
+                    self.speed.preload(
+                        self.cfg.seq.i_start
+                            * self.seq.taper_end()
+                            * self.cfg.seq.omega_handoff.signum(),
+                    );
                     self.speed_preloaded = true;
                 }
                 // Slew the reference from the handoff speed to the target.

@@ -14,6 +14,25 @@ use crate::angle::AngleEstimator;
 use crate::math::wrap_angle;
 use crate::pi::{Pi, PiGains};
 
+/// Blend-taper clamp: the lowest fraction of `i_start` the blend may taper
+/// to, and the safety margin over the measured load fraction.
+///
+/// During the blend the drive angle swings from the forced frame (where the
+/// current is mostly magnetizing) to the rotor frame (where it is pure
+/// torque), so full startup current arrives as a torque step — the "blend
+/// kick" that spiked ω̂ ~1300 rad/s on the bench. But how much current the
+/// rotor actually needs depends on load, and the ramp already measured it:
+/// the current vector rides the forced frame's q-axis, so an unloaded rotor
+/// aligns ~90° from the forced d-axis and load pulls it back toward 0 —
+/// with γ = θ̂ − θ_f, the load's share of `i_start` is **cos γ** (motor 1's
+/// recorded 1.29 rad hang at 28% load: cos 1.29 = 0.28 ✓). At the blend
+/// entry the sequencer tapers toward `cos γ · MARGIN` (clamped) — a light
+/// load tapers hard and kills the kick, a heavy load keeps full current and
+/// holds sync. The speed loop must be preloaded with
+/// `i_start · taper_end()` (signed) to stay bumpless.
+pub const BLEND_TAPER_MIN: f32 = 0.4;
+const BLEND_TAPER_MARGIN: f32 = 1.3;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Phase {
     /// Forced-angle current ramp; observer runs in shadow.
@@ -73,6 +92,7 @@ pub struct Sequencer {
     theta_f: f32,
     omega_f: f32,
     blend_elapsed: f32,
+    taper_end: f32,
 }
 
 impl Sequencer {
@@ -83,11 +103,19 @@ impl Sequencer {
             theta_f: 0.0,
             omega_f: 0.0,
             blend_elapsed: 0.0,
+            taper_end: 1.0,
         }
     }
 
     pub fn phase(&self) -> Phase {
         self.phase
+    }
+
+    /// Fraction of `i_start` the blend tapered to (load-adaptive, set at the
+    /// blend entry; 1.0 until then). Preload the speed loop with
+    /// `i_start · taper_end()` signed for a bumpless takeover.
+    pub fn taper_end(&self) -> f32 {
+        self.taper_end
     }
 
     /// Advance one control period against the (already-updated) observer.
@@ -106,6 +134,13 @@ impl Sequencer {
                 if self.omega_f == target {
                     self.phase = Phase::Blend;
                     self.blend_elapsed = 0.0;
+                    // Size the blend taper from the measured load: the hang
+                    // angle γ (shadow observer vs forced angle) gives the
+                    // load's share of i_start as cos γ (see the consts).
+                    let gamma = wrap_angle(observer.electrical_angle() - self.theta_f);
+                    let load_frac = crate::math::sin_cos(gamma).1.abs();
+                    self.taper_end =
+                        (load_frac * BLEND_TAPER_MARGIN + 0.1).clamp(BLEND_TAPER_MIN, 1.0);
                 }
                 SequencerOut {
                     theta: self.theta_f,
@@ -129,7 +164,9 @@ impl Sequencer {
                 SequencerOut {
                     theta,
                     omega,
-                    iq_open: Some(iq_start),
+                    // Taper toward taper_end·i_start as the angle turns
+                    // torque-aligned — softens the blend kick (see the consts).
+                    iq_open: Some(iq_start * (1.0 - (1.0 - self.taper_end) * alpha)),
                     phase: Phase::Blend,
                 }
             }

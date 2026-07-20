@@ -98,11 +98,19 @@ struct SimControl {
     amp: f32,
     omega_target: f32,
     amp_target: f32,
-    // sensorless (3)
+    // sensorless (3) — startup knobs mirror the firmware's runtime params,
+    // refreshed from the session's param table on every SetDrive.
     seq: Option<Sequencer>,
     speed: Option<SpeedLoop>,
     omega_ref_cur: f32,
     sl_preload: f32,
+    sl_handoff: f32,
+    omega_accel: f32,
+    iq_limit: f32,
+    /// Consecutive low-observer-flux ticks in closed-loop sensorless.
+    stall_strikes: u32,
+    /// Latched fault code (ST_STALL) until the next SetDrive.
+    fault: f32,
     // probes (4): RunTest capture into the burst buffer, firmware-identical
     probe_kind: u8,
     probe_ticks: u32,
@@ -141,6 +149,11 @@ impl SimControl {
             speed: None,
             omega_ref_cur: 0.0,
             sl_preload: 0.0,
+            sl_handoff: SL_OMEGA_HANDOFF,
+            omega_accel: OMEGA_SLEW,
+            iq_limit: SL_IQ_LIMIT,
+            stall_strikes: 0,
+            fault: 0.0,
             probe_kind: 0,
             probe_ticks: 0,
             probe_v: (0.0, 0.0),
@@ -199,7 +212,11 @@ impl SimControl {
     /// `SetDrive`: `mode` 0 off, 1 open-loop voltage, 2 I-f, 3 sensorless.
     /// A new running mode starts from rest with fresh control blocks; a repeat
     /// of the same mode just retargets amplitude/speed (smooth live changes).
-    fn set_drive(&mut self, mode: u8, amp: f32, omega: f32) {
+    /// `sl` = (handoff, omega accel, iq limit) from the session param table.
+    fn set_drive(&mut self, mode: u8, amp: f32, omega: f32, sl: (f32, f32, f32)) {
+        (self.sl_handoff, self.omega_accel, self.iq_limit) = sl;
+        self.fault = 0.0;
+        self.stall_strikes = 0;
         if mode == 0 {
             self.mode = 0;
             self.omega = 0.0;
@@ -229,17 +246,18 @@ impl SimControl {
         if mode == 3 {
             let p = self.params;
             let dir = if omega < 0.0 { -1.0 } else { 1.0 };
-            let i_start = amp.abs().clamp(0.1, SL_IQ_LIMIT);
+            let i_start = amp.abs().clamp(0.1, self.iq_limit);
             self.seq = Some(Sequencer::new(SequencerCfg {
                 i_start,
-                omega_handoff: SL_OMEGA_HANDOFF * dir,
+                accel: self.omega_accel,
+                omega_handoff: self.sl_handoff * dir,
                 ..SequencerCfg::default()
             }));
             self.speed = Some(SpeedLoop::new(
                 speed_pi_gains(p.inertia, p.torque_constant(), p.pole_pairs, SPEED_BW),
-                SL_IQ_LIMIT,
+                self.iq_limit,
             ));
-            self.omega_ref_cur = SL_OMEGA_HANDOFF * dir;
+            self.omega_ref_cur = self.sl_handoff * dir;
             self.sl_preload = i_start * dir;
         } else {
             self.seq = None;
@@ -250,7 +268,8 @@ impl SimControl {
     /// Ramp the forced electrical frequency and amplitude toward their targets.
     fn ramp_forced(&mut self, amp_slew: f32) {
         let dt = self.ctrl_dt;
-        let d_omega = (self.omega_target - self.omega).clamp(-OMEGA_SLEW * dt, OMEGA_SLEW * dt);
+        let d_omega =
+            (self.omega_target - self.omega).clamp(-self.omega_accel * dt, self.omega_accel * dt);
         self.omega += d_omega;
         let d_amp = (self.amp_target - self.amp).clamp(-amp_slew * dt, amp_slew * dt);
         self.amp += d_amp;
@@ -381,11 +400,12 @@ impl SimControl {
                     None => {
                         let speed = self.speed.as_mut().unwrap();
                         if self.sl_preload != 0.0 {
-                            speed.preload(self.sl_preload);
+                            let taper = self.seq.as_ref().map_or(1.0, |q| q.taper_end());
+                            speed.preload(self.sl_preload * taper);
                             self.sl_preload = 0.0;
                         }
                         let d = (self.omega_target - self.omega_ref_cur)
-                            .clamp(-OMEGA_SLEW * dt, OMEGA_SLEW * dt);
+                            .clamp(-self.omega_accel * dt, self.omega_accel * dt);
                         self.omega_ref_cur += d;
                         speed.update(self.omega_ref_cur, seq_out.omega, dt)
                     }
@@ -424,6 +444,30 @@ impl SimControl {
         rig.set_duties(out.duties);
         rig.advance(dt);
         self.obs.update(out.i_ab, out.v_ab, dt);
+
+        // Stall detector, firmware-identical: in closed-loop sensorless a
+        // stalled rotor leaves the observer confidently locked onto the L·i
+        // artifact with flux ≈ L·|i| ≪ ψ. 100 ms below 0.35·ψ trips.
+        if self.mode == 3 && self.seq.as_ref().map(|q| q.phase()) == Some(Phase::Closed) {
+            if self.obs.flux_mag() < 0.35 * self.params.flux {
+                self.stall_strikes += 1;
+                if self.stall_strikes as f32 * dt >= 0.1 {
+                    self.mode = 0;
+                    self.iq_ref_cmd = 0.0;
+                    self.seq = None;
+                    self.speed = None;
+                    self.fault = 8.0; // ST_STALL
+                }
+            } else {
+                self.stall_strikes = 0;
+            }
+        } else if self.mode != 3 {
+            self.stall_strikes = 0;
+        }
+        if self.fault != 0.0 && self.mode == 0 {
+            state = self.fault;
+        }
+
         let theta_est = self.obs.electrical_angle();
         StepOut {
             iq_ref,
@@ -481,6 +525,9 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
         2.0e-4,
         2.0e-3,
         params.pole_pairs as f32,
+        SL_OMEGA_HANDOFF,
+        OMEGA_SLEW,
+        SL_IQ_LIMIT,
     ];
     debug_assert_eq!(sim_params.len(), param::COUNT);
 
@@ -580,7 +627,16 @@ fn handle(
                 DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
                 DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
             };
-            control.set_drive(m, amp, omega);
+            control.set_drive(
+                m,
+                amp,
+                omega,
+                (
+                    params[param::SL_HANDOFF as usize],
+                    params[param::OMEGA_ACCEL as usize],
+                    params[param::IQ_LIMIT as usize],
+                ),
+            );
             send(
                 stream,
                 &Message::Ack {
@@ -690,6 +746,9 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
         param::FLUX => (1e-5, 0.5),
         param::CUR_BW => (100.0, 4000.0),
         param::POLE_PAIRS => (1.0, 50.0),
+        param::SL_HANDOFF => (30.0, 1000.0),
+        param::OMEGA_ACCEL => (20.0, 5000.0),
+        param::IQ_LIMIT => (0.05, 1.2),
         param::SPEED_KP => (0.0, 0.1),
         param::SPEED_KI => (0.0, 10.0),
         _ => return None,

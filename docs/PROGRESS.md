@@ -3,6 +3,47 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-07-19 — session 12: sensorless generalized — QBL5704 closes the MS6 loop
+
+**Closed-loop sensorless runs on motor 2, first attempt, and its profile is
+complete.** The blockers were three compile-time constants sized for motor 1;
+they are now runtime params (ids 7–9): `sl_handoff`, `omega_accel` (drives
+the forced-mode slew, the sequencer ramp, and retargets — and the accel-J fit
+now reads the value actually used from the capture snapshot), and `iq_limit`
+(replaces both I_AMP_MAX and SL_IQ_LIMIT). Firmware bumped to v5. QBL5704
+settings: 100 / 250 / 1.0 A.
+
+**Closing proof, MS6-style, on the second motor:** profile → fit → apply →
+sensorless on its own numbers: starts cleanly, holds 150 rad/s el, live
+retarget to 250, and a 150→300 speed step lands with **2.0% overshoot,
+settling at 299.6**. Accel stage (150→350 el at 0.9 A via the panel) fit
+**J = 25.1 µN·m·s²** — the datasheet's 23 (-116 variant) plus ~9% coupling —
+and friction 14.8 mN·m; fitted speed gains kp=0.0090/ki=0.090 applied.
+(First fit read J=12.6: the fit assumed the old fixed 500 rad/s² slew while
+the device ran the new param's 250 — exactly why the snapshot records it.)
+
+**Robustness landed with it:**
+- **Stall fault (state 8)**: in closed-loop sensorless, 100 ms of observer
+  flux below 0.35·ψ — the stalled rotor's confident L·i fake-lock, the
+  MS4/MS5 lesson — trips the stage off; STOP re-arms. Verified in sim: a
+  `--locked` rotor faults ~100 ms after "handoff" (state history
+  6→7→1×50ticks→8), a healthy run never trips. Panel shows the fault chip.
+- **Adaptive blend-kick taper**: the ramp's hang angle measures the load
+  (load fraction = **cos γ** — the sign convention that also corrected motor
+  2's drag estimate from ~30 down to ~9–12 mN·m standstill), and the blend
+  tapers i_start toward measured-load + 30% (floor 0.4): light loads kill
+  the handoff kick, heavy loads keep full current. A fixed 0.5 taper failed
+  the heavy-load regression corner (worst error 0.72 rad); the adaptive one
+  passes the whole sweep — the corner where load ≈ 95% of i_start tapers
+  not at all.
+- Speed-loop preloads follow the actual taper (`Sequencer::taper_end()`),
+  keeping the takeover bumpless in fw, sim server, and rig.
+- `StageTuning.accel_amps` (CLI `--accel-amps`, panel `"accel_amps"`) — the
+  accel stage's startup current was the last hard-coded 0.5 A.
+
+41 workspace tests green (the taper change initially broke the
+speed×load sweep and the fix made the taper *smarter*, not weaker).
+
 ## 2026-07-19 — session 11: at-the-motor R/L normalization + meter entry
 
 The profiler's R is the drive path (winding + shunt + FETs ≈ +0.85 Ω on this
