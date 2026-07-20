@@ -107,6 +107,27 @@ and the fit from the recorded header. Run `rl`, fit, **Apply**, *then* run
 `saliency` — with stale R/L the firmware picks a half-period the motor can't
 settle in (τ spans 31 µs → 360 µs across the two bench motors alone).
 
+## Comparing to a meter or datasheet (and entering hand measurements)
+
+The probes measure R as the **drive path**: winding plus the board's low-side
+shunt (0.33 Ω, duty-weighted) and the STSPIN830's conducting switch (~0.5 Ω) —
+about **0.85 Ω** on the G474+IHM16M1 rig (`R_DRIVE_PATH` in
+`mmc-host/src/profile.rs`; derivation in
+`testresults/motor2-4pole/datasheet-comparison.md`). That is the correct R for
+the control loop, but it is several times any datasheet or multimeter figure.
+The tools convert for you (wye winding assumed, line-line = 2 × per-phase):
+
+- `profile.py` / `saliency.py` print **"At the motor"** estimates — R and L in
+  line-line and per-phase form, path R subtracted — next to the drive-path
+  values. The path R rides in the capture's device snapshot (0 for the sim,
+  whose model has no inverter resistance), so old and sim captures normalize
+  correctly.
+- The panel's parameter card shows the same live estimate under the fields,
+  and has a **"from a meter"** entry: type the line-line R (Ω) and/or L (mH)
+  measured at the motor terminals and it sets the r/l params with the
+  conversion applied (r = R_ll/2 + path, l = L_ll/2). Measuring the QBL5704's
+  datasheet values this way lands within ~3% of the profiled r.
+
 ## Live resistance monitoring (panel)
 
 The control panel shows **R̂ apparent** — `(v·i − ω_e·ψ·i_q)/|i|²` averaged

@@ -18,12 +18,31 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mmc_core::probe;
-use mmc_proto::{param, test, DriveMode, Message};
+use mmc_proto::{param, test, DeviceKind, DriveMode, Message};
 
 use crate::capture::{self, CaptureCfg};
 use crate::link::Link;
 
 const CTRL_FREQ: f32 = 20_000.0;
+
+/// Series resistance of the G474 + IHM16M1 drive path: STSPIN830 conducting
+/// switch ≈ 0.5 Ω typ (R_DSon HS+LS = 1 Ω, hw/stspin830.pdf) + the 0.33 Ω
+/// low-side shunt duty-weighted ≈ 0.32 Ω. The probes measure winding + this
+/// path (which is what the control loop must use); subtracting it gives the
+/// at-the-motor value a multimeter or datasheet quotes. A rig property, not a
+/// motor one — see testresults/motor2-4pole/datasheet-comparison.md for the
+/// derivation, closed against a known motor to ~±0.05 Ω (FET tolerance
+/// dominates the residual).
+pub const R_DRIVE_PATH: f32 = 0.85;
+
+/// The drive-path resistance for a device kind: the sim's average-value
+/// inverter has no series resistance, so its probes already read the winding.
+pub fn r_drive_path(kind: DeviceKind) -> f32 {
+    match kind {
+        DeviceKind::Sim => 0.0,
+        _ => R_DRIVE_PATH,
+    }
+}
 
 /// Saliency-sweep square-wave levels [V]. The firmware additionally clamps
 /// them below (0.75 · I_trip · R̂) using its live R parameter, so the plateau
@@ -319,6 +338,8 @@ fn snapshot_device(link: &mut Link, state: &mut serde_json::Value, log: &mut dyn
     {
         dev.insert("name".into(), info.name_str().into());
         dev.insert("fw".into(), info.fw_version.into());
+        // The fits subtract this to report at-the-motor values (0 on the sim).
+        dev.insert("r_path".into(), r_drive_path(info.kind).into());
     }
     let mut params = serde_json::Map::new();
     for (id, name) in param::NAMES.iter().enumerate() {

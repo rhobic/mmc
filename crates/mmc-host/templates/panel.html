@@ -149,9 +149,22 @@
       <button id="pget">Refresh from device</button>
       <button class="primary" id="pall">Apply all edited</button>
     </div>
-    <p class="hint">These are the profiler's runtime parameters. Edits (highlighted) take effect at the
-      next clean drive start and live in <b>RAM only</b> — they reset to firmware defaults on power-cycle.
-      Out-of-range values are rejected by the firmware; the range is shown beside each field.</p>
+    <p class="hint" id="motorhint">&nbsp;</p>
+    <div class="controls" style="margin-top:6px;padding-top:12px;border-top:1px solid var(--border)">
+      <span class="sub" style="align-self:center">From a meter, line-line at the motor terminals:</span>
+      <div class="field"><label>R [Ω]</label>
+        <input id="mtr-r" type="number" step="0.01" min="0" style="width:90px"></div>
+      <div class="field"><label>L [mH]</label>
+        <input id="mtr-l" type="number" step="0.01" min="0" style="width:90px"></div>
+      <button id="mtrset">Set r &amp; l from meter</button>
+    </div>
+    <p class="hint">These are the profiler's runtime parameters. The control loop needs the R it
+      actually drives through — winding <b>plus</b> the board's shunt and driver FETs — so the r
+      param reads higher than any datasheet or multimeter value; the line above shows the
+      at-the-motor equivalent (wye winding assumed), and the meter entry adds the path back on for
+      you. Edits (highlighted) take effect at the next clean drive start and live in
+      <b>RAM only</b> — they reset to firmware defaults on power-cycle. Out-of-range values are
+      rejected by the firmware; the range is shown beside each field.</p>
   </div>
 
   <div class="card" style="margin-top:14px" id="profcard">
@@ -409,7 +422,7 @@ async function poll() {
     (stalled ? "  ·  telemetry stalled — recovering…" : ""));
   safe("tiles", renderTiles);
   safe("charts", () => { for (const c of CHARTS) renderChart(c); });
-  safe("params", () => updateParams(d.params, d.param_status));
+  safe("params", () => { rPath = d.r_path || 0; updateParams(d.params, d.param_status); });
   safe("profiler", () => updateProfiler(d.busy, d.plog));
   setTimeout(poll, 150);
 }
@@ -456,6 +469,7 @@ function setParam(p) {
 }
 let lastParamVals = null; // device param values (SI) for the R̂ monitor
 let flashParams = false;  // pulse the fields on the next refresh
+let rPath = 0;            // drive-path series R from /data (0 on the sim)
 function updateParams(vals, status) {
   if (status != null) document.getElementById("paramstatus").textContent = status;
   if (!vals) return;
@@ -468,7 +482,30 @@ function updateParams(vals, status) {
     if (flashParams) { el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); }
   }
   flashParams = false;
+  // At-the-motor equivalents of r/l — what a multimeter or datasheet quotes
+  // (wye: line-line = 2x phase; the drive-path R is the rig's, not the motor's).
+  const hint = document.getElementById("motorhint");
+  const r = vals[0], l = vals[1];
+  if (isFinite(r) && isFinite(l)) {
+    const rm = r - rPath;
+    const rTxt = rm > 0.005
+      ? "R ≈ " + (2 * rm).toFixed(2) + " Ω line-line (" + rm.toFixed(2) + " Ω/phase)"
+      : "R ≈ n/a (param ≤ path R)";
+    hint.textContent = "At the motor (est., wye): " + rTxt +
+      " · L ≈ " + (2 * l * 1e3).toFixed(2) + " mH line-line" +
+      " — drive-path R " + rPath.toFixed(2) + " Ω subtracted";
+  }
 }
+document.getElementById("mtrset").onclick = () => {
+  const rll = parseFloat(document.getElementById("mtr-r").value);
+  const lll = parseFloat(document.getElementById("mtr-l").value);
+  if (!isFinite(rll) && !isFinite(lll)) return;
+  flashParams = true;
+  // Meter reads line-line at the motor: halve to per-phase, add the rig's
+  // path R back so the control loop gets the resistance it actually drives.
+  if (isFinite(rll) && rll >= 0) post({ cmd: "setparam", id: 0, value: rll / 2 + rPath });
+  if (isFinite(lll) && lll >= 0) post({ cmd: "setparam", id: 1, value: lll / 1e3 / 2 });
+};
 document.getElementById("pget").onclick = () => {
   dirty.clear();
   for (const p of PARAMS) pin(p).classList.remove("dirty");

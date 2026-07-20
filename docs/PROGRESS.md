@@ -3,6 +3,27 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-07-19 — session 11: at-the-motor R/L normalization + meter entry
+
+The profiler's R is the drive path (winding + shunt + FETs ≈ +0.85 Ω on this
+rig) — right for control, wrong for humans holding a multimeter. Now both
+directions convert:
+
+- **`R_DRIVE_PATH = 0.85 Ω`** lives in `mmc-host/src/profile.rs` (0 for the
+  sim, whose model has no inverter resistance) and is recorded into each
+  capture's device snapshot, so the fits normalize old, sim, and hardware
+  captures correctly from one source of truth.
+- `profile.py`/`saliency.py` print **"At the motor"** estimates (per-phase and
+  line-line, wye assumed) beside the drive-path values; the panel's parameter
+  card shows the same live line.
+- The panel gains a **"from a meter"** entry: type line-line R/L measured at
+  the motor terminals, it sets r/l with the conversion (r = R_ll/2 + path,
+  l = L_ll/2). Validation both ways on the QBL5704: displayed estimate
+  0.41 Ω line-line vs datasheet 0.35–0.45; entering the datasheet's
+  0.35 Ω/1.0 mH produces r within 3% of the profiled value.
+- Bench note: the device power-cycled again and lost its RAM params (restored
+  by hand) — the flash-persistence backlog item keeps earning its place.
+
 ## 2026-07-18 — session 10: profiler output neutralized; motor 2 identified as QBL5704, datasheet cross-check
 
 **Motor 2 is a Trinamic QMot QBL5704** (`hw/qbl5704_datasheet_v1.05.pdf`,

@@ -56,9 +56,25 @@ def used_params(dir_):
         return {}
 
 
+def drive_path_r(dir_):
+    """Rig drive-path series R from the device snapshot (0 on the sim); the
+    probes measure winding + this. Fallback for old captures mirrors
+    tools/profile.py / mmc-host profile.rs R_DRIVE_PATH."""
+    try:
+        with open(os.path.join(dir_, "profile_state.json")) as f:
+            dev = json.load(f)["device"]
+        if "r_path" in dev:
+            return float(dev["r_path"])
+        if "sim" in str(dev.get("name", "")).lower():
+            return 0.0
+    except (OSError, KeyError, ValueError):
+        pass
+    return 0.85
+
+
 def j_offsets(half_ticks):
     """Post-edge sample offsets for the fit, scaled with the half-period
-    (the firmware picks half ≈ 8·τ, so these land mid-decay where P ∈
+    (the firmware picks half ~ 8·τ, so these land mid-decay where P ∈
     ~(0.2, 0.7) — early samples have no transient developed yet, late ones
     none left, and both amplify noise through the small ln P or atanh
     denominators)."""
@@ -256,14 +272,19 @@ def main(dir_):
 
     # --- Key values used in this profiling run ------------------------------
     dp = used_params(dir_)
+    r_path = drive_path_r(dir_)
     print()
-    print("Values used this run:")
-    print(f"  R          = {r:.3f} ohm   (from this saliency plateau)")
+    print("Values used this run (drive-path values; motor-only in brackets):")
+    r_m = r - r_path
+    at_motor = f"   [motor ~ {2 * r_m:.3f} ohm line-line]" if r_m > 0.005 else ""
+    print(f"  R          = {r:.3f} ohm   (from this saliency plateau){at_motor}")
     if "r" in dp:
         print(f"  R (device) = {float(dp['r']):.3f} ohm   (param the firmware used)")
     if "l" in dp:
-        print(f"  L          = {float(dp['l']) * 1e3:.3f} mH   "
-              "(RL probe; sets the sweep's half-period)")
+        l_ph = float(dp["l"])
+        print(f"  L          = {l_ph * 1e3:.3f} mH   "
+              f"(RL probe; sets the sweep's half-period)"
+              f"   [motor ~ {2 * l_ph * 1e3:.3f} mH line-line]")
     if "flux" in dp:
         print(f"  flux       = {float(dp['flux']) * 1e3:.3f} mWb")
     if "pole_pairs" in dp:

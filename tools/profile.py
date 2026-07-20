@@ -50,6 +50,24 @@ def pole_pairs_for(dir_):
     return POLE_PAIRS
 
 
+def drive_path_r(dir_):
+    """Series resistance of the rig's drive path (shunt + driver FETs), which
+    the probes measure on top of the winding. The host records it in the
+    device snapshot (0 for the sim); for captures predating that, fall back
+    to the G474+IHM16M1 figure unless the device was the sim. Keep the
+    fallback in sync with mmc-host profile.rs R_DRIVE_PATH."""
+    try:
+        with open(os.path.join(dir_, "profile_state.json")) as f:
+            dev = json.load(f)["device"]
+        if "r_path" in dev:
+            return float(dev["r_path"])
+        if "sim" in str(dev.get("name", "")).lower():
+            return 0.0
+    except (OSError, KeyError, ValueError):
+        pass
+    return 0.85
+
+
 def load(path):
     with open(path, newline="") as f:
         rows = list(csv.DictReader(f))
@@ -259,6 +277,24 @@ def main(dir_):
         print("  (R is the drive-path value the control loop sees -- winding plus")
         print("   shunt and driver FETs -- so it reads several times a datasheet's")
         print("   winding-only figure. That is correct for control.)")
+
+    # At-the-motor equivalents: what a multimeter/LCR at the terminals or a
+    # datasheet quotes (wye: line-line = 2x per-phase). Display only — the
+    # control params above keep the drive-path values.
+    r_path = drive_path_r(dir_)
+    if "r" in profile or "l" in profile:
+        print()
+        print("At the motor (est., wye winding) -- for meter/datasheet comparison:")
+        if "r" in profile:
+            r_m = profile["r"] - r_path
+            if r_m > 0.005:
+                print(f"  R ~ {2 * r_m:.3f} ohm line-line ({r_m:.3f} ohm/phase)"
+                      f"   [drive-path {r_path:.2f} ohm subtracted]")
+            else:
+                print(f"  R ~ n/a (fit {profile['r']:.3f} <= drive-path {r_path:.2f} ohm)")
+        if "l" in profile:
+            print(f"  L ~ {2 * profile['l'] * 1e3:.3f} mH line-line "
+                  f"({profile['l'] * 1e3:.3f} mH/phase)")
     print()
     print(f"wrote {out}")
     print(f"apply: mmc-host apply --serial auto --baud 1000000 --profile {out}")

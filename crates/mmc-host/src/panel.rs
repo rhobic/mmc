@@ -60,6 +60,8 @@ struct Shared {
     busy: bool,
     /// Profiler card log (stage progress + fit output).
     plog: Vec<String>,
+    /// Drive-path series resistance for at-the-motor displays (0 on the sim).
+    r_path: f32,
 }
 
 pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
@@ -70,8 +72,11 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
         |m| matches!(m, Message::Pong { nonce: 7 }),
         t,
     )?;
-    let device = match link.request(&Message::GetInfo, |m| matches!(m, Message::Info(_)), t)? {
-        Message::Info(info) => format!("{} ({:?})", info.name_str(), info.kind),
+    let (device, r_path) = match link.request(&Message::GetInfo, |m| matches!(m, Message::Info(_)), t)? {
+        Message::Info(info) => (
+            format!("{} ({:?})", info.name_str(), info.kind),
+            crate::profile::r_drive_path(info.kind),
+        ),
         _ => unreachable!(),
     };
     let set = Message::SetTelemetry {
@@ -129,6 +134,7 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
         param_status,
         busy: false,
         plog: Vec::new(),
+        r_path,
     }));
     let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
 
@@ -307,6 +313,7 @@ fn handle_conn(
                 "param_status": s.param_status,
                 "busy": s.busy,
                 "plog": plog_tail,
+                "r_path": s.r_path,
             });
             let body = serde_json::to_vec(&json)?;
             respond(&mut conn, 200, "application/json", &body)
