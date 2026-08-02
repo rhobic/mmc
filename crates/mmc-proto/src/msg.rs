@@ -84,7 +84,13 @@ pub mod param {
     /// while the bridge is freewheeling. Larger values sample earlier and
     /// leave the sense network less time to settle.
     pub const ONTIME_CCR5: u8 = 10;
-    pub const COUNT: usize = 11;
+    /// Six-step duty→speed loop gains [duty per rad/s electrical, and its
+    /// integral]. Deliberately separate from [`SPEED_KP`]/[`SPEED_KI`], which
+    /// belong to the FOC speed loop and are in amps: the two control schemes
+    /// must not share a tuning knob.
+    pub const SS_KP: u8 = 11;
+    pub const SS_KI: u8 = 12;
+    pub const COUNT: usize = 13;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -97,6 +103,8 @@ pub mod param {
         "omega_accel",
         "iq_limit",
         "ontime_ccr5",
+        "ss_kp",
+        "ss_ki",
     ];
 }
 

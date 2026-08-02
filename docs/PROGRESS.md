@@ -3,6 +3,63 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-02 — session 20: six-step regulates speed on device; the back-EMF sensing floor measured
+
+**Closed the loop twice over: the simulation now covers the reference fix, and
+the device regulates speed rather than duty.**
+
+**Simulation gap closed.** `PhaseMotor` gained a `Bridge` — high- and low-side
+conducting resistances (the latter including the shunt) and the sense network's
+full scale. Their effect on *current* is deliberately not added to the circuit
+equation, because `PmsmParams::rs` is already the whole drive-path resistance
+the profiler measures; what they change is where the driven terminals sit, and
+therefore what the correct reference is. Session 19's hardware finding is now a
+paired regression test:
+
+| reference | tracking | speed error | final |
+|---|---|---|---|
+| `V_bus/2` | 49.7% | 507% | 51 rad/s el |
+| measured mid-point | 100% | 1.42% | 594 rad/s el |
+
+Modelling the drops also **reproduced, unprompted, the constraint that forced
+the supply down to 12 V**: with a fixed divider ratio a 24 V bus pushes the
+driven terminals past the sense full scale, so the mid-point cannot be measured
+and the reference has nowhere to fall back to. The simulator found that on its
+own, from the drops and a clip.
+
+**Speed loop on device (fw v13).** Duty→speed PI closed on the crossing
+interval, with back-calculation anti-windup because a six-step bridge has no
+braking quadrant. Gains are **dedicated params `ss_kp`/`ss_ki` (ids 11–12)**,
+deliberately *not* the FOC loop's `speed_kp`/`speed_ki` — the two schemes must
+not share a tuning knob. New state code 9 distinguishes commutating-but-unlocked
+from confident sensing.
+
+**Result: it regulates, above a floor.**
+
+| target | held | error | duty | current | locked |
+|---|---|---|---|---|---|
+| 44.0 rad/s el | 47.0 | +6.8% | 0.155 | 0.219 A | 100% |
+| 50.3 rad/s el | 52.3 | +4.1% | 0.169 | 0.221 A | 100% |
+| 31.4 rad/s el | 16.3 | −48% | **0.170 (pinned)** | **0.931 A** | 100% |
+| 18.8 rad/s el | 16.5 | −12% | **0.170 (pinned)** | **0.928 A** | 100% |
+
+**There is a back-EMF sensing floor at roughly 40 rad/s electrical on this rig,
+and it is the expected physics, not a defect.** Above it the loop keeps
+authority (duty unsaturated) and holds target within ±7% at 0.22 A. Below it the
+drive parks at ~16.5 rad/s whatever the command, with duty pinned at the ceiling
+and **four times the current** — the signature of mistimed commutation, because
+`e ∝ ω` and the ramp across a window shrinks with speed until it no longer
+outweighs the residual reference error. The detector reports `locked` throughout,
+which is itself worth knowing: lock is not the same as correct.
+
+The forced ramp exists precisely to cross this region, so the handoff speed must
+be set above the floor.
+
+**Next:** MS8 step 5, the FOC-vs-six-step comparison on one motor and one
+profile — torque ripple, acoustics, ISR cost.
+
+Captures: `testresults/ms8-closedloop/`, `testresults/ms8-sixstep-sim/`.
+
 ## 2026-08-02 — session 19: sensorless six-step runs closed-loop on hardware
 
 **Commutation is now timed by the motor's own back-EMF.** Bus dropped to 12 V,

@@ -51,7 +51,7 @@ use mmc_core::angle::AngleEstimator;
 use mmc_core::foc::{Decoupling, Foc};
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
-use mmc_core::pi::PiGains;
+use mmc_core::pi::{Pi, PiGains};
 use mmc_core::probe;
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
 use mmc_core::sixstep::{self, Ramp, RampCfg, ZcCfg, ZcEvent, ZeroCross};
@@ -104,6 +104,10 @@ const CAL_TICKS: u32 = 8192;
 /// value: at duty 0.07 that leaves (100 + 297)/170 MHz = 2.3 us before the
 /// high side turns off, and ADC2's four conversions take 1.79 us.
 const ONTIME_CCR5_DEFAULT: u16 = 100;
+/// Six-step duty→speed loop defaults. Crossover well under the commutation
+/// rate; the integral corner an order below the crossover, per the simulator.
+const SS_KP_DEFAULT: f32 = 2.0e-4;
+const SS_KI_DEFAULT: f32 = 5.0e-4;
 
 // Motor parameters measured on this bench (Stage F0 rotating I-f sweep,
 // `tools/fit_params.py`): flux 0.894 ± 0.04 mWb, apparent R 0.97 Ω
@@ -150,6 +154,10 @@ const ST_SL_BLEND: u8 = 7;
 /// while nominally closed-loop — the rotor is not actually following.
 /// ≥ ST_FAULT_OC, so the fault gating and Off-to-re-arm flow apply.
 const ST_STALL: u8 = 8;
+/// Six-step commutating on measured crossings but with the detector not
+/// confident — it is coasting on the timeout fallback, so the speed it reports
+/// is a guess and the drive is one missed crossing from losing sync.
+const ST_SS_UNLOCKED: u8 = 9;
 /// Consecutive low-flux ticks before the stall fault trips (100 ms).
 const STALL_TICKS: u32 = 2000;
 
@@ -200,6 +208,8 @@ static PARAMS: [AtomicU32; param::COUNT] = [
     p32(OMEGA_SLEW),
     p32(SL_IQ_LIMIT),
     p32(ONTIME_CCR5_DEFAULT as f32),
+    p32(SS_KP_DEFAULT),
+    p32(SS_KI_DEFAULT),
 ];
 
 fn param_get(id: u8) -> f32 {
@@ -226,6 +236,10 @@ fn param_range(id: u8) -> Option<(f32, f32)> {
         // Sample point, timer counts before the valley. 20 counts = 0.12 us;
         // the upper bound keeps it inside a 50% duty on-window.
         param::ONTIME_CCR5 => (20.0, 2000.0),
+        // Duty per rad/s electrical: 1e-3 already commands full duty from a
+        // 900 rad/s error, so the useful range is small.
+        param::SS_KP => (0.0, 0.01),
+        param::SS_KI => (0.0, 0.1),
         _ => return None,
     })
 }
@@ -370,6 +384,10 @@ struct IsrState {
     ss_ramp: Option<Ramp>,
     /// True once commutation is timed from measured crossings, not the ramp.
     ss_sensing: bool,
+    /// Duty→speed loop for six-step, closed on the crossing interval.
+    ss_speed: Option<Pi>,
+    /// Speed target while sensing [rad/s electrical].
+    ss_target: f32,
     /// R/L probe tick counter (mode 4).
     probe_ticks: u32,
     oc_strikes: u8,
@@ -392,6 +410,8 @@ static ISR_STATE: IsrCell = IsrCell(UnsafeCell::new(IsrState {
     ss_zc: None,
     ss_ramp: None,
     ss_sensing: false,
+    ss_speed: None,
+    ss_target: 0.0,
     theta: 0.0,
     omega: 0.0,
     amp: 0.0,
@@ -735,7 +755,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 11, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 13, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -1066,6 +1086,8 @@ unsafe extern "C" fn ADC1_2() {
                     s.ss_sensing = false;
                     s.ss_zc = None;
                     s.ss_ramp = None;
+                    s.ss_speed = None;
+                    s.ss_target = 0.0;
                     if mode == 6 {
                         // Blanking has to clear the freewheel of the phase
                         // that just opened; at 20 kHz that is a handful of
@@ -1074,6 +1096,17 @@ unsafe extern "C" fn ADC1_2() {
                             blank: 250e-6,
                             ..Default::default()
                         }));
+                        // Duty per rad/s electrical. The plant from duty to
+                        // electrical acceleration is p·(2ψ)·V_bus/(2R·J); the
+                        // integral corner must stay well under the crossover
+                        // or the loop hunts, the lesson the simulator taught.
+                        s.ss_speed = Some(Pi::new(
+                            PiGains {
+                                kp: param_get(param::SS_KP),
+                                ki: param_get(param::SS_KI),
+                            },
+                            MAX_DUTY,
+                        ));
                         s.ss_ramp = Some(Ramp::new(RampCfg {
                             omega_start: 20.0,
                             omega_handoff: f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed))
@@ -1113,8 +1146,8 @@ unsafe extern "C" fn ADC1_2() {
                         }));
                         s.speed = Some(SpeedLoop::new(
                             PiGains {
-                                kp: param_get(param::SPEED_KP),
-                                ki: param_get(param::SPEED_KI),
+                                kp: param_get(param::SS_KP),
+                                ki: param_get(param::SS_KI),
                             },
                             iq_lim,
                         ));
@@ -1365,7 +1398,9 @@ unsafe extern "C" fn ADC1_2() {
                 let (hi_i, lo_i, fl_i) = sixstep::TABLE[s.ss_sector];
                 let v_ref = 0.5 * (vb_phase(hi_i as usize) + vb_phase(lo_i as usize));
                 let v_float = vb_phase(fl_i as usize);
-                let duty = s.amp.clamp(0.0, MAX_DUTY);
+                // In the ramp `amp` is the duty directly; once sensing, it
+                // becomes the duty ceiling and the speed loop sets the rest.
+                let mut duty = s.amp.clamp(0.0, MAX_DUTY);
 
                 if !s.ss_sensing {
                     let want = s.ss_ramp.as_mut().unwrap().update(CTRL_DT);
@@ -1384,6 +1419,10 @@ unsafe extern "C" fn ADC1_2() {
                         if !zc.locked() {
                             zc.seed(r.omega_e());
                         }
+                        // Bumpless: start the duty loop from the duty the
+                        // ramp was already applying.
+                        s.ss_speed.as_mut().unwrap().preload(duty);
+                        s.ss_target = r.omega_e();
                         s.ss_sensing = true;
                     }
                     s.omega = r.omega_e();
@@ -1392,7 +1431,21 @@ unsafe extern "C" fn ADC1_2() {
                     if zc.update(s.ss_sector, v_float, v_ref, CTRL_DT) == ZcEvent::Commutate {
                         s.ss_sector = (s.ss_sector + 1) % sixstep::SECTORS;
                     }
-                    s.omega = zc.omega_e();
+                    let measured = zc.omega_e();
+                    s.omega = measured;
+                    // Slew the target so a retarget does not step the duty.
+                    let want = f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed)).abs();
+                    let accel = param_get(param::OMEGA_ACCEL);
+                    s.ss_target += (want - s.ss_target).clamp(-accel * CTRL_DT, accel * CTRL_DT);
+                    let pi = s.ss_speed.as_mut().unwrap();
+                    let raw = pi.update(s.ss_target - measured, CTRL_DT);
+                    duty = raw.clamp(0.01, s.amp.clamp(0.0, MAX_DUTY));
+                    if raw != duty {
+                        // Back-calculation: a six-step bridge has no braking
+                        // quadrant, so the loop saturates low on every
+                        // deceleration and would otherwise wind up.
+                        pi.preload(duty);
+                    }
                 }
 
                 duties = [0.0; 3];
@@ -1498,6 +1551,10 @@ unsafe extern "C" fn ADC1_2() {
     let state_telem = match (s.mode, s.seq.as_ref().map(|q| q.phase())) {
         (3, Some(Phase::Ramp)) => ST_SL_RAMP,
         (3, Some(Phase::Blend)) => ST_SL_BLEND,
+        // Six-step: distinguish the forced ramp, confident sensing, and
+        // commutating-but-unlocked, which otherwise all look like "running".
+        (6, _) if !s.ss_sensing => ST_SL_RAMP,
+        (6, _) if !s.ss_zc.as_ref().is_some_and(|z| z.locked()) => ST_SS_UNLOCKED,
         _ => STATE.load(Ordering::Relaxed),
     };
     put(channel::STATE, state_telem as f32);
