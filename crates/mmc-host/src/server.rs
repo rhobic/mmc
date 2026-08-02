@@ -628,12 +628,26 @@ fn handle(
                 },
             )
         }
+        Message::SetDrive(DriveMode::SixStepForced { .. }) => {
+            // The virtual motor is a dq average-value model: it has no
+            // floating terminal and no trapezoidal EMF, so it cannot honestly
+            // run six-step. NAK until the phase-domain model lands, rather
+            // than silently simulating something the hardware does not do.
+            send(
+                stream,
+                &Message::Nak {
+                    of: msg.wire_type(),
+                    err: 4,
+                },
+            )
+        }
         Message::SetDrive(mode) => {
             let (m, amp, omega) = match mode {
                 DriveMode::Off => (0u8, 0.0f32, 0.0f32),
                 DriveMode::OpenLoopVoltage { volts, omega_e } => (1, volts, omega_e),
                 DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
                 DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
+                DriveMode::SixStepForced { .. } => unreachable!("handled above"),
             };
             control.set_drive(
                 m,

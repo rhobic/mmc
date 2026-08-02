@@ -141,6 +141,13 @@ pub enum DriveMode {
     /// observer, then the on-device speed loop regulates to `omega_e` rad/s
     /// electrical (sign sets direction; retargetable while running).
     Sensorless { amps: f32, omega_e: f32 },
+    /// Forced six-step commutation: two phases conduct, the third is Hi-Z so
+    /// it can be read as a back-EMF sense node. `duty` is the high-side PWM
+    /// duty (0..1), not volts or amps — there is no current loop here. The
+    /// sector advances with a forced `omega_e`, dragging the rotor like
+    /// open-loop voltage does. Wire code 5: code 4 is taken by the on-device
+    /// R/L probe, which arrives as `RunTest` rather than `SetDrive`.
+    SixStepForced { duty: f32, omega_e: f32 },
 }
 
 impl DriveMode {
@@ -150,6 +157,7 @@ impl DriveMode {
             DriveMode::OpenLoopVoltage { volts, omega_e } => (1, volts, omega_e),
             DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
             DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
+            DriveMode::SixStepForced { duty, omega_e } => (5, duty, omega_e),
         }
     }
 
@@ -162,6 +170,7 @@ impl DriveMode {
             }),
             2 => Ok(DriveMode::IfCurrent { amps: amp, omega_e }),
             3 => Ok(DriveMode::Sensorless { amps: amp, omega_e }),
+            5 => Ok(DriveMode::SixStepForced { duty: amp, omega_e }),
             _ => Err(FrameError::Malformed),
         }
     }
@@ -678,6 +687,10 @@ mod tests {
         round_trip(Message::SetDrive(DriveMode::IfCurrent {
             amps: 0.4,
             omega_e: -62.8,
+        }));
+        round_trip(Message::SetDrive(DriveMode::SixStepForced {
+            duty: 0.25,
+            omega_e: 40.0,
         }));
         round_trip(Message::SetDrive(DriveMode::Sensorless {
             amps: 0.5,

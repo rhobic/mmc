@@ -93,6 +93,8 @@ const POLE_PAIRS: f32 = 7.0;
 /// Drive shuts off if the host goes silent this long (capture keep-alive pings).
 const DEADMAN_TICKS: u32 = 2 * 20_000;
 const CAL_TICKS: u32 = 8192;
+/// Electrical sectors per radian: 6 sectors over 2π.
+const SECTOR_PER_RAD: f32 = 6.0 / (2.0 * core::f32::consts::PI);
 
 // Motor parameters measured on this bench (Stage F0 rotating I-f sweep,
 // `tools/fit_params.py`): flux 0.894 ± 0.04 mWb, apparent R 0.97 Ω
@@ -149,6 +151,8 @@ static CMD_MODE: AtomicU8 = AtomicU8::new(0); // 0 off, 1 volt, 2 i-f, 3 sensorl
 static CMD_AMP: AtomicU32 = AtomicU32::new(0);
 static CMD_OMEGA: AtomicU32 = AtomicU32::new(0);
 static CMD_EPOCH: AtomicU32 = AtomicU32::new(0);
+/// Active six-step sector, for the telemetry channel.
+static SIXSTEP_SECTOR: AtomicU8 = AtomicU8::new(0);
 /// CONTROL_TICKS value at the last host message (deadman).
 static LAST_RX_TICK: AtomicU32 = AtomicU32::new(0);
 
@@ -692,7 +696,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 7, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 8, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -709,6 +713,7 @@ fn handle(msg: &Message) -> Message {
                 DriveMode::OpenLoopVoltage { volts, omega_e } => (1, volts, omega_e),
                 DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
                 DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
+                DriveMode::SixStepForced { duty, omega_e } => (5, duty, omega_e),
             };
             if m != 0 {
                 if state == ST_CAL {
@@ -814,7 +819,9 @@ fn handle(msg: &Message) -> Message {
 }
 
 fn amp_limit(mode: u8) -> f32 {
-    if mode >= 2 {
+    if mode == 5 {
+        MAX_DUTY // six-step commands a PWM duty, not volts or amps
+    } else if mode >= 2 {
         param_get(param::IQ_LIMIT)
     } else {
         V_AMP_MAX
@@ -894,6 +901,33 @@ fn stage_on() {
         w.set_bs(15, true);
     });
 }
+
+/// Enable phases selectively: bit 0 = U (PB13), 1 = V (PB14), 2 = W (PB15).
+/// A disabled phase is Hi-Z — both its switches open — which is what six-step
+/// needs so the idle phase can be read as a back-EMF sense node.
+fn stage_phases(mask: u8) {
+    GPIOB.bsrr().write(|w| {
+        for (bit, pin) in [(0, 13), (1, 14), (2, 15)] {
+            if mask & (1 << bit) != 0 {
+                w.set_bs(pin, true);
+            } else {
+                w.set_br(pin, true);
+            }
+        }
+    });
+}
+
+/// Six-step commutation table indexed by electrical sector (θ/60°).
+/// Each entry is (phase driven to the high side, phase held low, phase left
+/// floating), phases numbered U=0, V=1, W=2.
+const SIXSTEP: [(u8, u8, u8); 6] = [
+    (0, 1, 2), // U+ V- W float
+    (0, 2, 1), // U+ W- V float
+    (1, 2, 0), // V+ W- U float
+    (1, 0, 2), // V+ U- W float
+    (2, 0, 1), // W+ U- V float
+    (2, 1, 0), // W+ V- U float
+];
 
 fn set_duties(d: [f32; 3]) {
     for (ch, duty) in d.iter().enumerate() {
@@ -1082,6 +1116,11 @@ unsafe extern "C" fn ADC1_2() {
     let mut theta_err = 0.0f32;
 
     if s.mode != 0 {
+        // Six-step drives the enables itself; everything else wants all three
+        // phases live (a previous six-step run may have left one Hi-Z).
+        if s.mode != 5 {
+            stage_on();
+        }
         let omega_target = f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed));
         let amp_target = f32::from_bits(CMD_AMP.load(Ordering::Relaxed));
         let i_ab = clarke(i_abc);
@@ -1243,6 +1282,23 @@ unsafe extern "C" fn ADC1_2() {
                 let v_ab = inverse_park(v_dq, sc);
                 duties = svpwm(v_ab, s.vbus_filt.max(1.0));
                 v_ab
+            } else if s.mode == 5 {
+                // Forced six-step commutation: two phases conduct, the third
+                // is Hi-Z. `amp` is the high-side duty (0..1), not volts.
+                // Sector advances with the forced angle, so the rotor is
+                // dragged exactly as in open-loop voltage mode.
+                let sector = ((s.theta + core::f32::consts::PI) * SECTOR_PER_RAD) as usize % 6;
+                let (hi, lo, float) = SIXSTEP[sector];
+                let duty = s.amp.clamp(0.0, MAX_DUTY);
+                duties = [0.0; 3];
+                duties[hi as usize] = duty;
+                duties[lo as usize] = 0.0;
+                stage_phases(!(1u8 << float) & 0b111);
+                SIXSTEP_SECTOR.store(sector as u8, Ordering::Relaxed);
+                // The observer has no meaningful input here (one phase
+                // current is unmeasured by construction), so feed it zero and
+                // let the shadow estimate go stale rather than lie.
+                AlphaBeta::default()
             } else {
                 // I-f: closed current loop on the forced angle.
                 iq_ref = s.amp;
@@ -1335,6 +1391,14 @@ unsafe extern "C" fn ADC1_2() {
     put(channel::VB_U, vb(0));
     put(channel::VB_V, vb(3));
     put(channel::VB_W, vb(1));
+    put(
+        channel::SECTOR,
+        if s.mode == 5 {
+            SIXSTEP_SECTOR.load(Ordering::Relaxed) as f32
+        } else {
+            0.0
+        },
+    );
     TELEM_SEQ.store(seq.wrapping_add(2), Ordering::Release);
 
     let dur = cortex_m::peripheral::DWT::cycle_count().wrapping_sub(isr_t0);

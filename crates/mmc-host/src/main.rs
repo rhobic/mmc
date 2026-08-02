@@ -193,11 +193,11 @@ struct CaptureArgs {
     #[arg(long)]
     iq: Option<f32>,
     /// Command a drive mode at 10% of the capture: `volt` (open-loop voltage),
-    /// `if` (I-f current) or `sl` (closed-loop sensorless). Requires --amp and
-    /// --hz; Off is sent at the end.
-    #[arg(long, value_parser = ["volt", "if", "sl"], conflicts_with = "iq")]
+    /// `if` (I-f current), `sl` (closed-loop sensorless) or `six` (forced
+    /// six-step commutation). Requires --amp and --hz; Off is sent at the end.
+    #[arg(long, value_parser = ["volt", "if", "sl", "six"], conflicts_with = "iq")]
     drive: Option<String>,
-    /// Drive amplitude: volts (--drive volt) or amps (--drive if / sl startup).
+    /// Drive amplitude: volts (volt), amps (if / sl startup), duty 0..1 (six).
     #[arg(long, requires = "drive")]
     amp: Option<f32>,
     /// Drive electrical frequency [Hz] (sl: speed target).
@@ -372,6 +372,7 @@ fn main() -> std::io::Result<()> {
                         omega_e,
                     },
                     "sl" => mmc_proto::DriveMode::Sensorless { amps: amp, omega_e },
+                    "six" => mmc_proto::DriveMode::SixStepForced { duty: amp, omega_e },
                     _ => mmc_proto::DriveMode::IfCurrent { amps: amp, omega_e },
                 }
             };

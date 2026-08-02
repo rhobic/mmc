@@ -3,6 +3,50 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-02 — session 16: MS8 step 1 — the idle phase is NOT readable at the current sample point
+
+**Answered the question that gates six-step, on hardware, with a measurement
+rather than an argument.** Firmware v8 adds forced six-step commutation (drive
+mode 5, `SetDrive` wire code 5 — 4 is the R/L probe) and `stage_phases(mask)`,
+so two phases conduct and the third is Hi-Z.
+
+**What works: per-phase Hi-Z is real.** Static commutation, sector 3 (V+ / U-,
+W idle): driven pair carries ±0.485 A, the idle phase carries **2 mA**. The
+enables do exactly what six-step needs.
+
+**What does not: the idle phase carries a signal, but it is not back-EMF.**
+Swept 2 → 30 Hz electrical at duty 0.07 (12.6 → 188.5 rad/s el, 15×) and the
+idle-phase reading is **flat at 1.8–2.1 V, then falls to 1.26** — 0.68× over a
+range where back-EMF must rise 15×. Anchored at the slowest point, the
+prediction at 30 Hz is 28 V against 1.26 measured. Whatever the channel reads is
+set by current, not speed: the resistive drop of the conducting pair plus the
+divider bias.
+
+**Why, and it is the predicted reason.** ADC2 triggers at TIM1_CC4, the
+counter peak, because that is where every low side conducts and the shunts carry
+the phase currents. At that instant both driven terminals are at ground, so the
+idle terminal is referenced to ~0 and its negative half is clipped by the
+divider's clamp diodes. The window shapes show it directly: at 5 Hz, sectors
+1/3/5 carry a hump peaking mid-window (1.63–1.86 V) while sectors 0/2/4 sit
+flat at 0.00 — exactly half the windows rectified away.
+
+**Two secondary findings:**
+- **No torque headroom on this rig.** Duty 0.10 at 15 Hz tripped overcurrent
+  (peak 1.44 A against the 1.5 A limit), so the sync-authority control could not
+  be run. Forced commutation loses the rotor somewhere above 15 Hz el, which
+  contaminates the top of the sweep independently of the sensing question.
+- **1 kHz telemetry cannot resolve a commutation window.** 82 samples/window at
+  2 Hz, 6 at 30 Hz. Detection has to live in the 20 kHz ISR; telemetry is only
+  for showing the work afterwards.
+
+**Next:** move the idle-phase sample into the PWM on-time, where the star point
+sits near V_bus/2, the idle terminal swings about a reference the firmware
+already measures, and the clamps never conduct. TIM1 has spare compare channels
+(CC5/CC6), so the current sense keeps its counter-peak trigger. That is the one
+change that converts this negative result into a working zero-cross front end.
+
+Captures: `testresults/ms8-sixstep/` (7 speeds + the static Hi-Z proof).
+
 ## 2026-08-02 — session 15: session 14 committed; a build break it had been hiding; MS8 scheduled
 
 Short session: pick up two weeks cold, land the pending work, pick a direction.

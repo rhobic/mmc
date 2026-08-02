@@ -37,8 +37,12 @@ pub const THETA_ERR: u8 = 17;
 pub const VB_U: u8 = 18;
 pub const VB_V: u8 = 19;
 pub const VB_W: u8 = 20;
+/// Active six-step commutation sector, 0..5 (NaN-free; 0 when not commutating).
+/// Tells the host which phase is floating, so a BEMF trace can be split into
+/// driven and sensed segments without re-deriving it from the angle.
+pub const SECTOR: u8 = 21;
 
-pub const COUNT: usize = 21;
+pub const COUNT: usize = 22;
 
 /// Wire names, indexed by channel id; used as CSV headers by the host.
 pub const NAMES: [&str; COUNT] = [
@@ -63,6 +67,7 @@ pub const NAMES: [&str; COUNT] = [
     "vb_u",
     "vb_v",
     "vb_w",
+    "sector",
 ];
 
 /// Selection mask with every defined channel enabled.
