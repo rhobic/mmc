@@ -103,7 +103,7 @@ const CAL_TICKS: u32 = 8192;
 /// It must sit inside the on-window, i.e. below the commanded duty's compare
 /// value: at duty 0.07 that leaves (100 + 297)/170 MHz = 2.3 us before the
 /// high side turns off, and ADC2's four conversions take 1.79 us.
-const ONTIME_CCR5: u16 = 100;
+const ONTIME_CCR5_DEFAULT: u16 = 100;
 
 // Motor parameters measured on this bench (Stage F0 rotating I-f sweep,
 // `tools/fit_params.py`): flux 0.894 ± 0.04 mWb, apparent R 0.97 Ω
@@ -199,6 +199,7 @@ static PARAMS: [AtomicU32; param::COUNT] = [
     p32(SL_OMEGA_HANDOFF),
     p32(OMEGA_SLEW),
     p32(SL_IQ_LIMIT),
+    p32(ONTIME_CCR5_DEFAULT as f32),
 ];
 
 fn param_get(id: u8) -> f32 {
@@ -222,6 +223,9 @@ fn param_range(id: u8) -> Option<(f32, f32)> {
         param::OMEGA_ACCEL => (20.0, 5000.0),
         // Current ceiling: 1.2 A leaves 20% margin to the 1.5 A trips.
         param::IQ_LIMIT => (0.05, 1.2),
+        // Sample point, timer counts before the valley. 20 counts = 0.12 us;
+        // the upper bound keeps it inside a 50% duty on-window.
+        param::ONTIME_CCR5 => (20.0, 2000.0),
         _ => return None,
     })
 }
@@ -554,7 +558,7 @@ fn init_motor_peripherals() {
             w.set_ocm(0, vals::Ocm::PWM_MODE1);
             w.set_ocpe(0, true);
         });
-        TIM1.ccr5().modify(|w| w.set_ccr(ONTIME_CCR5));
+        TIM1.ccr5().modify(|w| w.set_ccr(ONTIME_CCR5_DEFAULT));
         TIM1.ccer().modify(|w| {
             for ch in 0..5 {
                 w.set_cce(ch, true);
@@ -731,7 +735,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 10, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 11, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -1176,6 +1180,9 @@ unsafe extern "C" fn ADC1_2() {
     let mut theta_err = 0.0f32;
 
     if s.mode != 0 {
+        // Sample point is a runtime param so it can be swept over the wire.
+        TIM1.ccr5()
+            .modify(|w| w.set_ccr(param_get(param::ONTIME_CCR5) as u16));
         // Six-step drives the enables itself; everything else wants all three
         // phases live (a previous six-step run may have left one Hi-Z).
         if s.mode != 5 && s.mode != 6 {
@@ -1346,8 +1353,18 @@ unsafe extern "C" fn ADC1_2() {
                 // Sensorless six-step. The idle phase is sampled during the
                 // PWM on-time (ADC2 on TIM1_TRGO2), where it swings about
                 // V_bus/2 — see docs/SIXSTEP.md for the identity.
-                let v_ref = s.vbus_filt * 0.5;
-                let v_float = vb_phase(sixstep::floating_phase(s.ss_sector));
+                // Reference is the MEASURED mid-point of the two driven
+                // terminals, not V_bus/2. The identity is
+                // v_f = (v_hi + v_lo)/2 + (back-EMF term), and on a real
+                // bridge v_lo is not 0 — the low-side switch and the shunt
+                // put it at i·(R_dson + R_shunt), 1.6 V at 1 A here. Using
+                // V_bus/2 leaves that as a reference error of ~0.7 V, which
+                // is half the back-EMF ramp at low speed and is what made
+                // one sector parity undetectable. Measuring both driven
+                // terminals cancels the drops exactly.
+                let (hi_i, lo_i, fl_i) = sixstep::TABLE[s.ss_sector];
+                let v_ref = 0.5 * (vb_phase(hi_i as usize) + vb_phase(lo_i as usize));
+                let v_float = vb_phase(fl_i as usize);
                 let duty = s.amp.clamp(0.0, MAX_DUTY);
 
                 if !s.ss_sensing {
@@ -1378,11 +1395,10 @@ unsafe extern "C" fn ADC1_2() {
                     s.omega = zc.omega_e();
                 }
 
-                let (hi, lo, float) = sixstep::TABLE[s.ss_sector];
                 duties = [0.0; 3];
-                duties[hi as usize] = duty;
-                duties[lo as usize] = 0.0;
-                stage_phases(!(1u8 << float) & 0b111);
+                duties[hi_i as usize] = duty;
+                duties[lo_i as usize] = 0.0;
+                stage_phases(!(1u8 << fl_i) & 0b111);
                 SIXSTEP_SECTOR.store(s.ss_sector as u8, Ordering::Relaxed);
                 AlphaBeta::default()
             } else if s.mode == 5 {

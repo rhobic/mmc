@@ -107,6 +107,39 @@ timing error on machines that have one.
 Either way, the crossing of `(v_hi + v_lo)/2` happens exactly when `e_f` crosses
 zero. That crossing is the measurement.
 
+### Use the measured mid-point, not V_bus/2
+
+It is tempting to substitute `v_hi = V_bus`, `v_lo = 0` and compare the idle
+terminal against `V_bus/2`. On a real bridge that is wrong, and it was wrong
+enough to break the drive.
+
+The low side is not at ground: the conducting switch and the current-sense shunt
+put it at `i·(R_dson + R_shunt)`. Measured on the bench at ~1 A, with the rotor
+held still so there is no back-EMF at all:
+
+```
+v_hi = 12.26 V     v_lo = 1.60 V     V_bus = 12.06 V
+measured mid = 6.93 V          V_bus/2 = 6.03 V
+idle terminal = 6.73 V   →  −0.20 V against the measured mid   (correct: no rotation)
+                            +0.70 V against V_bus/2            (a pure artefact)
+```
+
+A 0.70 V reference error would be harmless if the signal were large. It is not:
+the back-EMF ramp across one window is about 1.5 V at 10 Hz electrical, so the
+error is half the signal — enough to hold one sector parity entirely on one side
+of the threshold, which is exactly the half-blind behaviour the bench showed
+before this was fixed.
+
+**So compare against the measured average of the two driven terminals.** The
+drops cancel identically, because they appear in `v_hi` and `v_lo` themselves.
+This also beats the classic resistor-network "virtual neutral", which
+reconstructs a reference the bridge is not actually using and inherits any
+third harmonic the machine has.
+
+The cost is that the sense front end must be able to read the *driven* phases,
+not just the idle one, which constrains the divider ratio against the bus
+voltage.
+
 ### Which is why the sample point decides everything
 
 `(v_hi + v_lo)/2` is not a constant — it depends on where in the PWM period you
@@ -229,11 +262,22 @@ costs *per tick* to get that, which is the point of the whole methodology.
 | Freewheel sampling + clamp **fails**; on-time sampling fixes it | `freewheel_sampling_with_a_clamped_network_cannot_lock`, `on_time_sampling_rescues_the_same_clamped_network` |
 | Per-phase Hi-Z is real on hardware | bench, MS8 step 1: idle phase 2 mA vs ±485 mA driven |
 | Freewheel sampling carries no speed information on hardware | bench, MS8 step 1: flat over a 15× speed range |
+| On-time sampling puts the idle phase at the driven mid-point | bench, session 18: 12.85 V vs predicted 12.58 |
+| The sense network settles well inside the on-window | bench, session 19: flat ±0.02 V over 0.18–1.18 µs |
+| `V_bus/2` is the wrong reference; the measured mid is right | bench, session 19: +0.70 V vs −0.20 V artefact, rotor still |
+| Closed-loop commutation from measured crossings | bench, session 19: speed linear in duty, 18.6→52.6 rad/s el |
 
-Everything above the line is simulation; the last two rows are the bench. The
-one claim that is **modelled but not yet measured** is that moving the sample
-into the PWM on-time fixes it on real hardware. That is the next bench step, and
-the simulation exists so that it is the only thing left to find out.
+Everything above the line is simulation; the rows below it are the bench, and
+they now include the one claim that used to be modelled but unmeasured — moving
+the sample into the on-time does fix it on hardware, and the drive commutates on
+its own back-EMF.
+
+The gap that remains runs the other way. Two things the bench taught are **not
+yet in the simulation**: the switch and shunt drops that make `V_bus/2` the
+wrong reference, and the ADC clipping that follows from a fixed divider ratio.
+Until the model carries them, the regression suite cannot catch a regression in
+the fix — that is the next piece of simulation work, not the next piece of
+theory.
 
 ## 7. Keeping the two schemes apart
 

@@ -3,6 +3,57 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-02 — session 19: sensorless six-step runs closed-loop on hardware
+
+**Commutation is now timed by the motor's own back-EMF.** Bus dropped to 12 V,
+which bought both a wider PWM on-window and the torque headroom the 1.5 A limit
+had been denying.
+
+**The blocker was the reference, not the sense network.** A sample-point sweep
+settled it: `ontime_ccr5` became a runtime parameter (id 10) so the ADC trigger
+could be moved over the wire, and with the rotor held still the idle terminal
+reads **6.73 V at every sample point from 0.18 to 1.18 µs before the valley** —
+flat to ±0.02 V. The network settles fine; the RC-settling hypothesis is dead.
+
+What the sweep exposed instead was a **constant +0.70 V offset from V_bus/2**.
+With no rotation there is no back-EMF, so that is pure artefact:
+
+| | |
+|---|---|
+| v_hi (driven high) | 12.26 V |
+| v_lo (driven low) | **1.60 V**, not 0 — switch + shunt drop at ~1 A |
+| measured mid | 6.93 V |
+| V_bus/2 | 6.03 V |
+| idle vs measured mid | **−0.20 V** (correct) |
+| idle vs V_bus/2 | **+0.70 V** (artefact) |
+
+The back-EMF ramp across a window is ~1.5 V at 10 Hz el, so a 0.70 V reference
+error is half the signal — enough to keep one sector parity permanently on one
+side of the threshold. **That is the parity asymmetry from session 18,
+explained and fixed:** compare against the measured `(v_hi + v_lo)/2` instead,
+where the drops cancel identically. Theory updated in [SIXSTEP.md](SIXSTEP.md).
+
+**Closed loop then worked (fw v11).** Commanding the same 15 Hz handoff at four
+different duties, the drive settles at four different speeds — which a forced
+drive could not do:
+
+| duty | el rev/s | ω electrical | current |
+|---|---|---|---|
+| 0.08 | 2.95 | 18.6 rad/s | 0.214 A |
+| 0.11 | 4.80 | 30.1 rad/s | 0.209 A |
+| 0.14 | 6.58 | 41.4 rad/s | 0.215 A |
+| 0.17 | 8.37 | 52.6 rad/s | 0.221 A |
+
+Speed is linear in duty (11.3 ± 0.15 rad/s el per 0.03 duty) at roughly constant
+current, which is the signature of a voltage-fed machine self-commutating
+against a friction load. Ten-second runs, no faults.
+
+**Next:** a duty→speed loop on the device, then MS8 step 5, the FOC-vs-six-step
+comparison. The sim should also grow the switch/shunt drop so this failure mode
+is covered by a regression test rather than only by this log.
+
+Captures: `testresults/ms8-closedloop/`.
+
 ## 2026-08-02 — session 18: on-time sampling on hardware — back-EMF is there, closed loop is not yet
 
 **The MS8 step 1 finding is superseded: the idle phase now carries back-EMF.**

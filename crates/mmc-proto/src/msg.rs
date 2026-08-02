@@ -77,7 +77,14 @@ pub mod param {
     /// the commanded amplitude, the startup current, and the speed loop's
     /// i_q authority. Keep under the 1.5 A trips with margin.
     pub const IQ_LIMIT: u8 = 9;
-    pub const COUNT: usize = 10;
+    /// Six-step idle-phase sample point, in timer counts before the PWM
+    /// counter valley (TIM1 CCR5). The valley is the middle of the high-side
+    /// on-time, so this places the ADC trigger inside the on-window; it must
+    /// stay below the commanded duty's compare value or the sample lands
+    /// while the bridge is freewheeling. Larger values sample earlier and
+    /// leave the sense network less time to settle.
+    pub const ONTIME_CCR5: u8 = 10;
+    pub const COUNT: usize = 11;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -89,6 +96,7 @@ pub mod param {
         "sl_handoff",
         "omega_accel",
         "iq_limit",
+        "ontime_ccr5",
     ];
 }
 
