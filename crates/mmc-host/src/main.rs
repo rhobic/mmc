@@ -22,8 +22,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 
 use scenario::{
-    print_summary, run_current_step, run_sensorless, RunSpec, SensorlessConfig, SensorlessSpec,
-    StepConfig,
+    print_summary, run_current_step, run_sensorless, run_sixstep, RunSpec, SensorlessConfig,
+    SensorlessSpec, SixStepConfig, SixStepSpec, StepConfig,
 };
 
 #[derive(Parser)]
@@ -249,6 +249,16 @@ struct SimArgs {
     /// Additional load stepped in at 60% of a sensorless run [N·m].
     #[arg(long, default_value_t = 0.0)]
     load_step: f32,
+    /// Six-step: model a sinusoidal machine instead of a trapezoidal one.
+    #[arg(long)]
+    sinusoidal: bool,
+    /// Six-step: sample the idle phase in the freewheel instead of the PWM
+    /// on-time — reproduces the sample point MS8 step 1 measured on hardware.
+    #[arg(long)]
+    freewheel_sample: bool,
+    /// Six-step: model a sense network that cannot read below ground.
+    #[arg(long)]
+    clamp_sense: bool,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -257,6 +267,8 @@ enum Scenario {
     CurrentStep,
     /// I-f startup → observer handoff → sensorless speed loop (MS4).
     SensorlessSpeed,
+    /// Forced commutation → back-EMF zero-cross sensing → duty speed loop (MS8).
+    SixStep,
 }
 
 #[derive(clap::Args)]
@@ -317,6 +329,28 @@ fn main() -> std::io::Result<()> {
                     },
                 };
                 let result = run_sensorless(&spec, &args.out)?;
+                println!("wrote {} samples to {}", result.samples, args.out.display());
+                for note in &result.notes {
+                    println!("{note}");
+                }
+                Ok(())
+            }
+            Scenario::SixStep => {
+                let spec = SixStepSpec {
+                    title: "six-step",
+                    description: "Ad-hoc six-step run.",
+                    order: 100,
+                    cfg: SixStepConfig {
+                        duration: args.duration.max(1.0),
+                        omega_e: args.omega_e,
+                        load: args.load,
+                        load_step: args.load_step,
+                        trapezoidal: !args.sinusoidal,
+                        on_time: !args.freewheel_sample,
+                        clamp: args.clamp_sense,
+                    },
+                };
+                let result = run_sixstep(&spec, &args.out)?;
                 println!("wrote {} samples to {}", result.samples, args.out.display());
                 for note in &result.notes {
                     println!("{note}");

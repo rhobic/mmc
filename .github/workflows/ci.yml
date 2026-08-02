@@ -32,6 +32,19 @@ jobs:
       - run: cargo build --target thumbv7em-none-eabihf -p mmc-core -p mmc-hal -p mmc-proto
       - run: cargo build --target thumbv6m-none-eabi -p mmc-core -p mmc-hal -p mmc-proto
 
+  # Each control methodology must build on its own: the low-resource scaling
+  # story is only real if a target can take six-step without FOC, or vice versa.
+  core-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv6m-none-eabi
+      - run: cargo build -p mmc-core --no-default-features --features foc
+      - run: cargo build -p mmc-core --no-default-features --features sixstep
+      - run: cargo build -p mmc-core --no-default-features --features sixstep --target thumbv6m-none-eabi
+
   firmware-g0b1:
     runs-on: ubuntu-latest
     steps:

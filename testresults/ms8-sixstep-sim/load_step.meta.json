@@ -1,0 +1,13 @@
+{
+  "command": "mmc-host sim --scenario six-step --duration 3 --omega-e 600 --load 0 --load-step 0.003",
+  "description": "Ad-hoc six-step run.",
+  "final_speed_rpm": 804.30078125,
+  "notes": [
+    "Six-step: lock at 0.194 s; commutation within 1 sector(s) of truth over the settled half, tracking 100.0% of ticks.",
+    "Speed measured from the zero-cross interval differs from sim truth by 1.19% on average; final 590 rad/s elec (target 600)."
+  ],
+  "order": 100,
+  "samples": 60000,
+  "title": "six-step",
+  "unix_time": 1785702752
+}

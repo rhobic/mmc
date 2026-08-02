@@ -3,6 +3,73 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-02 — session 17: MS8 steps 2–3 — six-step in simulation, and the theory written down
+
+**The control concept is now built, tested and documented; the one thing left
+to learn is on the bench.** [SIXSTEP.md](SIXSTEP.md) carries the derivations.
+
+**`mmc-core::sixstep`** — commutation table, sector mapping, back-EMF
+zero-cross detector with blanking and the 30° timer, and a forced-commutation
+startup ramp. Speed falls out of the crossing interval (`ω = (π/3)/T`) as a
+measurement, not a model output. 8 unit tests, including one that proves the
+table energises the maximum-torque pair in every sector and one that proves the
+idle phase's back-EMF is zero at its window centre — the assumption the whole
+30° rule rests on.
+
+**`mmc-sim::phase_motor`** — a phase-domain machine model, because the dq model
+assumes all three phases are driven, which is exactly what six-step breaks.
+Carries one line current, exposes the idle terminal voltage, and supports both
+sinusoidal and trapezoidal back-EMF.
+
+**The sensing identity, derived and implemented exactly:**
+`v_f = (v_hi + v_lo)/2 − (e_hi + e_lo)/2 + e_f`. Two things fell out that were
+not obvious going in:
+- **An ideal 120° trapezoid does not sum to zero** — it carries a third
+  harmonic, so the tidy `1.5·e_f` form is the *sinusoidal* special case, not a
+  general law. Anything assuming the sum vanishes (a resistor virtual neutral)
+  inherits that harmonic as timing error.
+- **The flat top cancels it anyway**, because through each 60° window the
+  conducting pair sits on opposite flat tops, so `e_hi + e_lo = 0` exactly and
+  `v_f = mid + e_f`. That is what the flat top is *for* — a nicer result than
+  the one being replaced.
+
+**The A/B that justifies the next hardware change**, same machine, same clamp,
+only the sample point differing:
+
+| sample point | lock | tracking | speed error | final speed |
+|---|---|---|---|---|
+| freewheel (today's trigger) | never | 50.6% | 324% | 94 rad/s el |
+| PWM on-time | 0.305 s | 100% | 1.52% | 592 rad/s el |
+
+Two paired tests enforce it: the freewheel case asserts the drive **fails** (if
+it ever passes, the model has stopped describing the hardware) and the on-time
+case asserts it works.
+
+**Control-loop defects found and fixed by the sim**, both real rather than
+cosmetic: the duty loop's integral corner sat *above* its proportional
+crossover (guaranteed hunting), and the external duty clamp wound the
+integrator up on every deceleration. Retuned to a 9:1 corner ratio with
+back-calculation anti-windup; both machines now settle within 1.5% of target.
+
+**Firmware corrected by the shared code.** The core's alignment test showed the
+firmware's own sector formula was offset by 30° electrical — it used `θ + π`
+where the max-torque alignment is `θ + 5π/6`. Firmware now calls
+`sixstep::sector_of` and indexes `sixstep::TABLE`, so firmware and simulator
+cannot drift apart on commutation order or alignment again.
+
+**Clean separation of methodologies.** `mmc-core` gates `foc` and `sixstep`
+behind cargo features (both default). Either builds alone, and a new CI job
+proves it — including six-step-only on thumbv6m, which is the low-resource
+scaling story made concrete.
+
+**Captures:** `testresults/ms8-sixstep-sim/` — trapezoidal and sinusoidal
+baselines, a load step, and the sample-point A/B pair. 60 runs on the dashboard.
+
+**Next:** the only unmeasured claim is that moving the sample into the PWM
+on-time fixes it on real hardware. That needs the second ADC trigger (TIM1
+CC5/CC6 so the current sense keeps its counter-peak trigger) and is the next
+bench session.
+
 ## 2026-08-02 — session 16: MS8 step 1 — the idle phase is NOT readable at the current sample point
 
 **Answered the question that gates six-step, on hardware, with a measurement

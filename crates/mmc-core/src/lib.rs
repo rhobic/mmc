@@ -10,14 +10,29 @@
 
 #![no_std]
 
+// Always available: the arithmetic and building blocks both control
+// methodologies are made of.
 pub mod angle;
-pub mod current_loop;
-pub mod foc;
 pub mod math;
-pub mod observer;
 pub mod pi;
-pub mod probe;
-pub mod sensorless;
-pub mod svpwm;
 pub mod transforms;
 pub mod tuning;
+
+// Field-oriented control and the sensorless stack built on it.
+#[cfg(feature = "foc")]
+pub mod current_loop;
+#[cfg(feature = "foc")]
+pub mod foc;
+#[cfg(feature = "foc")]
+pub mod observer;
+#[cfg(feature = "foc")]
+pub mod probe;
+#[cfg(feature = "foc")]
+pub mod sensorless;
+#[cfg(feature = "foc")]
+pub mod svpwm;
+
+// Six-step trapezoidal commutation. Independent of `foc`: a low-resource
+// target can build this alone, which is the point of the split.
+#[cfg(feature = "sixstep")]
+pub mod sixstep;

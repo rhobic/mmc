@@ -162,7 +162,7 @@ sync — normal for motor control in any language.
   the hardware leg needs an encoder or the motor 2's hall sensors wired to the
   inverter shield's connector. MS8 runs first.
 - **MS8 — Six-step / trapezoidal drive** *(started 2026-08-02, out of order —
-  see MS7)*: the second control methodology from the low-resource scaling
+  see MS7; steps 1–3 done, theory in [SIXSTEP.md](SIXSTEP.md))*: the second control methodology from the low-resource scaling
   story, gated behind a `mmc-core` cargo feature. Sequence:
   1. **Bench experiment first** — confirm the floating phase is *readable*.
      Session 13 characterized the BEMF net with all three phases switching;

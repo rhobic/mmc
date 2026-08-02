@@ -13,7 +13,10 @@ use mmc_core::transforms::{Abc, Dq};
 use mmc_core::tuning::current_pi_gains;
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
 use mmc_sim::analysis::{step_metrics, StepMetrics};
-use mmc_sim::{PmsmParams, SensorlessRunCfg, SensorlessSim, TruthAngle, VirtualMotor};
+use mmc_sim::{
+    BemfShape, Mode, PmsmParams, SamplePoint, SensorlessRunCfg, SensorlessSim, SixStepCfg,
+    SixStepSim, TruthAngle, VirtualMotor,
+};
 
 /// Parameters of a q-axis current-step run.
 #[derive(Copy, Clone, Debug)]
@@ -399,4 +402,184 @@ pub fn print_summary(spec: &RunSpec, out: &Path, r: &RunResult, verbose: bool) {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------- six-step
+
+/// Six-step run configuration.
+pub struct SixStepConfig {
+    pub duration: f32,
+    /// Speed target [rad/s electrical].
+    pub omega_e: f32,
+    /// Steady load torque [N·m].
+    pub load: f32,
+    /// Additional load stepped in at 60% of the run [N·m].
+    pub load_step: f32,
+    /// Trapezoidal (the machine six-step is designed for) or sinusoidal
+    /// (what the bench motors actually are).
+    pub trapezoidal: bool,
+    /// Sample the idle phase during the PWM on-time. False reproduces the
+    /// freewheel sample point the bench measured in MS8 step 1.
+    pub on_time: bool,
+    /// Model a sense network that cannot read below ground.
+    pub clamp: bool,
+}
+
+impl Default for SixStepConfig {
+    fn default() -> Self {
+        Self {
+            duration: 2.5,
+            omega_e: 600.0,
+            load: 0.0,
+            load_step: 0.0,
+            trapezoidal: true,
+            on_time: true,
+            clamp: false,
+        }
+    }
+}
+
+pub struct SixStepSpec<'a> {
+    pub title: &'a str,
+    pub description: &'a str,
+    pub order: u32,
+    pub cfg: SixStepConfig,
+}
+
+/// Run six-step commutation (forced ramp → back-EMF zero-cross sensing →
+/// duty speed loop) against the phase-domain motor and record every channel.
+pub fn run_sixstep(spec: &SixStepSpec, out: &Path) -> std::io::Result<RunResult> {
+    let cfg = &spec.cfg;
+    let run_cfg = SixStepCfg {
+        shape: if cfg.trapezoidal {
+            BemfShape::Trapezoidal
+        } else {
+            BemfShape::Sinusoidal
+        },
+        sample_at: if cfg.on_time {
+            SamplePoint::OnTime
+        } else {
+            SamplePoint::Freewheel
+        },
+        clamp_negative: cfg.clamp,
+        ..SixStepCfg::bench(cfg.omega_e)
+    };
+    let mut sim = SixStepSim::new(run_cfg);
+    sim.set_load(cfg.load);
+    let steps = (cfg.duration * run_cfg.ctrl_freq) as usize;
+    let vbus = run_cfg.vbus;
+
+    if let Some(dir) = out.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut writer = BufWriter::new(File::create(out)?);
+    writeln!(
+        writer,
+        "t,sector,sector_true,sector_err,duty,i_line,v_float,v_ref,omega_e_meas,omega_e_true,theta_e,vbus,state"
+    )?;
+
+    let mut lock_t = f32::NAN;
+    let mut worst_err = 0i32;
+    let mut speed_err_sum = 0.0f64;
+    let mut speed_err_n = 0u32;
+    let mut tracked = 0u32;
+    let mut counted = 0u32;
+    let mut last = None;
+    for _ in 0..steps {
+        let s = sim.step();
+        if cfg.load_step != 0.0 && s.t >= 0.6 * cfg.duration {
+            sim.set_load(cfg.load + cfg.load_step);
+        }
+        if lock_t.is_nan() && s.locked {
+            lock_t = s.t;
+        }
+        // Judge only the settled second half, as the tests do.
+        if s.t > cfg.duration * 0.5 {
+            worst_err = worst_err.max(s.sector_err.abs());
+            counted += 1;
+            if s.sector_err.abs() <= 1 {
+                tracked += 1;
+            }
+            if s.omega_e_true.abs() > 1.0 {
+                speed_err_sum += ((s.omega_zc - s.omega_e_true) / s.omega_e_true).abs() as f64;
+                speed_err_n += 1;
+            }
+        }
+        let state = match s.mode {
+            Mode::Ramp => 6.0,
+            Mode::Sensing => 1.0,
+            Mode::Lost => 8.0,
+        };
+        writeln!(
+            writer,
+            "{},{},{},{},{},{},{},{},{},{},{},{vbus},{state}",
+            s.t,
+            s.sector,
+            s.sector_true,
+            s.sector_err,
+            s.duty,
+            s.i_line,
+            s.v_float,
+            s.v_ref,
+            s.omega_zc,
+            s.omega_e_true,
+            s.theta_e_true,
+        )?;
+        last = Some(s);
+    }
+    writer.flush()?;
+
+    let last = last.expect("at least one step");
+    let tracked_pct = 100.0 * tracked as f32 / counted.max(1) as f32;
+    let speed_err_pct = 100.0 * (speed_err_sum / speed_err_n.max(1) as f64);
+    let notes = vec![
+        format!(
+            "Six-step: lock at {lock_t:.3} s; commutation within {worst_err} sector(s) of truth over the settled half, tracking {tracked_pct:.1}% of ticks."
+        ),
+        format!(
+            "Speed measured from the zero-cross interval differs from sim truth by {speed_err_pct:.2}% on average; final {:.0} rad/s elec (target {}).",
+            last.omega_e_true, cfg.omega_e
+        ),
+    ];
+
+    let result = RunResult {
+        samples: steps,
+        metrics: None,
+        final_speed: Some(sim.motor.omega_m),
+        notes,
+    };
+    write_sixstep_meta(spec, out, &result)?;
+    Ok(result)
+}
+
+fn write_sixstep_meta(
+    spec: &SixStepSpec,
+    csv_path: &Path,
+    result: &RunResult,
+) -> std::io::Result<()> {
+    let cfg = &spec.cfg;
+    let meta = serde_json::json!({
+        "title": spec.title,
+        "description": spec.description,
+        "order": spec.order,
+        "command": format!(
+            "mmc-host sim --scenario six-step --duration {} --omega-e {} --load {}{}{}{}",
+            cfg.duration,
+            cfg.omega_e,
+            cfg.load,
+            if cfg.load_step != 0.0 { format!(" --load-step {}", cfg.load_step) } else { String::new() },
+            if cfg.trapezoidal { "" } else { " --sinusoidal" },
+            if cfg.on_time { "" } else { " --freewheel-sample" },
+        ),
+        "unix_time": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "samples": result.samples,
+        "final_speed_rpm": result.final_speed.map(|w| w * 60.0 / core::f32::consts::TAU),
+        "notes": result.notes,
+    });
+    let path = csv_path.with_extension("meta.json");
+    std::fs::write(path, serde_json::to_string_pretty(&meta)?)?;
+    Ok(())
 }

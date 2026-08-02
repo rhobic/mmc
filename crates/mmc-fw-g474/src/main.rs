@@ -54,6 +54,7 @@ use mmc_core::observer::{FluxObserver, FluxObserverCfg};
 use mmc_core::pi::PiGains;
 use mmc_core::probe;
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
+use mmc_core::sixstep;
 use mmc_core::svpwm::svpwm;
 use mmc_core::transforms::{clarke, inverse_park, park, Abc, AlphaBeta, Dq};
 use mmc_core::tuning::current_pi_gains;
@@ -93,8 +94,6 @@ const POLE_PAIRS: f32 = 7.0;
 /// Drive shuts off if the host goes silent this long (capture keep-alive pings).
 const DEADMAN_TICKS: u32 = 2 * 20_000;
 const CAL_TICKS: u32 = 8192;
-/// Electrical sectors per radian: 6 sectors over 2π.
-const SECTOR_PER_RAD: f32 = 6.0 / (2.0 * core::f32::consts::PI);
 
 // Motor parameters measured on this bench (Stage F0 rotating I-f sweep,
 // `tools/fit_params.py`): flux 0.894 ± 0.04 mWb, apparent R 0.97 Ω
@@ -917,17 +916,6 @@ fn stage_phases(mask: u8) {
     });
 }
 
-/// Six-step commutation table indexed by electrical sector (θ/60°).
-/// Each entry is (phase driven to the high side, phase held low, phase left
-/// floating), phases numbered U=0, V=1, W=2.
-const SIXSTEP: [(u8, u8, u8); 6] = [
-    (0, 1, 2), // U+ V- W float
-    (0, 2, 1), // U+ W- V float
-    (1, 2, 0), // V+ W- U float
-    (1, 0, 2), // V+ U- W float
-    (2, 0, 1), // W+ U- V float
-    (2, 1, 0), // W+ V- U float
-];
 
 fn set_duties(d: [f32; 3]) {
     for (ch, duty) in d.iter().enumerate() {
@@ -1287,8 +1275,11 @@ unsafe extern "C" fn ADC1_2() {
                 // is Hi-Z. `amp` is the high-side duty (0..1), not volts.
                 // Sector advances with the forced angle, so the rotor is
                 // dragged exactly as in open-loop voltage mode.
-                let sector = ((s.theta + core::f32::consts::PI) * SECTOR_PER_RAD) as usize % 6;
-                let (hi, lo, float) = SIXSTEP[sector];
+                // Sector mapping and table are shared with the simulator via
+                // mmc_core::sixstep, so commutation order and alignment cannot
+                // drift apart between the two.
+                let sector = sixstep::sector_of(s.theta);
+                let (hi, lo, float) = sixstep::TABLE[sector];
                 let duty = s.amp.clamp(0.0, MAX_DUTY);
                 duties = [0.0; 3];
                 duties[hi as usize] = duty;
