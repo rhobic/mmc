@@ -173,7 +173,10 @@ mod tests {
                 sc += libm::cos(a);
                 ss += libm::sin(a);
             }
-            assert!(sc.abs() < 1e-5 && ss.abs() < 1e-5, "harmonic {k}: ({sc}, {ss})");
+            assert!(
+                sc.abs() < 1e-5 && ss.abs() < 1e-5,
+                "harmonic {k}: ({sc}, {ss})"
+            );
         }
     }
 

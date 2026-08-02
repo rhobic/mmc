@@ -236,7 +236,10 @@ pub fn run(link: &mut Link, dir: &Path, opts: &ProfileOpts) -> std::io::Result<(
         .collect();
     selected.retain(|s| opts.redo || !stage_done(&state, s.id));
     for s in &done {
-        println!("profile: {} already completed - skipping (--redo reruns)", s.id);
+        println!(
+            "profile: {} already completed - skipping (--redo reruns)",
+            s.id
+        );
     }
     if selected.is_empty() {
         println!("profile: nothing to do.");
@@ -267,13 +270,24 @@ pub fn run(link: &mut Link, dir: &Path, opts: &ProfileOpts) -> std::io::Result<(
     }
 
     let ids: Vec<&str> = selected.iter().map(|s| s.id).collect();
-    run_stages(link, dir, &ids, &opts.tuning, &mut |line| println!("{line}"))?;
+    run_stages(link, dir, &ids, &opts.tuning, &mut |line| {
+        println!("{line}")
+    })?;
 
     println!();
-    println!("profile: done. state -> {}", dir.join("profile_state.json").display());
-    println!("  fit parameters:  python tools/profile.py {}", dir.display());
+    println!(
+        "profile: done. state -> {}",
+        dir.join("profile_state.json").display()
+    );
+    println!(
+        "  fit parameters:  python tools/profile.py {}",
+        dir.display()
+    );
     if selected.iter().any(|s| s.id == "saliency") {
-        println!("  saliency verdict: python tools/saliency.py {}", dir.display());
+        println!(
+            "  saliency verdict: python tools/saliency.py {}",
+            dir.display()
+        );
     }
     println!(
         "  apply:           mmc-host apply --serial auto --baud 1000000 --profile {}/profile.json",
@@ -338,7 +352,8 @@ pub fn run_stages(
 fn snapshot_device(link: &mut Link, state: &mut serde_json::Value, log: &mut dyn FnMut(&str)) {
     let t = Duration::from_secs(2);
     let mut dev = serde_json::Map::new();
-    if let Ok(Message::Info(info)) = link.request(&Message::GetInfo, |m| matches!(m, Message::Info(_)), t)
+    if let Ok(Message::Info(info)) =
+        link.request(&Message::GetInfo, |m| matches!(m, Message::Info(_)), t)
     {
         dev.insert("name".into(), info.name_str().into());
         dev.insert("fw".into(), info.fw_version.into());
@@ -362,7 +377,9 @@ fn snapshot_device(link: &mut Link, state: &mut serde_json::Value, log: &mut dyn
         }
     }
     if let Some(pp) = params.get("pole_pairs") {
-        log(&format!("device: pole_pairs = {pp} (used by the kt/J fits)"));
+        log(&format!(
+            "device: pole_pairs = {pp} (used by the kt/J fits)"
+        ));
     }
     dev.insert("params".into(), params.into());
     state["device"] = dev.into();
@@ -418,7 +435,9 @@ fn stage_accel(
     amps: f32,
     log: &mut dyn FnMut(&str),
 ) -> std::io::Result<String> {
-    log(&format!("  sensorless accel {lo} -> {hi} rad/s el at {amps} A (~8 s)"));
+    log(&format!(
+        "  sensorless accel {lo} -> {hi} rad/s el at {amps} A (~8 s)"
+    ));
     let title = format!("Accel run: sensorless {lo} -> {hi} rad/s el");
     capture::run(
         link,
@@ -427,14 +446,8 @@ fn stage_accel(
             mask: mmc_proto::channel::ALL,
             duration: 8.0,
             iq: None,
-            drive: Some(DriveMode::Sensorless {
-                amps,
-                omega_e: lo,
-            }),
-            drive_step: Some(DriveMode::Sensorless {
-                amps,
-                omega_e: hi,
-            }),
+            drive: Some(DriveMode::Sensorless { amps, omega_e: lo }),
+            drive_step: Some(DriveMode::Sensorless { amps, omega_e: hi }),
             title: &title,
             description: "Profiler inertia/friction input: i_q during the \
                           500 rad/s^2 reference slew vs the steady levels.",

@@ -36,7 +36,10 @@ pub struct PanelCfg {
 enum Cmd {
     Send(Message),
     RefreshParams,
-    SetParam { id: u8, value: f32 },
+    SetParam {
+        id: u8,
+        value: f32,
+    },
     RunProfile {
         stages: Vec<String>,
         tuning: crate::profile::StageTuning,
@@ -74,13 +77,14 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
         |m| matches!(m, Message::Pong { nonce: 7 }),
         t,
     )?;
-    let (device, r_path) = match link.request(&Message::GetInfo, |m| matches!(m, Message::Info(_)), t)? {
-        Message::Info(info) => (
-            format!("{} ({:?})", info.name_str(), info.kind),
-            crate::profile::r_drive_path(info.kind),
-        ),
-        _ => unreachable!(),
-    };
+    let (device, r_path) =
+        match link.request(&Message::GetInfo, |m| matches!(m, Message::Info(_)), t)? {
+            Message::Info(info) => (
+                format!("{} ({:?})", info.name_str(), info.kind),
+                crate::profile::r_drive_path(info.kind),
+            ),
+            _ => unreachable!(),
+        };
     let set = Message::SetTelemetry {
         divider: cfg.divider,
         mask: channel::ALL,
@@ -182,7 +186,8 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
                 Cmd::ApplyProfile => {
                     let path = cfg.profile_dir.join("profile.json");
                     let msg = match crate::profile::apply(&mut link, &path, false) {
-                        Ok(()) => "profile applied and verified — takes effect at next drive start".to_string(),
+                        Ok(()) => "profile applied and verified — takes effect at next drive start"
+                            .to_string(),
                         Err(e) => format!("apply failed: {e}"),
                     };
                     shared.lock().unwrap().plog.push(msg);
@@ -492,7 +497,11 @@ fn run_profile(
 /// directory, exactly like the CLI usage they wrap.
 fn run_fit(script: &str, dir: &std::path::Path, log: &mut dyn FnMut(&str)) {
     log(&format!("$ python {script} {}", dir.display()));
-    match std::process::Command::new("python").arg(script).arg(dir).output() {
+    match std::process::Command::new("python")
+        .arg(script)
+        .arg(dir)
+        .output()
+    {
         Ok(out) => {
             for l in String::from_utf8_lossy(&out.stdout).lines() {
                 log(l);
@@ -520,7 +529,9 @@ fn read_params(link: &mut Link, shared: &Arc<Mutex<Shared>>) {
             },
             t,
         ) {
-            Ok(Message::ParamValue { value, .. }) => shared.lock().unwrap().params[id as usize] = value,
+            Ok(Message::ParamValue { value, .. }) => {
+                shared.lock().unwrap().params[id as usize] = value
+            }
             Ok(Message::Nak { .. }) => {
                 shared.lock().unwrap().param_status = "device has no runtime parameters".into();
                 return;

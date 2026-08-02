@@ -281,7 +281,11 @@ impl SimControl {
     fn step(&mut self, rig: &mut VirtualMotor) -> StepOut {
         let dt = self.ctrl_dt;
         let [ia, ib, ic] = rig.phase_currents();
-        let i_abc = Abc { a: ia, b: ib, c: ic };
+        let i_abc = Abc {
+            a: ia,
+            b: ib,
+            c: ic,
+        };
         let vbus = rig.vbus().max(1.0);
         let i_ab = clarke(i_abc);
 
@@ -361,7 +365,11 @@ impl SimControl {
                                     1.0 / self.ctrl_dt,
                                 ));
                             }
-                            let v = if probe::sal_level_is_high(t, half) { v_b } else { v_a };
+                            let v = if probe::sal_level_is_high(t, half) {
+                                v_b
+                            } else {
+                                v_a
+                            };
                             (probe::sal_angle(t, half), v)
                         } else {
                             let half = t as u32 / PROBE_HALF_TICKS;

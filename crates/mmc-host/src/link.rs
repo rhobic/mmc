@@ -88,7 +88,10 @@ impl Link {
     fn wait_ready(&mut self, deadline: Instant) -> std::io::Result<()> {
         while Instant::now() < deadline {
             if self.send(&Message::Ping { nonce: 0xA5 }).is_err() {
-                return Err(std::io::Error::new(ErrorKind::NotConnected, "port went away"));
+                return Err(std::io::Error::new(
+                    ErrorKind::NotConnected,
+                    "port went away",
+                ));
             }
             if let Ok(Some(Message::Pong { .. })) = self.recv(Duration::from_millis(300)) {
                 return Ok(());
