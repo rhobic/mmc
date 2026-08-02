@@ -74,3 +74,8 @@ from whatever CSVs are in the tree — open it in a browser. New scenario groups
 - SI units throughout; angles in radians, electrical unless suffixed `_m`.
 - Amplitude-invariant Clarke transform (the 2/3 convention).
 - Torque `T = 1.5·p·(ψ·i_q + (L_d−L_q)·i_d·i_q)`.
+
+## License
+
+Dual-licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),
+at your option.
