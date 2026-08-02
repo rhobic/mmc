@@ -755,7 +755,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 13, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 14, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -1496,7 +1496,13 @@ unsafe extern "C" fn ADC1_2() {
         // Observer update from what was applied and measured. In the forced
         // modes it runs in shadow and theta_err is the (wrong-frame) hang
         // angle; in sensorless mode theta_err is the one-tick innovation.
-        if let Some(obs) = s.obs.as_mut() {
+        //
+        // Six-step never feeds it: one phase current is unmeasured by
+        // construction and the applied vector is not a rotating one, so the
+        // estimate would be meaningless. Skipping it is also most of why
+        // six-step costs less per tick than FOC.
+        let observer_runs = s.mode != 5 && s.mode != 6;
+        if let Some(obs) = s.obs.as_mut().filter(|_| observer_runs) {
             obs.update(i_ab, v_ab, CTRL_DT);
             theta_est = obs.electrical_angle();
             omega_est = obs.electrical_velocity();

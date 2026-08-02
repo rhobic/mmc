@@ -3,6 +3,61 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-02 — session 21: MS8 step 5 — ISR cost measured; FOC path blocked on hardware
+
+**One axis of the comparison completed, one blocked by a hardware fault that
+needs a scope.**
+
+**Found first: the flux observer was running inside six-step**, fed a zero
+voltage vector, producing a meaningless estimate. It is now gated off for both
+six-step modes (fw v14) — one phase current is unmeasured by construction and
+the applied vector is not a rotating one, so there is nothing for it to
+estimate. Worth 842 cycles a tick, and it is most of why six-step costs less
+than FOC.
+
+**ISR worst case by scheme** (DWT counter at `ISR_MAX_CYCLES`, 170 MHz, 20 kHz
+loop, 8500-cycle budget):
+
+| scheme | cycles | µs | % of tick | marginal over idle |
+|---|---|---|---|---|
+| idle, no drive | 586 | 3.45 | 6.9% | — |
+| FOC current loop (I-f) | 4061 | 23.89 | 47.8% | 3487 |
+| six-step closed loop | 2653 | 15.61 | 31.2% | 2079 |
+
+**Six-step costs 35% less per tick, and 41% less in control-specific work.**
+Worth stating plainly: that is a good deal less than the "two Park/Clarke pairs,
+two PIs and SVPWM versus a table lookup" framing implies. Fixed overhead — ADC
+reads, protection checks, the 24-channel telemetry snapshot — is 586 cycles
+before any control runs, and this six-step implementation is unoptimised float
+arithmetic with divides in the crossing timer.
+
+**BLOCKER: every FOC-path drive mode produces essentially no phase current at
+12 V, while six-step runs normally.** Measured, not inferred:
+
+- open-loop voltage (SVPWM), 1.5 V commanded: duties correct at 0.500 ± 0.108
+  across all three phases, a **2.48 V** differential, `v_d` exactly 1.500 —
+  and **0.004 A**.
+- I-f: same, and then faults `fault_drv` after ~50 ms, which is the current loop
+  winding up against current that never arrives.
+- six-step, same session, same rig: **0.221 A**, runs clean.
+- Bus steady at 12.04 V throughout, no sag. MOE set, all three enables high,
+  `BDTR = 0x8000`.
+
+Ruled out along the way: it is not an aftereffect of a six-step run (reproduced
+from a clean reset), not supply sag, not the modulator, and **not the new CC5
+trigger** — TIM1 `CCR5 = 0x64`, `CCMR3 = 0x68` (OC5 in PWM mode 1 with preload)
+read back correctly once read at the right addresses. *Note for next time: this
+PAC puts CCR5 at offset 0x48 and CCMR3 at 0x50, not the 0x58/0x54 the reference
+manual numbering suggests — reading the wrong addresses cost a detour.*
+
+FOC has not been run since the supply was 25 V, so this may predate today
+entirely. Next step is physical: scope the three phase outputs under SVPWM to
+see whether the bridge is switching at all, and check the motor connection and
+the driver's own state.
+
+**Next:** unblock the FOC path, then finish step 5 with the torque-quality half
+of the comparison (current and speed ripple at matched electrical speed).
+
 ## 2026-08-02 — session 20: six-step regulates speed on device; the back-EMF sensing floor measured
 
 **Closed the loop twice over: the simulation now covers the reference fix, and
