@@ -11,3 +11,7 @@ testresults/panel-profile/
 
 # Cygwin/MSYS crash dumps from the bash tooling.
 *.stackdump
+
+# Vendor hardware PDFs: freely downloadable but not ours to redistribute.
+# See hw/README.md for the download links.
+hw/*.pdf
