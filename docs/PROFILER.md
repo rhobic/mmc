@@ -39,6 +39,26 @@ like any fault; and the blend now **tapers the startup current adaptively**
 (the ramp's hang angle measures the load, so a light load tapers hard to kill
 the handoff kick while a heavy load keeps full current).
 
+## Persisting parameters to flash
+
+All ten runtime params live in RAM and reset to firmware defaults on
+power-cycle **unless** persisted. Once a motor's profile is dialed in:
+
+- `mmc-host apply <profile.json> --persist` writes the applied table to flash.
+- The panel's parameter card has **Save to flash** / **Erase flash** buttons.
+
+The firmware restores the table at boot: a CRC32'd blob in the last page of
+flash **bank 2** (0x0807F800). Load is a plain memory-mapped read; a corrupt,
+stale-format, or absent blob is silently ignored and defaults load, and each
+value is range-checked against `param_range` before it's accepted, so a bad
+save can never brick startup. Erase reverts to firmware defaults on next boot.
+
+Both operations need the **drive off** — the ~22 ms page erase runs on flash
+bank 2 while the control ISR keeps executing from bank 1 (read-while-write),
+but the firmware still gates save/erase on a quiet stage and NAKs otherwise.
+After a reflash the blob survives (bank 2 is untouched by the bank-1 program),
+so a dialed-in motor no longer needs its params re-entered by hand.
+
 ## The stages
 
 | id | rotor | measures | needs |

@@ -3,6 +3,78 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-02 — session 15: session 14 committed; a build break it had been hiding; MS8 scheduled
+
+Short session: pick up two weeks cold, land the pending work, pick a direction.
+
+**Session 14 had never been committed** — 10 files, +353/−23, hardware-verified
+on 2026-07-20, sitting in the working tree ever since. Committed now.
+
+**It did not compile.** A duplicate `use embassy_stm32::flash::Blocking;` at
+file scope (already imported at line 39) — E0252, left behind by end-of-session
+tidying *after* the hardware verification. One line deleted; `cargo check` and
+clippy clean on `thumbv7em`.
+
+**Why nothing caught it, which is the actual lesson:** session 14 reported "all
+41 workspace tests pass" and that was true and irrelevant — **`mmc-fw-g474` is
+its own workspace**, not in the root `members`, so `cargo test --workspace`
+never compiles the firmware. CI *does* build it (the `firmware-g474` job), but
+CI only runs on push, and the work was never pushed. So the one gate that would
+have caught it was bypassed by the same omission that left the work uncommitted.
+**Rule going forward: firmware changes are not "verified" until
+`cargo check` runs inside `crates/mmc-fw-g474/` (or the commit is pushed).**
+Green workspace tests say nothing about either firmware crate.
+
+**Direction chosen: MS8 (six-step) before MS7 (encoder).** MS7 is blocked on
+hardware — there's no rotor-angle sensor on the bench, and neither an encoder
+nor the QBL5704's hall sensors are wired to the IHM16M1 connector yet. Six-step
+needs nothing new: the BEMF front-end was characterized in session 13 and
+per-phase Hi-Z is a `stage_phases(mask)` split of the existing EN handling.
+Both milestones are now written up in [PLAN.md](PLAN.md), including the
+first bench experiment (is the floating phase readable at the *current* ADC2
+sample point?) and the `CMD_MODE` 4 numbering trap.
+
+## 2026-07-20 — session 14: two bench papercuts killed — VCP retry + flash persistence
+
+**Cleared the two recurring hardware-session frictions.** Both had cost real
+time across the last several sessions (each ~3–4 retry cycles / ~4 by-hand
+param re-entries).
+
+**1. VCP connect retry (`mmc-host/src/link.rs`).** The host used to open the
+ST-LINK VCP immediately after `probe-rs reset`, before the device finished
+booting/re-enumerating — the "no response to 0x01 / TimedOut" that forced a
+manual retry every reset. `Link::serial()` now retries open + ping-until-Pong
+over a 6 s deadline (200 ms cadence), printing "waiting for device…" once.
+Verified: reset + immediate connect now succeeds in ~0.7 s where it used to
+time out.
+
+**2. Flash parameter persistence (fw v7 + host/panel/proto/sim).** Runtime
+params lived only in RAM and reset to firmware defaults on every reflash/
+power-cycle. Now they persist:
+- **Firmware** `nvparam` module: CRC32'd blob (magic "MMCP", version 1) in the
+  **last page of flash bank 2** (0x0807F800). Boot does a plain memory-mapped
+  read, CRC-checks, and **range-validates each value against `param_range`**
+  before accepting it — a corrupt/stale/absent blob is ignored and defaults
+  load, so a bad save can never brick startup. Save/erase use embassy blocking
+  `Flash` owned by `rx_task`; the page erase (~22 ms) runs on bank 2 while the
+  control ISR keeps executing from bank 1 (**read-while-write**). Save/erase
+  are **gated on a quiet stage** (drive off, not calibrating, no burst) and NAK
+  otherwise.
+- **Protocol**: `SaveParams` (0x0B) / `EraseParams` (0x0C) messages, ack/nak.
+- **Host**: `apply --persist` saves after applying; panel parameter card gains
+  **Save to flash** / **Erase flash** buttons.
+- **Sim**: acks both as no-ops (RAM sim has nothing to persist).
+
+**Verified on hardware (both directions):** set motor 2's table → Save →
+`probe-rs reset` → reconnect → params read back as motor 2's values (not
+defaults) = **PERSISTED CORRECTLY**. Then Erase → reset → reverted to firmware
+defaults (r=1.0, pp=7, handoff/accel/iq=150/500/0.8). Bench left with motor 2's
+params saved in flash. All 41 workspace tests pass, clippy clean.
+
+**Deferred/next:** MS7 encoder remains the main path; the saliency
+gate/two-position differential (motor 1 re-clamp-45° confirmation) is still
+open. Six-step trapezoidal is the natural BEMF follow-on from session 13.
+
 ## 2026-07-20 — session 13: BEMF terminal-voltage sensing wired + characterized
 
 **Wired the X-NUCLEO-IHM16M1's populated-but-unused BEMF divider network and

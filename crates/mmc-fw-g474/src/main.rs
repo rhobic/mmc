@@ -36,6 +36,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
+use embassy_stm32::flash::{Blocking, Flash};
 use embassy_stm32::mode::Async;
 use embassy_stm32::pac::{self, ADC1, ADC2, GPIOA, GPIOB, GPIOC, RCC, TIM1};
 use embassy_stm32::usart::{self, Uart, UartRx, UartTx};
@@ -211,6 +212,84 @@ fn param_range(id: u8) -> Option<(f32, f32)> {
     })
 }
 
+/// Flash-persisted parameter table. Stored in the last 2 KB page of bank 2
+/// (0x0807_F800). Code executes from bank 1, so erasing/programming this page
+/// is read-while-write — the control ISR keeps running from bank 1 untouched.
+/// Layout (little-endian u32 words): magic, version, [f32; param::COUNT],
+/// crc32(preceding), padded to a write-granularity multiple.
+mod nvparam {
+    use super::{param, Flash};
+    use embassy_stm32::flash::Blocking;
+
+    const NV_OFFSET: u32 = 0x7_F800; // last bank-2 page, from FLASH_BASE
+    const NV_ADDR: usize = 0x0807_F800;
+    const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
+    const VERSION: u32 = 1;
+    const HDR: usize = 2; // magic + version
+    const CRC_IDX: usize = HDR + param::COUNT;
+    const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, then round up to even (8-byte write)
+
+    fn crc32(words: &[u32]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &word in words {
+            crc ^= word;
+            for _ in 0..32 {
+                crc = if crc & 1 != 0 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    /// Read + validate the stored table (a plain memory read — flash is
+    /// mapped). `None` when blank, wrong version, or CRC-mismatched.
+    pub fn load() -> Option<[f32; param::COUNT]> {
+        let base = NV_ADDR as *const u32;
+        let read = |i: usize| unsafe { core::ptr::read_volatile(base.add(i)) };
+        if read(0) != MAGIC || read(1) != VERSION {
+            return None;
+        }
+        let mut words = [0u32; CRC_IDX];
+        for (i, w) in words.iter_mut().enumerate() {
+            *w = read(i);
+        }
+        if crc32(&words) != read(CRC_IDX) {
+            return None;
+        }
+        let mut params = [0f32; param::COUNT];
+        for (i, p) in params.iter_mut().enumerate() {
+            *p = f32::from_bits(words[HDR + i]);
+        }
+        Some(params)
+    }
+
+    /// Erase the page, then program the current parameter table. ~22 ms
+    /// (erase-dominated); caller gates on a quiet stage.
+    pub fn save(flash: &mut Flash<'static, Blocking>, params: &[f32; param::COUNT]) -> bool {
+        let mut words = [0u32; WORDS];
+        words[0] = MAGIC;
+        words[1] = VERSION;
+        for (i, v) in params.iter().enumerate() {
+            words[HDR + i] = v.to_bits();
+        }
+        words[CRC_IDX] = crc32(&words[..CRC_IDX]);
+        let mut bytes = [0u8; WORDS * 4];
+        for (i, w) in words.iter().enumerate() {
+            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        flash.blocking_erase(NV_OFFSET, NV_OFFSET + 2048).is_ok()
+            && flash.blocking_write(NV_OFFSET, &bytes).is_ok()
+    }
+
+    /// Erase the page so the device boots on firmware defaults.
+    pub fn erase(flash: &mut Flash<'static, Blocking>) -> bool {
+        flash.blocking_erase(NV_OFFSET, NV_OFFSET + 2048).is_ok()
+    }
+}
+
 // Burst buffer: per-tick sample pairs recorded by the probes at the full
 // 20 kHz — resolution the telemetry stream can't deliver at 1 Mbaud. Layout
 // is kind-keyed: RL_STEP records legacy (i_d, v_d) pairs from index 0;
@@ -321,6 +400,20 @@ async fn main(spawner: Spawner) {
     }
     let p = embassy_stm32::init(config);
 
+    // Restore persisted parameters before anything reads them (a plain flash
+    // read; no peripheral needed). Range-check each so a stale blob from an
+    // older firmware can't push a value the control loop would choke on.
+    if let Some(params) = nvparam::load() {
+        for (id, &v) in params.iter().enumerate() {
+            if let Some((lo, hi)) = param_range(id as u8) {
+                if (lo..=hi).contains(&v) {
+                    PARAMS[id].store(v.to_bits(), Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    let flash = Flash::new_blocking(p.FLASH);
+
     // Cycle counter feeds the ISR_MAX_CYCLES diagnostic.
     unsafe {
         let mut cp = cortex_m::Peripherals::steal();
@@ -336,7 +429,7 @@ async fn main(spawner: Spawner) {
 
     init_motor_peripherals();
 
-    spawner.spawn(rx_task(rx).unwrap());
+    spawner.spawn(rx_task(rx, flash).unwrap());
     spawner.spawn(tx_task(tx).unwrap());
 }
 
@@ -532,9 +625,10 @@ fn init_motor_peripherals() {
     }
 }
 
-/// Deframe + handle host commands; replies go through the TX task.
+/// Deframe + handle host commands; replies go through the TX task. Owns the
+/// flash so the persist commands can erase/program without a global.
 #[embassy_executor::task]
-async fn rx_task(mut rx: UartRx<'static, Async>) {
+async fn rx_task(mut rx: UartRx<'static, Async>, mut flash: Flash<'static, Blocking>) {
     let mut deframer = Deframer::new();
     let mut buf = [0u8; 128];
     loop {
@@ -546,9 +640,44 @@ async fn rx_task(mut rx: UartRx<'static, Async>) {
             let Some(Ok(msg)) = deframer.push(b) else {
                 continue;
             };
-            let reply = handle(&msg);
+            // Flash writes stall ~22 ms and need the drive quiet; keep them in
+            // the rx task (which owns the flash) rather than the pure `handle`.
+            let reply = match msg {
+                Message::SaveParams | Message::EraseParams => persist(&mut flash, &msg),
+                other => handle(&other),
+            };
             let _ = RESPONSES.try_send(reply);
         }
+    }
+}
+
+/// Persist / erase the parameter table, gated on a quiet stage (drive off, no
+/// probe recording) so the ~22 ms flash stall never hits a live control loop.
+fn persist(flash: &mut Flash<'static, Blocking>, msg: &Message) -> Message {
+    let of = msg.wire_type();
+    let state = STATE.load(Ordering::Relaxed);
+    if state == ST_CAL {
+        return Message::Nak { of, err: 3 };
+    }
+    if state == ST_RUN
+        || CMD_MODE.load(Ordering::Relaxed) != 0
+        || BURST_STATE.load(Ordering::Relaxed) == 1
+    {
+        return Message::Nak { of, err: 2 };
+    }
+    let ok = if matches!(msg, Message::EraseParams) {
+        nvparam::erase(flash)
+    } else {
+        let mut params = [0.0f32; param::COUNT];
+        for (id, p) in params.iter_mut().enumerate() {
+            *p = param_get(id as u8);
+        }
+        nvparam::save(flash, &params)
+    };
+    if ok {
+        Message::Ack { of }
+    } else {
+        Message::Nak { of, err: 5 } // flash program error
     }
 }
 
@@ -562,7 +691,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 6, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 7, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);

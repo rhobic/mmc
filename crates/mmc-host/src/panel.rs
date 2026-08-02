@@ -42,6 +42,8 @@ enum Cmd {
         tuning: crate::profile::StageTuning,
     },
     ApplyProfile,
+    SaveParams,
+    EraseParams,
 }
 
 struct Shared {
@@ -179,12 +181,33 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
                 }
                 Cmd::ApplyProfile => {
                     let path = cfg.profile_dir.join("profile.json");
-                    let msg = match crate::profile::apply(&mut link, &path) {
+                    let msg = match crate::profile::apply(&mut link, &path, false) {
                         Ok(()) => "profile applied and verified — takes effect at next drive start".to_string(),
                         Err(e) => format!("apply failed: {e}"),
                     };
                     shared.lock().unwrap().plog.push(msg);
                     read_params(&mut link, &shared); // refresh the params card
+                }
+                Cmd::SaveParams => {
+                    let m = match crate::profile::save_params(&mut link) {
+                        Ok(()) => "parameters saved to flash — restored on power-up".to_string(),
+                        Err(e) => format!("save to flash failed: {e}"),
+                    };
+                    shared.lock().unwrap().param_status = m;
+                }
+                Cmd::EraseParams => {
+                    let m = match link.request(
+                        &Message::EraseParams,
+                        |m| matches!(m, Message::Ack { of: 0x0C } | Message::Nak { of: 0x0C, .. }),
+                        Duration::from_secs(3),
+                    ) {
+                        Ok(Message::Ack { .. }) => {
+                            "flash parameters erased — boots on firmware defaults".to_string()
+                        }
+                        Ok(_) => "erase refused (drive must be off)".to_string(),
+                        Err(e) => format!("erase failed: {e}"),
+                    };
+                    shared.lock().unwrap().param_status = m;
                 }
             }
             last_send = Instant::now();
@@ -396,6 +419,8 @@ fn parse_cmd(v: &serde_json::Value) -> Option<Cmd> {
             (!stages.is_empty()).then_some(Cmd::RunProfile { stages, tuning })
         }
         "applyprofile" => Some(Cmd::ApplyProfile),
+        "saveparams" => Some(Cmd::SaveParams),
+        "eraseparams" => Some(Cmd::EraseParams),
         _ => None,
     }
 }

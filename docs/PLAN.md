@@ -157,16 +157,51 @@ sync — normal for motor control in any language.
 - **MS7 — Encoder config + position control**: encoder as second
   `AngleEstimator`, offset auto-calibrated against the observer, position loop
   on top (sim first, then hardware).
+  **Deferred 2026-08-02 — no rotor-angle sensor on the bench yet.** Nothing
+  blocks it architecturally (`AngleEstimator` has always been the seam), but
+  the hardware leg needs an encoder or the QBL5704's hall sensors wired to the
+  IHM16M1's connector. MS8 runs first.
+- **MS8 — Six-step / trapezoidal drive** *(started 2026-08-02, out of order —
+  see MS7)*: the second control methodology from the low-resource scaling
+  story, gated behind a `mmc-core` cargo feature. Sequence:
+  1. **Bench experiment first** — confirm the floating phase is *readable*.
+     Session 13 characterized the BEMF net with all three phases switching;
+     six-step floats one, which is a different measurement. The open risk is
+     the sample point: ADC2 triggers at CC4, the center-aligned counter peak,
+     where all low sides conduct — so the floating terminal is sampled against
+     a neutral near 0 and the BAT30 clamps rectify the negative half away,
+     which may make the falling zero-cross invisible. Remedy if so: a second
+     ADC2 trigger inside the PWM ON window, compared against VBUS/2.
+  2. **`mmc-sim` phase-domain model** — the one real architectural extension.
+     The sim is a dq average-value PMSM today: no floating terminal, no
+     trapezoidal BEMF, so six-step is currently untestable in CI. That breaks
+     the project's core invariant (every control path regression-tested in sim
+     before hardware). Needs per-phase terminal states + trapezoidal BEMF
+     behind the same `mmc-hal` traits.
+  3. **`mmc-core/src/sixstep.rs`** — 6-sector commutation table, forced-
+     commutation ramp (mirrors the I-f `Sequencer`), then zero-cross → 30° el
+     delay → commutate, speed derived from ZC intervals.
+  4. **Protocol + firmware** — per-phase Hi-Z is nearly free: `stage_on`/
+     `stage_off` already drive EN on PB13/14/15 together, so this is a
+     `stage_phases(mask)` split. *Numbering trap:* `DriveMode` wire codes run
+     0–3, but firmware's `CMD_MODE` **4 is already claimed** by the R/L probe
+     (which arrives via `RunTest`, not `SetDrive`). Use 5 = forced commutation,
+     6 = BEMF zero-cross, keeping wire and firmware namespaces aligned.
+  5. **FOC-vs-six-step bench comparison** on one motor and one profile: torque
+     ripple, acoustic signature, ISR cost.
 
 ## Backlog (deferred, not yet scheduled)
 
-- **Parameter flash persistence.** Runtime params (`SetParam`/`GetParam`) live in
-  RAM only today, so a profiled motor reverts to compile-time defaults on
-  power-cycle — you must re-`apply` each boot. Plan: reserve the last G474 flash
-  page (dual-bank already enabled), add `SaveParams`/`EraseParams` messages, load
-  + CRC-check the blob at boot (fall back to defaults if blank/bad), and
-  `mmc-host apply --persist`. Consider `sequential-storage` for wear-leveled
-  key/value by param id. *(Deferred from MS6, 2026-07-13; user chose to hold.)*
+- **Parameter flash persistence.** *(done 2026-07-20, session 14, fw v7:
+  `nvparam` module — CRC32'd blob in the last page of bank 2 (0x0807_F800),
+  read-while-write so the erase runs on bank 2 while the ISR executes from
+  bank 1; boot range-validates every value against `param_range` so a stale or
+  corrupt blob can never brick startup; `SaveParams`/`EraseParams` protocol
+  messages gated on a quiet stage; `apply --persist` + panel buttons. Verified
+  both directions on hardware. `sequential-storage` proved unnecessary — one
+  page, one blob, rewritten whole.)* Landed alongside **VCP connect retry**
+  in `link.rs` (retry open + ping-until-Pong over 6 s, killing the
+  reset-then-race timeout that cost a manual retry every flash).
 - **Profiler ergonomics for a new motor:** *(done 2026-07-17, sessions 8–9)*
   staged/stateful profiler (`--only/--redo/--list/--yes`, `profile_state.json`,
   per-stage bench requirements), per-motor excitation (`--rl-volts`,
@@ -181,12 +216,11 @@ sync — normal for motor control in any language.
   µN·m·s², 2.0% speed-step overshoot. See PROGRESS session 12.)*
 - From MS5/MS6: HF-injection L probe, d-axis-aligned I-f start. *(blend-kick
   softening + stall detector done in session 12.)*
-- **Six-step / trapezoidal drive** — the second control methodology from the
-  low-resource story. The BEMF zero-cross front-end it needs is now wired and
-  characterized (session 13, fw v6: `vb_u/vb_v/vb_w` channels; BEMF2=V on PC3,
-  divider enable PC9). PWM topology already supports per-phase Hi-Z. Do forced
-  commutation first, then BEMF zero-cross sensorless six-step, then a
-  FOC-vs-six-step bench comparison.
+- **Six-step / trapezoidal drive** — *promoted to **MS8** on 2026-08-02 (see
+  Milestones); scheduled ahead of MS7, which is blocked on encoder hardware.*
+  The BEMF zero-cross front-end it needs is wired and characterized (session
+  13, fw v6: `vb_u/vb_v/vb_w` channels; BEMF2=V on PC3, divider enable PC9),
+  and the PWM topology already supports per-phase Hi-Z.
 - ~~BEMF as observer input~~ **closed as hardware-limited** (session 13): the
   IHM16M1's BEMF net is Schottky-clamped and PWM-corrupted — a coast/zero-cross
   instrument, not a live terminal-voltage sense. Lowering the observer floor

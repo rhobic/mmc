@@ -647,8 +647,29 @@ fn save_state(dir: &Path, state: &serde_json::Value) -> std::io::Result<()> {
 
 // -------------------------------------------------------------------- apply
 
+/// Persist the device's current parameter table to flash (survives power
+/// cycle). Idempotent-ish: acks once written.
+pub fn save_params(link: &mut Link) -> std::io::Result<()> {
+    match link.request(
+        &Message::SaveParams,
+        |m| matches!(m, Message::Ack { of: 0x0B } | Message::Nak { of: 0x0B, .. }),
+        Duration::from_secs(3),
+    )? {
+        Message::Ack { .. } => {
+            println!("persist: parameters written to flash (restored at boot).");
+            Ok(())
+        }
+        Message::Nak { err, .. } => Err(std::io::Error::other(format!(
+            "device refused SaveParams: {}",
+            nak_reason(err)
+        ))),
+        _ => unreachable!(),
+    }
+}
+
 /// Apply a fitted profile (tools/profile.py JSON) and verify by read-back.
-pub fn apply(link: &mut Link, profile: &Path) -> std::io::Result<()> {
+/// With `persist`, also writes the table to flash so it survives a reboot.
+pub fn apply(link: &mut Link, profile: &Path, persist: bool) -> std::io::Result<()> {
     let text = std::fs::read_to_string(profile)?;
     let json: serde_json::Value = serde_json::from_str(&text)?;
     let t = Duration::from_secs(2);
@@ -694,9 +715,15 @@ pub fn apply(link: &mut Link, profile: &Path) -> std::io::Result<()> {
         println!("apply: {name:9} = {value:.6}  (verified)");
         applied += 1;
     }
-    println!(
-        "apply: {applied} parameters set — they take effect at the next drive start (RAM only)."
-    );
+    if persist {
+        save_params(link)?;
+        println!("apply: {applied} parameters set and persisted to flash.");
+    } else {
+        println!(
+            "apply: {applied} parameters set — effective at next drive start \
+             (RAM only; --persist writes them to flash)."
+        );
+    }
     Ok(())
 }
 

@@ -145,9 +145,11 @@
       <span class="sub" id="paramstatus">—</span>
     </div>
     <div id="params" class="paramgrid"></div>
-    <div style="display:flex;gap:10px;margin-top:14px">
+    <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
       <button id="pget">Refresh from device</button>
       <button class="primary" id="pall">Apply all edited</button>
+      <button id="psave" title="Write the current parameters to flash so they survive a power cycle. Drive must be off.">Save to flash</button>
+      <button id="perase" title="Erase the persisted parameters; the device boots on firmware defaults.">Erase flash</button>
     </div>
     <p class="hint" id="motorhint">&nbsp;</p>
     <div class="controls" style="margin-top:6px;padding-top:12px;border-top:1px solid var(--border)">
@@ -526,6 +528,14 @@ document.getElementById("pget").onclick = () => {
 };
 document.getElementById("pall").onclick = () => {
   for (const p of PARAMS) if (dirty.has(p.id)) setParam(p);
+};
+document.getElementById("psave").onclick = () => {
+  document.getElementById("paramstatus").textContent = "saving to flash…";
+  post({ cmd: "saveparams" });
+};
+document.getElementById("perase").onclick = () => {
+  document.getElementById("paramstatus").textContent = "erasing flash…";
+  post({ cmd: "eraseparams" });
 };
 
 /* ---- profiler card ----

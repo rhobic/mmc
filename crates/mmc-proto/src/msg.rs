@@ -20,6 +20,8 @@ mod ty {
     pub const READ_BURST: u8 = 0x08;
     pub const SET_PARAM: u8 = 0x09;
     pub const GET_PARAM: u8 = 0x0A;
+    pub const SAVE_PARAMS: u8 = 0x0B;
+    pub const ERASE_PARAMS: u8 = 0x0C;
     pub const PONG: u8 = 0x81;
     pub const INFO: u8 = 0x82;
     pub const TELEMETRY: u8 = 0x83;
@@ -299,6 +301,12 @@ pub enum Message {
     GetParam {
         id: u8,
     },
+    /// Persist the current runtime parameter table to flash so it survives a
+    /// power cycle (device restores it at boot). Acked when written.
+    SaveParams,
+    /// Erase the persisted parameters; the device reverts to firmware
+    /// defaults on the next boot.
+    EraseParams,
     ParamValue {
         id: u8,
         value: f32,
@@ -392,6 +400,8 @@ pub fn parse(raw: &[u8]) -> Result<Message, FrameError> {
             value: r.f32()?,
         },
         ty::GET_PARAM => Message::GetParam { id: r.u8()? },
+        ty::SAVE_PARAMS => Message::SaveParams,
+        ty::ERASE_PARAMS => Message::EraseParams,
         ty::PARAM_VALUE => Message::ParamValue {
             id: r.u8()?,
             value: r.f32()?,
@@ -504,6 +514,8 @@ fn serialize(msg: &Message, raw: &mut [u8]) -> Option<usize> {
             w.u8(ty::GET_PARAM)?;
             w.u8(*id)?;
         }
+        Message::SaveParams => w.u8(ty::SAVE_PARAMS)?,
+        Message::EraseParams => w.u8(ty::ERASE_PARAMS)?,
         Message::ParamValue { id, value } => {
             w.u8(ty::PARAM_VALUE)?;
             w.u8(*id)?;
@@ -555,6 +567,8 @@ impl Message {
             Message::ReadBurst { .. } => ty::READ_BURST,
             Message::SetParam { .. } => ty::SET_PARAM,
             Message::GetParam { .. } => ty::GET_PARAM,
+            Message::SaveParams => ty::SAVE_PARAMS,
+            Message::EraseParams => ty::ERASE_PARAMS,
             Message::ParamValue { .. } => ty::PARAM_VALUE,
             Message::BurstData(_) => ty::BURST_DATA,
             Message::Ack { .. } => ty::ACK,

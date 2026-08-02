@@ -121,6 +121,9 @@ struct ApplyArgs {
     /// Profile JSON written by tools/profile.py.
     #[arg(long)]
     profile: PathBuf,
+    /// Also write the applied table to flash so it survives a power cycle.
+    #[arg(long)]
+    persist: bool,
 }
 
 #[derive(clap::Args)]
@@ -462,7 +465,7 @@ fn main() -> std::io::Result<()> {
         }
         Command::Apply(args) => {
             let mut link = link::Link::serial(&args.serial, args.baud)?;
-            profile::apply(&mut link, &args.profile)
+            profile::apply(&mut link, &args.profile, args.persist)
         }
     }
 }

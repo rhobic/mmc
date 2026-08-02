@@ -8,3 +8,6 @@ tools/__pycache__/
 
 # The panel's default profiler output — scratch runs, curate elsewhere to keep.
 testresults/panel-profile/
+
+# Cygwin/MSYS crash dumps from the bash tooling.
+*.stackdump

@@ -644,6 +644,15 @@ fn handle(
                 },
             )
         }
+        // The sim has no flash; params already live for the session, so
+        // persist/erase are no-ops that ack (keeps `apply --persist` and the
+        // panel's Save button exercisable without hardware).
+        Message::SaveParams | Message::EraseParams => send(
+            stream,
+            &Message::Ack {
+                of: msg.wire_type(),
+            },
+        ),
         Message::RunTest { kind, a, b } => {
             if kind != test::RL_STEP && kind != test::L_THETA {
                 return send(

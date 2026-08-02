@@ -33,18 +33,68 @@ impl Link {
     }
 
     /// Open a serial port. `port` may be `auto` to pick the first ST-Link VCP.
+    ///
+    /// Tolerates a device that is still coming up: after a `probe-rs reset` or
+    /// flash the VCP re-enumerates (the port vanishes then reappears) and the
+    /// firmware boots (~0.4 s zero-current cal + USB enum). So this retries the
+    /// open *and* pings until the device answers, for up to 6 s, instead of
+    /// racing it and timing out on the first handshake.
     pub fn serial(port: &str, baud: u32) -> std::io::Result<Self> {
-        let name = if port.eq_ignore_ascii_case("auto") {
-            find_stlink_port()?
-        } else {
-            port.to_string()
-        };
-        let sp = serialport::new(&name, baud)
-            .timeout(Duration::from_millis(50))
-            .open()
-            .map_err(|e| std::io::Error::other(format!("open {name}: {e}")))?;
-        println!("serial: {name} @ {baud} baud");
-        Ok(Self::new(Box::new(sp)))
+        let deadline = Instant::now() + Duration::from_secs(6);
+        let mut announced = false;
+        loop {
+            let opened = (|| -> std::io::Result<(String, Box<dyn Io>)> {
+                let name = if port.eq_ignore_ascii_case("auto") {
+                    find_stlink_port()?
+                } else {
+                    port.to_string()
+                };
+                let sp = serialport::new(&name, baud)
+                    .timeout(Duration::from_millis(50))
+                    .open()
+                    .map_err(|e| std::io::Error::other(format!("open {name}: {e}")))?;
+                Ok((name, Box::new(sp) as Box<dyn Io>))
+            })();
+
+            match opened {
+                Ok((name, io)) => {
+                    let mut link = Self::new(io);
+                    // Port is open; the device may still be booting. Absorb any
+                    // enumeration noise and confirm it answers before returning.
+                    if link.wait_ready(deadline).is_ok() {
+                        println!("serial: {name} @ {baud} baud");
+                        return Ok(link);
+                    }
+                }
+                Err(e) if Instant::now() >= deadline => return Err(e),
+                Err(_) => {} // port not up yet — retry
+            }
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    ErrorKind::TimedOut,
+                    "no device responded on the serial port within 6 s",
+                ));
+            }
+            if !announced {
+                println!("serial: waiting for device…");
+                announced = true;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    /// Ping until the device answers or `deadline` passes. Also drains the
+    /// boot/enumeration noise so the caller's own handshake starts clean.
+    fn wait_ready(&mut self, deadline: Instant) -> std::io::Result<()> {
+        while Instant::now() < deadline {
+            if self.send(&Message::Ping { nonce: 0xA5 }).is_err() {
+                return Err(std::io::Error::new(ErrorKind::NotConnected, "port went away"));
+            }
+            if let Ok(Some(Message::Pong { .. })) = self.recv(Duration::from_millis(300)) {
+                return Ok(());
+            }
+        }
+        Err(std::io::Error::new(ErrorKind::TimedOut, "device silent"))
     }
 
     pub fn new(io: Box<dyn Io>) -> Self {
