@@ -1,29 +1,30 @@
-//! STM32G474RE + X-NUCLEO-IHM16M1 (STSPIN830) motor bring-up firmware.
+//! Motor bring-up firmware: STM32G474RE driving a three-phase inverter shield.
+//! Bench hardware and schematics: hw/README.md.
 //!
 //! MS5 hardware layer: center-aligned TIM1 PWM, PWM-synchronized
 //! injected-ADC shunt current sensing, zero-current calibration, software
 //! protection trips, and open-loop / I-f / **closed-loop sensorless** drive
-//! modes — all instrumented over `mmc-proto` on the ST-Link VCP so every
-//! test is a dashboard capture. Sensorless (Stage F) runs MS4's stack in
+//! modes — all instrumented over `mmc-proto` on the debug USB serial port so
+//! every test is a dashboard capture. Sensorless (Stage F) runs MS4's stack in
 //! the control ISR: I-f startup, blend handoff to the flux observer, then
 //! the speed loop commands i_q on the estimated angle.
 //!
-//! ## Pin map (from hw/x-nucleo-ihm16m1_schematic.pdf + mb1367 Nucleo)
+//! ## Pin map (from the shield + dev-board schematics; see hw/README.md)
 //!
 //! | Function            | Pin  | Notes                                     |
 //! |---------------------|------|-------------------------------------------|
 //! | VCP UART            | PA2/PA3 | LPUART1 (SB17/SB23), 1 Mbaud           |
-//! | PWM U/V/W (STSPIN IN)| PA8/PA9/PA10 | TIM1 CH1/2/3, AF6, 20 kHz center |
+//! | PWM U/V/W (driver IN)| PA8/PA9/PA10 | TIM1 CH1/2/3, AF6, 20 kHz center |
 //! | Phase enables (EN)  | PB13/PB14/PB15 | GPIO; low = phase Hi-Z          |
-//! | STSPIN830 STBY      | PB5  | high = run                                |
-//! | EN_FAULT (in)       | PA11 + PB12 | open-drain, low = fault. The shield routes it to PB12 (R37) by default and to PA11 (R35) on F302/F303-style builds — ST's example .ioc uses PA11. Both are read with internal pull-ups, so whichever is unconnected floats high and stays silent. (TIM1_BKIN2 hardware break on PA11 is a follow-up.) |
-//! | Current ref (VREF)  | PB4  | GPIO high → VREF ≈ 0.50 V (max via 22k/3.9k divider). This is the *weakest* hardware current limit (≈1.5 A on 0.33 Ω); floating PB4 would pull VREF toward 0 V and trip continuously (STSPIN830: VSNS > VREF disables outputs for tOFF) |
-//! | i_U / i_V / i_W     | PA1/PB1/PB0 | ADC1 IN2/IN12/IN15, TSV994 ×2 amp |
+//! | Gate-driver STBY    | PB5  | high = run                                |
+//! | EN_FAULT (in)       | PA11 + PB12 | open-drain, low = fault. The shield routes it to PB12 (R37) by default and to PA11 (R35) on other board variants — the vendor's example config uses PA11. Both are read with internal pull-ups, so whichever is unconnected floats high and stays silent. (TIM1_BKIN2 hardware break on PA11 is a follow-up.) |
+//! | Current ref (VREF)  | PB4  | GPIO high → VREF ≈ 0.50 V (max via 22k/3.9k divider). This is the *weakest* hardware current limit (≈1.5 A on 0.33 Ω); floating PB4 would pull VREF toward 0 V and trip continuously (the driver disables outputs for tOFF whenever VSNS > VREF) |
+//! | i_U / i_V / i_W     | PA1/PB1/PB0 | ADC1 IN2/IN12/IN15, ×2 shunt amp  |
 //! | VBUS                | PA0  | ADC1 IN1, 180k/12k divider (×16)          |
 //!
-//! ## Current-sense scaling (sheet 3)
+//! ## Current-sense scaling
 //!
-//! 0.33 Ω shunt → 680R/2.2k bias to 3.3 V → TSV994 non-inverting ×2:
+//! 0.33 Ω shunt → 680R/2.2k bias to 3.3 V → non-inverting ×2 amplifier:
 //! `v_adc = 1.558 V − 1.528·0.33·i_phase` (positive current into the motor
 //! discharges the node). Offsets are measured at boot with the stage disabled;
 //! the slope is 0.5042 V/A.
@@ -691,7 +692,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::NucleoG474, 7, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 7, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -1328,7 +1329,7 @@ unsafe extern "C" fn ADC1_2() {
     // Terminal voltages via the BEMF dividers (ADC2, parallel). Mapping
     // confirmed on hardware 2026-07-20: BEMF1=U on PC0/jdr0, BEMF3=W on
     // PC1/jdr1, BEMF2=V on PC3/jdr3 (PC2/jdr2 is the SPEED pot — railed).
-    // The BAT30 clamps rectify these, so they read 0..peak (a zero-cross /
+    // The shield's clamp diodes rectify these, so they read 0..peak (a zero-cross /
     // coast-down instrument, not a live terminal-voltage sense under PWM).
     let vb = |i: usize| ADC2.jdr(i).read().jdata() as f32 * ADC_VOLTS_PER_LSB * BEMF_GAIN;
     put(channel::VB_U, vb(0));

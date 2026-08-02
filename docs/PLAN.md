@@ -13,10 +13,10 @@ changes, not just when a milestone lands.
   the foundation; the encoder is added later as a second rotor-angle source that
   plugs into — and calibrates against — the sensorless estimator.
 - **Hardware targets:**
-  - **NUCLEO-G474RE** + ST inverter shield (IHM07M1/IHM16M1-class) — the motor
+  - **G474 dev board** + a three-phase inverter shield — the motor
     control target (MS5). Exact shield determines current-sense wiring at
     bring-up time, not architecture.
-  - **NUCLEO-G0B1RE** (Cortex-M0+, on the bench since 2026-07-10) — *not* a motor
+  - **G0B1 dev board** (Cortex-M0+, on the bench since 2026-07-10) — *not* a motor
     target yet; it exists to prove the protocol and the hardware-modularity story
     early: `mmc-proto` over UART on a core with no FPU, `thumbv6m` build of the
     shared crates. It is the low-resource scaling proof from overview.md.
@@ -37,7 +37,7 @@ mmc/
 │   ├── mmc-hal/         # hardware abstraction traits (no_std)
 │   ├── mmc-sim/         # virtual motor + inverter + sensor models
 │   ├── mmc-proto/       # telemetry/command wire protocol (no_std, shared fw↔host)
-│   ├── mmc-fw-g0b1/     # NUCLEO-G0B1RE protocol/bring-up firmware (Cortex-M0+)
+│   ├── mmc-fw-g0b1/     # G0B1 dev board protocol/bring-up firmware (Cortex-M0+)
 │   ├── mmc-fw-g474/     # STM32G474 motor firmware binary (MS5)
 │   └── mmc-host/        # host CLI: sim scenarios, dashboard, telemetry capture
 ├── docs/                # this plan + progress log
@@ -116,8 +116,8 @@ sync — normal for motor control in any language.
 - **MS3 — Telemetry + protocol** ✅ *(2026-07-10)*: `mmc-proto` (COBS+CRC
   frames, commands, telemetry channels), sim served over TCP, host capture to
   CSV/dashboard over TCP and serial through one code path.
-  **Amended 2026-07-10:** included NUCLEO-G0B1RE protocol bring-up — the same
-  `mmc-proto` over ST-Link VCP UART from a Cortex-M0+ (1 Mbaud, 11 channels at
+  **Amended 2026-07-10:** included G0B1 dev board protocol bring-up — the same
+  `mmc-proto` over debug-probe VCP UART from a Cortex-M0+ (1 Mbaud, 11 channels at
   ~1 kHz, zero rejected frames) — proving protocol and hardware modularity
   before the G474 exists. `thumbv6m-none-eabi` joined the no_std CI matrix.
   *Deferred:* live plot view — revisit in MS4 where observer tuning needs it.
@@ -129,7 +129,7 @@ sync — normal for motor control in any language.
   (exact ω̂, θ̂ = true rotor angle incl. I-f hang angle, noise ≈ 0.11 rad).
   *Known limit:* no field weakening — usable ceiling ≈ 0.7 × (V_bus/√3)/ψ.
 - **MS5 — G474 bring-up, sensorless** ✅ *(2026-07-11)*: clocks (170 MHz),
-  TIM1 center-aligned PWM + injected-ADC shunt sensing on the IHM16M1,
+  TIM1 center-aligned PWM + injected-ADC shunt sensing on the inverter shield,
   zero-current calibration, protection trips (overcurrent / VBUS / gate fault
   / host deadman), open-loop spin, I-f closed current loop (0.3 A, 7 mA RMS),
   a manual web control panel (`mmc-host panel`) — and **closed-loop sensorless
@@ -159,8 +159,8 @@ sync — normal for motor control in any language.
   on top (sim first, then hardware).
   **Deferred 2026-08-02 — no rotor-angle sensor on the bench yet.** Nothing
   blocks it architecturally (`AngleEstimator` has always been the seam), but
-  the hardware leg needs an encoder or the QBL5704's hall sensors wired to the
-  IHM16M1's connector. MS8 runs first.
+  the hardware leg needs an encoder or the motor 2's hall sensors wired to the
+  inverter shield's connector. MS8 runs first.
 - **MS8 — Six-step / trapezoidal drive** *(started 2026-08-02, out of order —
   see MS7)*: the second control methodology from the low-resource scaling
   story, gated behind a `mmc-core` cargo feature. Sequence:
@@ -169,7 +169,7 @@ sync — normal for motor control in any language.
      six-step floats one, which is a different measurement. The open risk is
      the sample point: ADC2 triggers at CC4, the center-aligned counter peak,
      where all low sides conduct — so the floating terminal is sampled against
-     a neutral near 0 and the BAT30 clamps rectify the negative half away,
+     a neutral near 0 and the clamp clamps rectify the negative half away,
      which may make the falling zero-cross invisible. Remedy if so: a second
      ADC2 trigger inside the PWM ON window, compared against VBUS/2.
   2. **`mmc-sim` phase-domain model** — the one real architectural extension.
@@ -222,7 +222,7 @@ sync — normal for motor control in any language.
   13, fw v6: `vb_u/vb_v/vb_w` channels; BEMF2=V on PC3, divider enable PC9),
   and the PWM topology already supports per-phase Hi-Z.
 - ~~BEMF as observer input~~ **closed as hardware-limited** (session 13): the
-  IHM16M1's BEMF net is Schottky-clamped and PWM-corrupted — a coast/zero-cross
+  inverter shield's BEMF net is Schottky-clamped and PWM-corrupted — a coast/zero-cross
   instrument, not a live terminal-voltage sense. Lowering the observer floor
   this way would need filtered/in-line voltage sensing this shield lacks.
 - **Zero-speed sensorless torque/position — saliency gate MEASURED: OPEN.**

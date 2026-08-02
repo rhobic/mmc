@@ -1,12 +1,14 @@
-# Hardware reference documents
+# Bench hardware
 
-The vendor PDFs this project works against are **not tracked in git** — they're
-third-party documents, freely downloadable from the vendors but not ours to
-redistribute, and the two Nucleo schematics alone are ~20 MB. Download them into
-this directory when you need them; `.gitignore` keeps them untracked.
+This is the one place the specific parts are named — everywhere else the code
+and docs refer to them by function (dev board, inverter shield, gate driver,
+motor 2). You need the part numbers here to obtain the right documents.
 
-The one file that *is* tracked here is `g474-ihm16.ioc` — a working CubeMX
-configuration for the G474 + IHM16M1 pairing, generated for this project.
+The PDFs are **not tracked in git**: they're third-party documents, freely
+downloadable but not ours to redistribute, and the board schematics alone are
+~20 MB. Download them into this directory as needed; `.gitignore` keeps them
+untracked. The one tracked file is `g474-ihm16.ioc`, a pin-configuration export
+generated for this project.
 
 | File | What it is | Where to get it |
 | --- | --- | --- |

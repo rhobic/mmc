@@ -23,7 +23,7 @@ pub struct PmsmParams {
 }
 
 impl PmsmParams {
-    /// A small hobby BLDC, roughly the class of motor used with ST's IHM
+    /// A small hobby BLDC, roughly the class of motor used with hobby inverter
     /// inverter shields.
     pub fn small_bldc() -> Self {
         Self {

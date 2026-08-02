@@ -25,8 +25,8 @@ use crate::link::Link;
 
 const CTRL_FREQ: f32 = 20_000.0;
 
-/// Series resistance of the G474 + IHM16M1 drive path: STSPIN830 conducting
-/// switch ≈ 0.5 Ω typ (R_DSon HS+LS = 1 Ω, hw/stspin830.pdf) + the 0.33 Ω
+/// Series resistance of the drive path: gate-driver conducting switch
+/// ≈ 0.5 Ω typ (R_DSon HS+LS = 1 Ω, see hw/README.md) + the 0.33 Ω
 /// low-side shunt duty-weighted ≈ 0.32 Ω. The probes measure winding + this
 /// path (which is what the control loop must use); subtracting it gives the
 /// at-the-motor value a multimeter or datasheet quotes. A rig property, not a

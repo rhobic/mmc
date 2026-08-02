@@ -170,8 +170,8 @@ impl DriveMode {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum DeviceKind {
     Sim,
-    NucleoG0b1,
-    NucleoG474,
+    BoardG0b1,
+    BoardG474,
     Unknown(u8),
 }
 
@@ -179,8 +179,8 @@ impl DeviceKind {
     fn to_wire(self) -> u8 {
         match self {
             DeviceKind::Sim => 0,
-            DeviceKind::NucleoG0b1 => 1,
-            DeviceKind::NucleoG474 => 2,
+            DeviceKind::BoardG0b1 => 1,
+            DeviceKind::BoardG474 => 2,
             DeviceKind::Unknown(v) => v,
         }
     }
@@ -188,8 +188,8 @@ impl DeviceKind {
     fn from_wire(v: u8) -> Self {
         match v {
             0 => DeviceKind::Sim,
-            1 => DeviceKind::NucleoG0b1,
-            2 => DeviceKind::NucleoG474,
+            1 => DeviceKind::BoardG0b1,
+            2 => DeviceKind::BoardG474,
             v => DeviceKind::Unknown(v),
         }
     }
@@ -660,7 +660,7 @@ mod tests {
         round_trip(Message::Pong { nonce: 0 });
         round_trip(Message::GetInfo);
         round_trip(Message::Info(DeviceInfo::new(
-            DeviceKind::NucleoG0b1,
+            DeviceKind::BoardG0b1,
             0x0102,
             "mmc-g0b1",
         )));

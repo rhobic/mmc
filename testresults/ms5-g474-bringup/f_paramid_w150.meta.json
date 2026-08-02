@@ -2,7 +2,7 @@
   "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 4",
   "description": "Stage F0 parameter-ID input: I-f 0.3 A at 150 rad/s el. Steady v_d/v_q across the speed sweep fit flux and L (tools/fit_params.py).",
   "notes": [
-    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 4720 frames.",
+    "Captured live from mmc-g474 (BoardG474) over mmc-proto; 4720 frames.",
     "1 frames rejected (CRC/framing) during capture."
   ],
   "order": 100,

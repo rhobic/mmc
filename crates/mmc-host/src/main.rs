@@ -56,7 +56,7 @@ enum Command {
 
 #[derive(clap::Args)]
 struct ProfileArgs {
-    /// Serial port of the hardware device (COMx, or `auto` for the first ST-Link).
+    /// Serial port of the hardware device (COMx, or `auto` for the first debug probe).
     #[arg(long, default_value = "auto")]
     serial: String,
     #[arg(long, default_value_t = 1_000_000)]
@@ -113,7 +113,7 @@ fn parse_sweep_points(specs: &[String]) -> std::io::Result<Vec<(f32, f32)>> {
 
 #[derive(clap::Args)]
 struct ApplyArgs {
-    /// Serial port of the hardware device (COMx, or `auto` for the first ST-Link).
+    /// Serial port of the hardware device (COMx, or `auto` for the first debug probe).
     #[arg(long, default_value = "auto")]
     serial: String,
     #[arg(long, default_value_t = 1_000_000)]
@@ -131,7 +131,7 @@ struct PanelArgs {
     /// TCP address of a sim server (e.g. 127.0.0.1:7770).
     #[arg(long, conflicts_with = "serial")]
     addr: Option<String>,
-    /// Serial port of a hardware device (COMx, or `auto` for the first ST-Link).
+    /// Serial port of a hardware device (COMx, or `auto` for the first debug probe).
     #[arg(long)]
     serial: Option<String>,
     #[arg(long, default_value_t = 115_200)]
@@ -175,7 +175,7 @@ struct CaptureArgs {
     /// TCP address of a sim server (e.g. 127.0.0.1:7770).
     #[arg(long, conflicts_with = "serial")]
     addr: Option<String>,
-    /// Serial port of a hardware device (COMx, or `auto` for the first ST-Link).
+    /// Serial port of a hardware device (COMx, or `auto` for the first debug probe).
     #[arg(long)]
     serial: Option<String>,
     #[arg(long, default_value_t = 115_200)]

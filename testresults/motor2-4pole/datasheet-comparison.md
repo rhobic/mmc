@@ -1,11 +1,11 @@
-# Motor 2 — profiler vs. Trinamic QBL5704 datasheet
+# Motor 2 — profiler vs. manufacturer datasheet
 
-Profiler captures in this directory vs. `hw/qbl5704_datasheet_v1.05.pdf`
-(QMot QBL5704 family, V1.05 2020-AUG-14). The family has two variants —
-QBL5704-**94**-04-032 and QBL5704-**116**-04-042 — identical except for
+Profiler captures in this directory vs. the motor's datasheet (listed in
+[../../hw/README.md](../../hw/README.md)). The family has two variants —
+**-94**-04-032 and **-116**-04-042 — identical except for
 length/winding; both are 4-pole, 3-phase, 36 V, 4000 RPM. Which one is on the
 bench is easiest to check physically: motor body length 94 mm vs 116 mm.
-The L comparison below leans toward the **-116-04-042**.
+The L comparison below leans toward the **-116** variant.
 
 ## Side by side
 
@@ -26,7 +26,7 @@ The L comparison below leans toward the **-116-04-042**.
 The probe measures resistance as the control loop sees it — winding **plus**
 everything in series on this board. From the schematics/datasheets in `hw/`:
 
-- STSPIN830 conducting switch: ≈ 0.5 Ω (datasheet: R_DSon HS+LS = 1 Ω typ,
+- Gate-driver conducting switch: ≈ 0.5 Ω (datasheet: R_DSon HS+LS = 1 Ω typ,
   i.e. ~0.5 Ω per switch, one conducting per leg at a time)
 - 0.33 Ω low-side shunt, duty-weighted ≈ ×0.97 at probe duties → ≈ 0.32 Ω
 - winding: 0.175 Ω (-116) or 0.225 Ω (-94)

@@ -2,7 +2,7 @@
   "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 4",
   "description": "Stage F0 discriminator: at 0.2 A the low-flux model demanded pull-out (sin gamma = 1.45); the motor held sync, falsifying it. High-flux fit confirmed: psi = 0.894 mWb.",
   "notes": [
-    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 4720 frames.",
+    "Captured live from mmc-g474 (BoardG474) over mmc-proto; 4720 frames.",
     "2 frames rejected (CRC/framing) during capture."
   ],
   "order": 100,

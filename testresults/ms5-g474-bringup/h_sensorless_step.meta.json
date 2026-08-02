@@ -2,7 +2,7 @@
   "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 8",
   "description": "Stage F1: live speed retarget 400 to 800 rad/s el while closed-loop sensorless. Tracks the 500 rad/s^2 reference slew (90 percent in 0.72 s), 9.7 percent overshoot, i_q peak 0.10 A.",
   "notes": [
-    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 9441 frames."
+    "Captured live from mmc-g474 (BoardG474) over mmc-proto; 9441 frames."
   ],
   "order": 100,
   "params": {

@@ -2,7 +2,7 @@
   "command": "mmc-host capture --serial auto --baud 1000000 --divider 20 --duration 6",
   "description": "Ad-hoc telemetry capture.",
   "notes": [
-    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 6019 frames.",
+    "Captured live from mmc-g474 (BoardG474) over mmc-proto; 6019 frames.",
     "1 frames rejected (CRC/framing) during capture."
   ],
   "order": 100,

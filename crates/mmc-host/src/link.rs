@@ -32,7 +32,7 @@ impl Link {
         Ok(Self::new(Box::new(stream)))
     }
 
-    /// Open a serial port. `port` may be `auto` to pick the first ST-Link VCP.
+    /// Open a serial port. `port` may be `auto` to pick the first debug-probe VCP.
     ///
     /// Tolerates a device that is still coming up: after a `probe-rs reset` or
     /// flash the VCP re-enumerates (the port vanishes then reappears) and the
@@ -45,7 +45,7 @@ impl Link {
         loop {
             let opened = (|| -> std::io::Result<(String, Box<dyn Io>)> {
                 let name = if port.eq_ignore_ascii_case("auto") {
-                    find_stlink_port()?
+                    find_debug_vcp_port()?
                 } else {
                     port.to_string()
                 };
@@ -175,13 +175,13 @@ impl Link {
     }
 }
 
-/// First serial port that looks like an ST-Link virtual COM port.
-fn find_stlink_port() -> std::io::Result<String> {
+/// First serial port that looks like an on-board debug-probe virtual COM port.
+fn find_debug_vcp_port() -> std::io::Result<String> {
     let ports = serialport::available_ports()
         .map_err(|e| std::io::Error::other(format!("enumerate ports: {e}")))?;
     for p in &ports {
         if let serialport::SerialPortType::UsbPort(usb) = &p.port_type {
-            // ST-Link VID; covers V2-1/V3 VCP PIDs.
+            // USB vendor ID of the on-board debug probe; covers its VCP product IDs.
             if usb.vid == 0x0483 {
                 return Ok(p.port_name.clone());
             }
@@ -189,6 +189,6 @@ fn find_stlink_port() -> std::io::Result<String> {
     }
     let names: Vec<_> = ports.iter().map(|p| p.port_name.clone()).collect();
     Err(std::io::Error::other(format!(
-        "no ST-Link VCP found (ports: {names:?}) — pass --serial COMx"
+        "no debug-probe VCP found (ports: {names:?}) — pass --serial COMx"
     )))
 }

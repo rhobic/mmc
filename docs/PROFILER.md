@@ -29,7 +29,7 @@ the observer's ~80 rad/s floor, below what the motor reaches open-loop from
 rest), **omega_accel** (every commanded ramp's acceleration, rad/s² el — a
 heavy/high-drag rotor needs it lowered; the accel-stage J fit reads the value
 actually used from the capture snapshot), and **iq_limit** (current ceiling
-for I-f/sensorless, ≤1.2 A). The QBL5704 runs at 100 / 250 / 1.0 vs the
+for I-f/sensorless, ≤1.2 A). The motor 2 runs at 100 / 250 / 1.0 vs the
 motor-1 defaults 150 / 500 / 0.8.
 
 Two protections ride along: a **stall fault** (state 8) trips ~100 ms after
@@ -148,8 +148,8 @@ settle in (τ spans 31 µs → 360 µs across the two bench motors alone).
 ## Comparing to a meter or datasheet (and entering hand measurements)
 
 The probes measure R as the **drive path**: winding plus the board's low-side
-shunt (0.33 Ω, duty-weighted) and the STSPIN830's conducting switch (~0.5 Ω) —
-about **0.85 Ω** on the G474+IHM16M1 rig (`R_DRIVE_PATH` in
+shunt (0.33 Ω, duty-weighted) and the gate driver's conducting switch (~0.5 Ω) —
+about **0.85 Ω** on the G474+inverter shield rig (`R_DRIVE_PATH` in
 `mmc-host/src/profile.rs`; derivation in
 `testresults/motor2-4pole/datasheet-comparison.md`). That is the correct R for
 the control loop, but it is several times any datasheet or multimeter figure.
@@ -163,7 +163,7 @@ The tools convert for you (wye winding assumed, line-line = 2 × per-phase):
 - The panel's parameter card shows the same live estimate under the fields,
   and has a **"from a meter"** entry: type the line-line R (Ω) and/or L (mH)
   measured at the motor terminals and it sets the r/l params with the
-  conversion applied (r = R_ll/2 + path, l = L_ll/2). Measuring the QBL5704's
+  conversion applied (r = R_ll/2 + path, l = L_ll/2). Measuring the motor 2's
   datasheet values this way lands within ~3% of the profiled r.
 
 ## Live resistance monitoring (panel)

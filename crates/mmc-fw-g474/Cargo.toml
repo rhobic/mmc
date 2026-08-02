@@ -3,7 +3,7 @@ name = "mmc-fw-g474"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "STM32G474RE + X-NUCLEO-IHM16M1 motor bring-up firmware: FOC hardware layer + mmc-proto over the ST-Link VCP"
+description = "STM32G474RE motor bring-up firmware: FOC hardware layer + mmc-proto over the debug USB serial port"
 
 # Detached from the root workspace: always builds for thumbv7em-none-eabihf
 # (see .cargo/config.toml).

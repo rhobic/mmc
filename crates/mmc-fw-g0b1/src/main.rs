@@ -1,8 +1,8 @@
-//! NUCLEO-G0B1RE protocol bring-up firmware.
+//! Protocol bring-up firmware for an STM32G0B1RE dev board (Cortex-M0+).
 //!
 //! This board is *not* a motor target — it exists to prove the modularity
 //! story early: `mmc-proto` + `mmc-core` running on a Cortex-M0+ (thumbv6m,
-//! no FPU), streaming telemetry over the ST-Link VCP UART to the exact same
+//! no FPU), streaming telemetry over the debug USB serial port to the exact same
 //! host tooling that talks to the simulator over TCP.
 //!
 //! Since there is no inverter attached, telemetry is a synthetic plant: `i_q`
@@ -10,8 +10,8 @@
 //! other channels are derived from it — so a host-commanded current step
 //! produces a measurable "step response" end to end through the wire.
 //!
-//! UART: USART2 on PA2/PA3 (the ST-Link VCP), 1 Mbaud — divides both the
-//! G0's 16 MHz HSI (BRR = 16) and the ST-Link's UART clock exactly.
+//! UART: USART2 on PA2/PA3 (the debug USB serial port), 1 Mbaud — divides both the
+//! G0's 16 MHz HSI (BRR = 16) and the probe's UART clock exactly.
 
 #![no_std]
 #![no_main]
@@ -94,7 +94,7 @@ async fn rx_task(mut rx: UartRx<'static, Async>) {
             let reply = match msg {
                 Message::Ping { nonce } => Message::Pong { nonce },
                 Message::GetInfo => {
-                    Message::Info(DeviceInfo::new(DeviceKind::NucleoG0b1, 1, "mmc-g0b1"))
+                    Message::Info(DeviceInfo::new(DeviceKind::BoardG0b1, 1, "mmc-g0b1"))
                 }
                 Message::SetTelemetry { divider, mask } => {
                     DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
@@ -191,7 +191,7 @@ async fn tx_task(mut tx: UartTx<'static, Async>) {
                         channel::DUTY_C => 0.5 + 0.45 * sin_c,
                         channel::OMEGA_M => omega_m,
                         channel::THETA_E => theta_e,
-                        channel::VBUS => 3.3, // it's a bare Nucleo: VDD
+                        channel::VBUS => 3.3, // bare dev board, no inverter: VDD
                         _ => 0.0,
                     };
                     n += 1;

@@ -3,7 +3,7 @@ name = "mmc-fw-g0b1"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "NUCLEO-G0B1RE protocol bring-up firmware: mmc-proto over the ST-Link VCP UART"
+description = "Cortex-M0+ protocol bring-up firmware: mmc-proto over the debug USB serial port"
 
 # Detached from the root workspace: this crate always builds for
 # thumbv6m-none-eabi (see .cargo/config.toml) and must not join host builds.

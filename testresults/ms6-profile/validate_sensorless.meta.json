@@ -2,7 +2,7 @@
   "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 8",
   "description": "MS6 closing proof: sensorless 400->800 rad/s el running on the profiler-measured, protocol-applied parameters (R 0.904, L 28 uH, psi 0.888 mWb, J-derived speed gains). Handoff transient shrank from 1316 to 527 rad/s peak and step overshoot from 9.7 to 4.8 percent vs the hand-guessed gains.",
   "notes": [
-    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 9440 frames."
+    "Captured live from mmc-g474 (BoardG474) over mmc-proto; 9440 frames."
   ],
   "order": 20,
   "params": {

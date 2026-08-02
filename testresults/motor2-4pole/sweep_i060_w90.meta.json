@@ -2,7 +2,7 @@
   "command": "mmc-host profile",
   "description": "Profiler flux-sweep input (hang-angle-aware fit).",
   "notes": [
-    "Captured live from mmc-g474 (NucleoG474) over mmc-proto; 3693 frames.",
+    "Captured live from mmc-g474 (BoardG474) over mmc-proto; 3693 frames.",
     "1 frames rejected (CRC/framing) during capture."
   ],
   "order": 3,

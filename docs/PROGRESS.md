@@ -27,7 +27,7 @@ Green workspace tests say nothing about either firmware crate.
 
 **Direction chosen: MS8 (six-step) before MS7 (encoder).** MS7 is blocked on
 hardware — there's no rotor-angle sensor on the bench, and neither an encoder
-nor the QBL5704's hall sensors are wired to the IHM16M1 connector yet. Six-step
+nor the motor 2's hall sensors are wired to the shield's connector yet. Six-step
 needs nothing new: the BEMF front-end was characterized in session 13 and
 per-phase Hi-Z is a `stage_phases(mask)` split of the existing EN handling.
 Both milestones are now written up in [PLAN.md](PLAN.md), including the
@@ -41,7 +41,7 @@ time across the last several sessions (each ~3–4 retry cycles / ~4 by-hand
 param re-entries).
 
 **1. VCP connect retry (`mmc-host/src/link.rs`).** The host used to open the
-ST-LINK VCP immediately after `probe-rs reset`, before the device finished
+debug-probe VCP immediately after `probe-rs reset`, before the device finished
 booting/re-enumerating — the "no response to 0x01 / TimedOut" that forced a
 manual retry every reset. `Link::serial()` now retries open + ping-until-Pong
 over a 6 s deadline (200 ms cadence), printing "waiting for device…" once.
@@ -77,7 +77,7 @@ open. Six-step trapezoidal is the natural BEMF follow-on from session 13.
 
 ## 2026-07-20 — session 13: BEMF terminal-voltage sensing wired + characterized
 
-**Wired the X-NUCLEO-IHM16M1's populated-but-unused BEMF divider network and
+**Wired the inverter shield's populated-but-unused BEMF divider network and
 learned what it can (and can't) do.** fw v6: GPIOC + PC9 (divider enable, low),
 ADC2 injected on the same TIM1_CC4 trigger as ADC1 (parallel, zero cost to the
 control-loop timing budget — no ISR), 4 conversions PC0–PC3, scaled by the
@@ -93,13 +93,13 @@ control-loop timing budget — no ISR), 4 conversions PC0–PC3, scaled by the
   Hi-Z, pk-pk = 4.3–5.3 V at 150 rad/s el and 9.5–10.0 V at 300 (2× speed →
   2× amplitude, clean).
 - **The decisive finding — this network is a *zero-cross / coast-down*
-  instrument, not a live terminal-voltage sense.** The shield's BAT30
-  Schottky clamps rectify the signal (reads 0..peak, not bipolar), and under
+  instrument, not a live terminal-voltage sense.** The shield's Schottky clamp
+  diodes rectify the signal (reads 0..peak, not bipolar), and under
   PWM the channels are dominated by the switched rail (~1.7 V mean, useless).
   **So the original goal — feed the observer *measured* phase voltage during
   drive to lower the sensorless floor / kill the 7.8% inverter-drop error —
   is NOT achievable with this shield.** That needs filtered or in-line
-  terminal-voltage sensing the IHM16M1 doesn't provide. What this hardware
+  terminal-voltage sensing the inverter shield doesn't provide. What this hardware
   *does* give: commutation/spin visualization, a coarse coast-down flux
   cross-check, and the front-end for six-step BEMF zero-cross (its actual
   design purpose).
@@ -112,14 +112,14 @@ control-loop timing budget — no ISR), 4 conversions PC0–PC3, scaled by the
 the BEMF zero-cross front-end it needs is wired and characterized. The
 "BEMF as observer input" idea is closed as hardware-limited on this shield.
 
-## 2026-07-19 — session 12: sensorless generalized — QBL5704 closes the MS6 loop
+## 2026-07-19 — session 12: sensorless generalized — motor 2 closes the MS6 loop
 
 **Closed-loop sensorless runs on motor 2, first attempt, and its profile is
 complete.** The blockers were three compile-time constants sized for motor 1;
 they are now runtime params (ids 7–9): `sl_handoff`, `omega_accel` (drives
 the forced-mode slew, the sequencer ramp, and retargets — and the accel-J fit
 now reads the value actually used from the capture snapshot), and `iq_limit`
-(replaces both I_AMP_MAX and SL_IQ_LIMIT). Firmware bumped to v5. QBL5704
+(replaces both I_AMP_MAX and SL_IQ_LIMIT). Firmware bumped to v5. motor 2
 settings: 100 / 250 / 1.0 A.
 
 **Closing proof, MS6-style, on the second motor:** profile → fit → apply →
@@ -168,17 +168,18 @@ directions convert:
   card shows the same live line.
 - The panel gains a **"from a meter"** entry: type line-line R/L measured at
   the motor terminals, it sets r/l with the conversion (r = R_ll/2 + path,
-  l = L_ll/2). Validation both ways on the QBL5704: displayed estimate
+  l = L_ll/2). Validation both ways on the motor 2: displayed estimate
   0.41 Ω line-line vs datasheet 0.35–0.45; entering the datasheet's
   0.35 Ω/1.0 mH produces r within 3% of the profiled value.
 - Bench note: the device power-cycled again and lost its RAM params (restored
   by hand) — the flash-persistence backlog item keeps earning its place.
 
-## 2026-07-18 — session 10: profiler output neutralized; motor 2 identified as QBL5704, datasheet cross-check
+## 2026-07-18 — session 10: profiler output neutralized; motor 2 matched to its datasheet
 
-**Motor 2 is a Trinamic QMot QBL5704** (`hw/qbl5704_datasheet_v1.05.pdf`,
-likely the -116-04-042 by the L comparison; check the 94 vs 116 mm body to
-confirm). Full profiler-vs-datasheet comparison in
+**Motor 2 was matched to a catalogue part** (datasheet listed in
+[../hw/README.md](../hw/README.md); likely the longer-body variant by the L
+comparison — check the 94 vs 116 mm body to confirm). Full
+profiler-vs-datasheet comparison in
 `testresults/motor2-4pole/datasheet-comparison.md`. Highlights:
 
 - **Pole pairs = 2 confirmed twice**: the datasheet says 4 poles, and the kt
@@ -186,9 +187,9 @@ confirm). Full profiler-vs-datasheet comparison in
   convention, −11%); pp=4 would read +78%. ψ also predicts ≈3700 RPM at 36 V
   vs the 4000 RPM rating.
 - **The R "discrepancy" closes exactly**: profiler R = 1.047–1.057 Ω vs
-  datasheet winding 0.175–0.225 Ω. The gap is the drive path — STSPIN830
+  datasheet winding 0.175–0.225 Ω. The gap is the drive path — gate driver
   conducting switch ≈0.5 Ω (R_DSon HS+LS = 1 Ω typ, verified from
-  `hw/stspin830.pdf`) + 0.33 Ω low-side shunt (duty-weighted ≈0.32) — summing
+  see hw/README.md) + 0.33 Ω low-side shunt (duty-weighted ≈0.32) — summing
   to 0.99–1.05 Ω predicted. The profiler's R is what the control loop sees;
   correct for control, ~5–6× a datasheet winding figure by construction.
   `profile.py` now says so in its summary.
@@ -199,7 +200,7 @@ confirm). Full profiler-vs-datasheet comparison in
   (apply-able). Hand-tuned gains found live on the device (kp=0.018 ≈ 2.2×
   the rotor-only seed — consistent with coupled load inertia) were left as-is;
   the measured R/L/flux were (re)applied around them.
-- Rig context: the IHM16M1's 1.5 A limit drives this 5–6.7 A motor at ≤25%
+- Rig context: the shield's 1.5 A limit drives this 5–6.7 A motor at ≤25%
   rated current, hence the near-90° hang angles under ~10%-of-rated drag.
 
 **Also landed:** profiler fit output is now *neutral* — `saliency.py` reports
@@ -551,19 +552,19 @@ blend exists for.
 `mmc-fw-g474` as a `sensorless` drive mode (Stage F), ideally after a scripted
 locked-rotor/L measurement; then MS6 profiler.
 
-## 2026-07-10 — session 3: G474 + IHM16M1 preliminary motor bring-up (MS5 pulled early)
+## 2026-07-10 — session 3: G474 + inverter shield preliminary motor bring-up (MS5 pulled early)
 
-**Hardware:** NUCLEO-G474RE + X-NUCLEO-IHM16M1 (STSPIN830) + small BLDC on a
+**Hardware:** G474 dev board + three-phase inverter shield + small BLDC on a
 12 V supply, pre-validated sensorless with ST firmware. Schematics + a working
-CubeMX config live in `hw/`.
+vendor pin-config export live in `hw/`.
 
 **Pin map extracted from schematics** (see `mmc-fw-g474` doc header for the
-full table): TIM1 CH1-3 on PA8-10 → STSPIN IN U/V/W; EN on PB13-15; STBY PB5;
-shunt amps (TSV994 ×2, 0.33 Ω, 0.504 V/A around a 1.558 V offset) on
+full table): TIM1 CH1-3 on PA8-10 → driver IN U/V/W; EN on PB13-15; STBY PB5;
+shunt amps (0.33 Ω, 0.504 V/A around a 1.558 V offset) on
 PA1/PB1/PB0 = ADC1 IN2/12/15; VBUS ÷16 on PA0 = IN1; VCP = LPUART1 PA2/PA3;
-current-ref PB4 held high = weakest STSPIN limit (≈1.5 A). EN_FAULT is read on
+current-ref PB4 held high = weakest driver limit (≈1.5 A). EN_FAULT is read on
 **both PA11 and PB12 with internal pull-ups** — the shield populates different
-0R routes per Nucleo variant and a floating pin false-faulted (found the hard
+0R routes per board variant and a floating pin false-faulted (found the hard
 way).
 
 **Landed:**
@@ -620,7 +621,7 @@ tests pass, so MS1+MS2 stand.
 **Environment changes:**
 - Rust updated to **1.97.0** (was 1.84). The edition-2024 dependency workaround
   is no longer needed; `rust-version = "1.84"` stays as a floor.
-- **NUCLEO-G0B1RE** connected (ST-Link VCP). Purpose: early protocol bring-up
+- **G0B1 dev board** connected (debug-probe VCP). Purpose: early protocol bring-up
   and the hardware-modularity proof on Cortex-M0+ (no FPU). Not a motor target.
 
 **Landed:**
@@ -662,14 +663,14 @@ tests pass, so MS1+MS2 stand.
   meta sidecar, and can command a live current step mid-capture. The suite now
   includes an end-to-end TCP leg (in-process server, 0.5 A step, ~1006 frames
   at 1 kHz, 0 rejected) → `testresults/ms3-telemetry/tcp_step.csv`.
-- **NUCLEO-G0B1RE bring-up (hardware modularity proof)**: new
+- **G0B1 dev board bring-up (hardware modularity proof)**: new
   `crates/mmc-fw-g0b1` (outside the host workspace; embassy-stm32 0.6,
-  thumbv6m-none-eabi). USART2/PA2-PA3 (ST-Link VCP) at **1 Mbaud** (divides
-  16 MHz HSI and the ST-Link clock exactly). Two tasks: RX (deframe + handle
+  thumbv6m-none-eabi). USART2/PA2-PA3 (debug-probe VCP) at **1 Mbaud** (divides
+  16 MHz HSI and the debug-probe clock exactly). Two tasks: RX (deframe + handle
   commands) and TX (responses + telemetry ticker). No inverter attached, so it
   streams a synthetic first-order plant (τ = 20 ms) driven by the commanded
   `i_q` — mmc-core's `math` runs on the M0+ in the process. Flashed with
-  probe-rs (ST-LINK V2-1 detected on COM5).
+  probe-rs (debug probe detected on COM5).
 - **Hardware capture on the dashboard**: 11 channels at ~990 Hz effective,
   **1,980 frames / 0 rejected** in 2 s; measured rise time 42.55 ms ≈ 2.2·τ,
   exactly right for the synthetic plant →
@@ -697,7 +698,7 @@ sweeps. The MS3 telemetry path is how observer tuning gets watched.
 
 ## 2026-07-10 — session 1: MS1 + MS2
 
-- Decisions: Rust, sensorless-first FOC, NUCLEO-G474RE target, MS naming.
+- Decisions: Rust, sensorless-first FOC, G474 dev board target, MS naming.
 - MS1: cargo workspace (`mmc-core`, `mmc-hal`, `mmc-proto`, `mmc-sim`,
   `mmc-host`), no_std enforced via thumbv7em build, CI workflow, fmt/clippy.
 - MS2: PMSM dq model + average-value inverter in `mmc-sim` (semi-implicit Euler,
