@@ -260,6 +260,10 @@ struct SimArgs {
     /// Six-step: model a sense network that cannot read below ground.
     #[arg(long)]
     clamp_sense: bool,
+    /// Six-step: compare against V_bus/2 rather than the measured driven
+    /// mid-point, reproducing the reference error found on the bench.
+    #[arg(long)]
+    vbus_half_ref: bool,
 }
 
 #[derive(Copy, Clone, ValueEnum)]
@@ -349,6 +353,7 @@ fn main() -> std::io::Result<()> {
                         trapezoidal: !args.sinusoidal,
                         on_time: !args.freewheel_sample,
                         clamp: args.clamp_sense,
+                        vbus_half_ref: args.vbus_half_ref,
                     },
                 };
                 let result = run_sixstep(&spec, &args.out)?;

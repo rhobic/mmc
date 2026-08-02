@@ -16,8 +16,8 @@ pub mod truth;
 pub mod virtual_motor;
 
 pub use motor::{PmsmModel, PmsmParams};
-pub use phase_motor::{BemfShape, PhaseMotor, SamplePoint};
+pub use phase_motor::{BemfShape, Bridge, PhaseMotor, SamplePoint};
 pub use sensorless_rig::{Sample, SensorlessRunCfg, SensorlessSim};
-pub use sixstep_rig::{Mode, SixStepCfg, SixStepSample, SixStepSim};
+pub use sixstep_rig::{Mode, RefSource, SixStepCfg, SixStepSample, SixStepSim};
 pub use truth::TruthAngle;
 pub use virtual_motor::VirtualMotor;

@@ -56,6 +56,49 @@ impl BemfShape {
     }
 }
 
+/// Conducting-switch drops, used only to place the *terminal* voltages.
+///
+/// Their effect on current is already inside [`PmsmParams::rs`], which in this
+/// project is the whole drive-path resistance the profiler measures, not the
+/// winding alone — so these must not be added to the circuit equation again.
+/// What they change is where `v_hi` and `v_lo` actually sit, and hence what the
+/// correct comparison reference is.
+#[derive(Copy, Clone, Debug)]
+pub struct Bridge {
+    /// High-side conducting resistance [Ω]; pulls `v_hi` below the rail.
+    pub r_hs: f32,
+    /// Low-side conducting resistance plus the current-sense shunt [Ω]; lifts
+    /// `v_lo` above ground. On the bench rig this is the larger of the two,
+    /// because the shunt is in it.
+    pub r_ls: f32,
+    /// Sense-network full scale at the terminal [V]; readings clip above it.
+    /// A fixed divider ratio against a high bus is what makes this bite.
+    pub sense_max: f32,
+}
+
+impl Default for Bridge {
+    fn default() -> Self {
+        // Ideal bridge: no drops, no clipping.
+        Self {
+            r_hs: 0.0,
+            r_ls: 0.0,
+            sense_max: f32::INFINITY,
+        }
+    }
+}
+
+impl Bridge {
+    /// The bench rig: ~0.5 Ω of conducting switch each side, plus the 0.33 Ω
+    /// shunt in the low leg, and a divider that saturates at 18.3 V.
+    pub fn bench() -> Self {
+        Self {
+            r_hs: 0.5,
+            r_ls: 0.83,
+            sense_max: 18.3,
+        }
+    }
+}
+
 /// Where in the PWM period the idle terminal is sampled.
 ///
 /// This is not a modelling detail — it is the design decision MS8 step 1 was
@@ -83,6 +126,8 @@ pub struct PhaseMotor {
     pub omega_m: f32,
     /// Sector currently energised.
     pub sector: usize,
+    /// Conducting-switch drops and sense-network limits.
+    pub bridge: Bridge,
     /// Remaining freewheel time on the phase that most recently opened [s].
     flyback: f32,
     /// Sign of the trapped current that is freewheeling.
@@ -99,6 +144,7 @@ impl PhaseMotor {
             theta_m: 0.0,
             omega_m: 0.0,
             sector: 0,
+            bridge: Bridge::default(),
             flyback: 0.0,
             flyback_sign: 0.0,
             locked: false,
@@ -177,7 +223,40 @@ impl PhaseMotor {
             return if self.flyback_sign > 0.0 { v_bus } else { 0.0 };
         }
         let (hi, lo, f) = sixstep::TABLE[self.sector % sixstep::SECTORS];
-        mid - 0.5 * (self.bemf(hi as usize) + self.bemf(lo as usize)) + self.bemf(f as usize)
+        // `mid` here is the *true* mid-point of the driven terminals, drops
+        // included — the identity is about physical node voltages, not about
+        // what the rail nominally is.
+        let mid = mid + 0.5 * (self.i_line * self.bridge.r_ls - self.i_line * self.bridge.r_hs);
+        self.clip(
+            mid - 0.5 * (self.bemf(hi as usize) + self.bemf(lo as usize)) + self.bemf(f as usize),
+        )
+    }
+
+    /// Voltages on the two *driven* terminals during `at` [V].
+    ///
+    /// This is what a real bridge presents, and it is not `(V_bus, 0)`: the
+    /// conducting switches and the shunt move both ends. Their average is the
+    /// reference the idle phase actually swings about.
+    pub fn driven_terminals(&self, at: SamplePoint, v_bus: f32) -> (f32, f32) {
+        let i = self.i_line;
+        let (hi, lo) = match at {
+            SamplePoint::OnTime => (v_bus - i * self.bridge.r_hs, i * self.bridge.r_ls),
+            // Freewheeling: the high leg's low-side switch is on too, so both
+            // ends sit near ground, lifted by their own conduction drops.
+            SamplePoint::Freewheel => (-i * self.bridge.r_ls, i * self.bridge.r_ls),
+        };
+        (self.clip(hi), self.clip(lo))
+    }
+
+    /// The reference the idle terminal swings about: the mean of the driven
+    /// terminals, as a controller could actually measure it.
+    pub fn measured_mid(&self, at: SamplePoint, v_bus: f32) -> f32 {
+        let (hi, lo) = self.driven_terminals(at, v_bus);
+        0.5 * (hi + lo)
+    }
+
+    fn clip(&self, v: f32) -> f32 {
+        v.min(self.bridge.sense_max)
     }
 
     /// Commutate to `sector`, starting a freewheel on the phase that opens.

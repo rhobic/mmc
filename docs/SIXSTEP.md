@@ -272,12 +272,21 @@ they now include the one claim that used to be modelled but unmeasured — movin
 the sample into the on-time does fix it on hardware, and the drive commutates on
 its own back-EMF.
 
-The gap that remains runs the other way. Two things the bench taught are **not
-yet in the simulation**: the switch and shunt drops that make `V_bus/2` the
-wrong reference, and the ADC clipping that follows from a fixed divider ratio.
-Until the model carries them, the regression suite cannot catch a regression in
-the fix — that is the next piece of simulation work, not the next piece of
-theory.
+That gap is now closed. The model carries the conducting-switch and shunt drops
+and the sense network's full scale ([`Bridge`](../crates/mmc-sim/src/phase_motor.rs)),
+so the reference error is covered by the same kind of paired test as the sample
+point:
+
+| reference | tracking | speed error | final speed |
+| --- | --- | --- | --- |
+| `V_bus/2` | 49.7% | 507% | 51 rad/s el |
+| measured mid-point | 100% | 1.42% | 594 rad/s el |
+
+Modelling the drops also reproduced, unprompted, the constraint that forced the
+bench supply down to 12 V: with a fixed divider ratio, a 24 V bus pushes the
+driven terminals past the sense network's full scale, the measured mid-point
+cannot be read at all, and the reference has nowhere to fall back to but
+`V_bus/2`. The simulator found that by itself, from the drops and a clip.
 
 ## 7. Keeping the two schemes apart
 

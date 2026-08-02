@@ -14,8 +14,8 @@ use mmc_core::tuning::current_pi_gains;
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
 use mmc_sim::analysis::{step_metrics, StepMetrics};
 use mmc_sim::{
-    BemfShape, Mode, PmsmParams, SamplePoint, SensorlessRunCfg, SensorlessSim, SixStepCfg,
-    SixStepSim, TruthAngle, VirtualMotor,
+    BemfShape, Mode, PmsmParams, RefSource, SamplePoint, SensorlessRunCfg, SensorlessSim,
+    SixStepCfg, SixStepSim, TruthAngle, VirtualMotor,
 };
 
 /// Parameters of a q-axis current-step run.
@@ -423,6 +423,9 @@ pub struct SixStepConfig {
     pub on_time: bool,
     /// Model a sense network that cannot read below ground.
     pub clamp: bool,
+    /// Compare against V_bus/2 instead of the measured driven mid-point —
+    /// reproduces the reference error that broke the bench in session 19.
+    pub vbus_half_ref: bool,
 }
 
 impl Default for SixStepConfig {
@@ -435,6 +438,7 @@ impl Default for SixStepConfig {
             trapezoidal: true,
             on_time: true,
             clamp: false,
+            vbus_half_ref: false,
         }
     }
 }
@@ -462,6 +466,11 @@ pub fn run_sixstep(spec: &SixStepSpec, out: &Path) -> std::io::Result<RunResult>
             SamplePoint::Freewheel
         },
         clamp_negative: cfg.clamp,
+        ref_source: if cfg.vbus_half_ref {
+            RefSource::VbusHalf
+        } else {
+            RefSource::MeasuredMid
+        },
         ..SixStepCfg::bench(cfg.omega_e)
     };
     let mut sim = SixStepSim::new(run_cfg);
@@ -563,13 +572,14 @@ fn write_sixstep_meta(
         "description": spec.description,
         "order": spec.order,
         "command": format!(
-            "mmc-host sim --scenario six-step --duration {} --omega-e {} --load {}{}{}{}",
+            "mmc-host sim --scenario six-step --duration {} --omega-e {} --load {}{}{}{}{}",
             cfg.duration,
             cfg.omega_e,
             cfg.load,
             if cfg.load_step != 0.0 { format!(" --load-step {}", cfg.load_step) } else { String::new() },
             if cfg.trapezoidal { "" } else { " --sinusoidal" },
             if cfg.on_time { "" } else { " --freewheel-sample" },
+            if cfg.vbus_half_ref { " --vbus-half-ref" } else { "" },
         ),
         "unix_time": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

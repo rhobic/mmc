@@ -1,13 +1,13 @@
 {
   "command": "mmc-host sim --scenario six-step --duration 2.5 --omega-e 600 --load 0 --sinusoidal --freewheel-sample",
   "description": "Ad-hoc six-step run.",
-  "final_speed_rpm": 128.43190002441406,
+  "final_speed_rpm": 85.3778076171875,
   "notes": [
-    "Six-step: lock at NaN s; commutation within 3 sector(s) of truth over the settled half, tracking 50.6% of ticks.",
-    "Speed measured from the zero-cross interval differs from sim truth by 323.63% on average; final 94 rad/s elec (target 600)."
+    "Six-step: lock at NaN s; commutation within 3 sector(s) of truth over the settled half, tracking 50.5% of ticks.",
+    "Speed measured from the zero-cross interval differs from sim truth by 346.91% on average; final 63 rad/s elec (target 600)."
   ],
   "order": 100,
   "samples": 50000,
   "title": "six-step",
-  "unix_time": 1785702743
+  "unix_time": 1785712054
 }

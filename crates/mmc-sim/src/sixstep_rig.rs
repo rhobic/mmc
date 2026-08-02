@@ -11,7 +11,19 @@ use mmc_core::pi::{Pi, PiGains};
 use mmc_core::sixstep::{self, Ramp, RampCfg, ZcCfg, ZcEvent, ZeroCross};
 
 use crate::motor::PmsmParams;
-use crate::phase_motor::{BemfShape, PhaseMotor, SamplePoint};
+use crate::phase_motor::{BemfShape, Bridge, PhaseMotor, SamplePoint};
+
+/// What the detector compares the idle terminal against.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum RefSource {
+    /// Half the bus voltage. Correct only for an ideal bridge: on a real one
+    /// the conducting switches and the shunt move both driven terminals, and
+    /// the error is a fixed voltage that does not shrink with the signal.
+    VbusHalf,
+    /// The measured average of the two driven terminals. The drops appear in
+    /// both and cancel.
+    MeasuredMid,
+}
 
 /// Which commutation source is in charge.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -37,6 +49,10 @@ pub struct SixStepCfg {
     /// divider on the bench shield). Set with [`SamplePoint::Freewheel`] to
     /// reproduce the MS8 step 1 hardware result.
     pub clamp_negative: bool,
+    /// Conducting-switch drops and sense clipping.
+    pub bridge: Bridge,
+    /// Which reference the detector compares against.
+    pub ref_source: RefSource,
     pub ramp: RampCfg,
     pub zc: ZcCfg,
     /// Speed target [rad/s electrical]; the duty loop drives towards it once
@@ -71,10 +87,17 @@ impl SixStepCfg {
                 ..PmsmParams::bench_g474()
             },
             shape: BemfShape::Trapezoidal,
-            vbus: 24.0,
+            // 12 V, not 24: with a fixed divider ratio the driven terminals
+            // must stay inside the sense range, or the measured mid-point
+            // cannot be read and the reference has to fall back to V_bus/2.
+            // The bench hit exactly this and dropped its supply for the same
+            // reason.
+            vbus: 12.0,
             ctrl_freq: 20_000.0,
             sample_at: SamplePoint::OnTime,
             clamp_negative: false,
+            bridge: Bridge::bench(),
+            ref_source: RefSource::MeasuredMid,
             ramp: RampCfg {
                 omega_start: 30.0,
                 omega_handoff: 400.0,
@@ -136,8 +159,10 @@ pub struct SixStepSim {
 
 impl SixStepSim {
     pub fn new(cfg: SixStepCfg) -> Self {
+        let mut motor = PhaseMotor::new(cfg.params, cfg.shape);
+        motor.bridge = cfg.bridge;
         Self {
-            motor: PhaseMotor::new(cfg.params, cfg.shape),
+            motor,
             ramp: Ramp::new(cfg.ramp),
             zc: ZeroCross::new(cfg.zc),
             speed: Pi::new(cfg.speed_gains, cfg.duty_max),
@@ -176,9 +201,10 @@ impl SixStepSim {
 
     pub fn step(&mut self) -> SixStepSample {
         let dt = self.ctrl_dt;
-        let v_ref = match self.cfg.sample_at {
-            SamplePoint::OnTime => self.cfg.vbus * 0.5,
-            SamplePoint::Freewheel => 0.0,
+        let v_ref = match (self.cfg.ref_source, self.cfg.sample_at) {
+            (RefSource::MeasuredMid, at) => self.motor.measured_mid(at, self.cfg.vbus),
+            (RefSource::VbusHalf, SamplePoint::OnTime) => self.cfg.vbus * 0.5,
+            (RefSource::VbusHalf, SamplePoint::Freewheel) => 0.0,
         };
         let v_float = self.sense();
 
@@ -383,6 +409,50 @@ mod tests {
         let last = last.unwrap();
         assert!(worst <= 1, "load step cost {worst} sectors of alignment");
         assert_eq!(last.mode, Mode::Sensing, "lost sensing under load");
+    }
+
+    /// The bench's own failure, reproduced: with real switch and shunt drops,
+    /// comparing against V_bus/2 puts a fixed offset on the threshold that is
+    /// a large fraction of the back-EMF ramp, and the drive cannot hold
+    /// commutation. Asserts failure on purpose — see the on-time/freewheel
+    /// pair above for the same pattern.
+    #[test]
+    fn vbus_half_reference_fails_against_real_bridge_drops() {
+        let cfg = SixStepCfg {
+            ref_source: RefSource::VbusHalf,
+            bridge: Bridge::bench(),
+            ..SixStepCfg::bench(600.0)
+        };
+        let (_, s) = run(cfg, 2.5);
+        let tail = &s[s.len() / 2..];
+        let good =
+            tail.iter().filter(|x| x.sector_err.abs() <= 1).count() as f32 / tail.len() as f32;
+        assert!(
+            good < 0.9,
+            "V_bus/2 tracked {:.0}% against real drops — it should not work",
+            good * 100.0
+        );
+    }
+
+    /// Same machine, same drops, reference taken from the measured driven
+    /// terminals: the drive holds. This pair is the argument for the firmware
+    /// change made in session 19.
+    #[test]
+    fn measured_midpoint_reference_survives_real_bridge_drops() {
+        let cfg = SixStepCfg {
+            ref_source: RefSource::MeasuredMid,
+            bridge: Bridge::bench(),
+            ..SixStepCfg::bench(600.0)
+        };
+        let (_, s) = run(cfg, 2.5);
+        let tail = &s[s.len() / 2..];
+        let good =
+            tail.iter().filter(|x| x.sector_err.abs() <= 1).count() as f32 / tail.len() as f32;
+        assert!(
+            good > 0.95,
+            "measured mid-point only tracked {:.0}%",
+            good * 100.0
+        );
     }
 
     /// A sinusoidal machine also runs, with more sector-to-sector ripple —
