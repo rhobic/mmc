@@ -148,6 +148,10 @@ pub enum DriveMode {
     /// open-loop voltage does. Wire code 5: code 4 is taken by the on-device
     /// R/L probe, which arrives as `RunTest` rather than `SetDrive`.
     SixStepForced { duty: f32, omega_e: f32 },
+    /// Sensorless six-step: forced ramp up to `omega_handoff`, then
+    /// commutation timed from measured back-EMF zero-crossings on the idle
+    /// phase. `duty` is the high-side PWM duty throughout. Wire code 6.
+    SixStepSensorless { duty: f32, omega_handoff: f32 },
 }
 
 impl DriveMode {
@@ -158,6 +162,10 @@ impl DriveMode {
             DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
             DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
             DriveMode::SixStepForced { duty, omega_e } => (5, duty, omega_e),
+            DriveMode::SixStepSensorless {
+                duty,
+                omega_handoff,
+            } => (6, duty, omega_handoff),
         }
     }
 
@@ -171,6 +179,10 @@ impl DriveMode {
             2 => Ok(DriveMode::IfCurrent { amps: amp, omega_e }),
             3 => Ok(DriveMode::Sensorless { amps: amp, omega_e }),
             5 => Ok(DriveMode::SixStepForced { duty: amp, omega_e }),
+            6 => Ok(DriveMode::SixStepSensorless {
+                duty: amp,
+                omega_handoff: omega_e,
+            }),
             _ => Err(FrameError::Malformed),
         }
     }

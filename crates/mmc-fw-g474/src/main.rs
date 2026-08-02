@@ -54,7 +54,7 @@ use mmc_core::observer::{FluxObserver, FluxObserverCfg};
 use mmc_core::pi::PiGains;
 use mmc_core::probe;
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
-use mmc_core::sixstep;
+use mmc_core::sixstep::{self, Ramp, RampCfg, ZcCfg, ZcEvent, ZeroCross};
 use mmc_core::svpwm::svpwm;
 use mmc_core::transforms::{clarke, inverse_park, park, Abc, AlphaBeta, Dq};
 use mmc_core::tuning::current_pi_gains;
@@ -94,6 +94,16 @@ const POLE_PAIRS: f32 = 7.0;
 /// Drive shuts off if the host goes silent this long (capture keep-alive pings).
 const DEADMAN_TICKS: u32 = 2 * 20_000;
 const CAL_TICKS: u32 = 8192;
+/// TIM1 CCR5, in counts before the counter valley, where OC5REF rises and
+/// triggers ADC2. The valley is the middle of the high-side on-time (PWM mode
+/// 1, centre-aligned), so this samples the terminals while the bridge is
+/// driving — which is the only point where the idle phase carries back-EMF
+/// referenced to V_bus/2 rather than to ground. 100 counts = 0.59 us.
+///
+/// It must sit inside the on-window, i.e. below the commanded duty's compare
+/// value: at duty 0.07 that leaves (100 + 297)/170 MHz = 2.3 us before the
+/// high side turns off, and ADC2's four conversions take 1.79 us.
+const ONTIME_CCR5: u16 = 100;
 
 // Motor parameters measured on this bench (Stage F0 rotating I-f sweep,
 // `tools/fit_params.py`): flux 0.894 ± 0.04 mWb, apparent R 0.97 Ω
@@ -350,6 +360,12 @@ struct IsrState {
     /// Signed startup current, consumed as the speed-PI preload on the
     /// first closed-loop tick (0.0 = already consumed).
     sl_preload: f32,
+    /// Six-step: commutation sector, zero-cross detector and startup ramp.
+    ss_sector: usize,
+    ss_zc: Option<ZeroCross>,
+    ss_ramp: Option<Ramp>,
+    /// True once commutation is timed from measured crossings, not the ramp.
+    ss_sensing: bool,
     /// R/L probe tick counter (mode 4).
     probe_ticks: u32,
     oc_strikes: u8,
@@ -368,6 +384,10 @@ static ISR_STATE: IsrCell = IsrCell(UnsafeCell::new(IsrState {
     offset_v: [1.558; 3],
     epoch_seen: 0,
     mode: 0,
+    ss_sector: 0,
+    ss_zc: None,
+    ss_ramp: None,
+    ss_sensing: false,
     theta: 0.0,
     omega: 0.0,
     amp: 0.0,
@@ -527,11 +547,22 @@ fn init_motor_peripherals() {
             TIM1.ccr(ch).write(|w| w.set_ccr(0));
         }
         TIM1.ccr(3).write(|w| w.set_ccr(PWM_ARR - 20));
+        // CH5 is not routed to a pin; it exists to place a second ADC trigger.
+        // OC5REF is high while CNT < CCR5, so its rising edge lands just
+        // before the counter valley — inside the high-side on-time.
+        TIM1.ccmr3().modify(|w| {
+            w.set_ocm(0, vals::Ocm::PWM_MODE1);
+            w.set_ocpe(0, true);
+        });
+        TIM1.ccr5().modify(|w| w.set_ccr(ONTIME_CCR5));
         TIM1.ccer().modify(|w| {
-            for ch in 0..4 {
+            for ch in 0..5 {
                 w.set_cce(ch, true);
             }
         });
+        // TRGO2 follows OC5REF; ADC2 triggers from it while ADC1 keeps CC4 at
+        // the counter peak, where the low-side shunts carry phase current.
+        TIM1.cr2().modify(|w| w.set_mms2(vals::Mms2::COMPARE_OC5));
         TIM1.cr1().modify(|w| {
             w.set_cms(vals::Cms::CENTER_ALIGNED1);
             w.set_arpe(true);
@@ -577,7 +608,7 @@ fn init_motor_peripherals() {
         use pac::adc::vals::Exten;
         ADC1.jsqr().write(|w| {
             w.set_jl(3); // 4 conversions
-            w.set_jextsel(1); // tim1_cc4
+            w.set_jextsel(8); // tim1_trgo2 (= OC5REF), inside the on-time
             w.set_jexten(Exten::RISING_EDGE);
             w.set_jsq(0, 2); // iU  PA1
             w.set_jsq(1, 12); // iV  PB1
@@ -588,7 +619,8 @@ fn init_motor_peripherals() {
         ADC1.ier().modify(|w| w.set_jeosie(true));
         ADC1.cr().modify(|w| w.set_jadstart(true)); // arm the hardware trigger
 
-        // ADC2: BEMF terminal voltages on PC0..PC3 (IN6..IN9), same TIM1_CC4
+        // ADC2: BEMF terminal voltages on PC0..PC3 (IN6..IN9), triggered in
+        // the PWM on-time via TIM1_TRGO2 rather than the old TIM1_CC4
         // trigger, running in parallel with ADC1 — zero cost to the current-
         // sense timing budget. No interrupt: the ADC1-paced ISR reads the
         // latest JDRs (late channels may be one 50 µs period stale, harmless
@@ -605,16 +637,20 @@ fn init_motor_peripherals() {
         ADC2.cr().modify(|w| w.set_aden(true));
         while !ADC2.isr().read().adrdy() {}
 
+        // 6.5 cycles, not 47.5: four conversions must fit inside the
+        // on-window. 4 x (6.5 + 12.5)/42.5 MHz = 1.79 us. The divider's
+        // Thevenin source is ~1.8 kOhm, so the sample capacitor still settles
+        // in about eleven time constants.
         ADC2.smpr().modify(|w| {
-            w.set_smp(6, SampleTime::CYCLES47_5);
-            w.set_smp(7, SampleTime::CYCLES47_5);
-            w.set_smp(8, SampleTime::CYCLES47_5);
-            w.set_smp(9, SampleTime::CYCLES47_5);
+            w.set_smp(6, SampleTime::CYCLES6_5);
+            w.set_smp(7, SampleTime::CYCLES6_5);
+            w.set_smp(8, SampleTime::CYCLES6_5);
+            w.set_smp(9, SampleTime::CYCLES6_5);
         });
         ADC2.cfgr().modify(|w| w.set_jqdis(true));
         ADC2.jsqr().write(|w| {
             w.set_jl(3); // 4 conversions
-            w.set_jextsel(1); // tim1_cc4
+            w.set_jextsel(8); // tim1_trgo2 (= OC5REF), inside the on-time
             w.set_jexten(Exten::RISING_EDGE);
             w.set_jsq(0, 6); // BEMF1 PC0
             w.set_jsq(1, 7); // BEMF3 PC1
@@ -695,7 +731,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 8, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 10, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -713,6 +749,10 @@ fn handle(msg: &Message) -> Message {
                 DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
                 DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
                 DriveMode::SixStepForced { duty, omega_e } => (5, duty, omega_e),
+                DriveMode::SixStepSensorless {
+                    duty,
+                    omega_handoff,
+                } => (6, duty, omega_handoff),
             };
             if m != 0 {
                 if state == ST_CAL {
@@ -818,7 +858,7 @@ fn handle(msg: &Message) -> Message {
 }
 
 fn amp_limit(mode: u8) -> f32 {
-    if mode == 5 {
+    if mode == 5 || mode == 6 {
         MAX_DUTY // six-step commands a PWM duty, not volts or amps
     } else if mode >= 2 {
         param_get(param::IQ_LIMIT)
@@ -881,6 +921,17 @@ async fn send(tx: &mut UartTx<'static, Async>, msg: &Message) {
 }
 
 // ------------------------------------------------------------- control ISR
+
+/// Terminal voltage of phase `k` (U=0, V=1, W=2) from the BEMF dividers.
+/// Mapping confirmed on hardware: U on jdr0, W on jdr1, V on jdr3.
+fn vb_phase(k: usize) -> f32 {
+    let idx = match k {
+        0 => 0usize,
+        1 => 3,
+        _ => 1,
+    };
+    ADC2.jdr(idx).read().jdata() as f32 * ADC_VOLTS_PER_LSB * BEMF_GAIN
+}
 
 fn stage_off() {
     GPIOB.bsrr().write(|w| {
@@ -1007,6 +1058,27 @@ unsafe extern "C" fn ADC1_2() {
                     let (rs, ls) = (param_get(param::R), param_get(param::L));
                     let gains = current_pi_gains(rs, ls, param_get(param::CUR_BW));
                     s.obs = Some(FluxObserver::new(FluxObserverCfg::new(rs, ls)));
+                    s.ss_sector = 0;
+                    s.ss_sensing = false;
+                    s.ss_zc = None;
+                    s.ss_ramp = None;
+                    if mode == 6 {
+                        // Blanking has to clear the freewheel of the phase
+                        // that just opened; at 20 kHz that is a handful of
+                        // ticks. Handoff speed comes from the command.
+                        s.ss_zc = Some(ZeroCross::new(ZcCfg {
+                            blank: 250e-6,
+                            ..Default::default()
+                        }));
+                        s.ss_ramp = Some(Ramp::new(RampCfg {
+                            omega_start: 20.0,
+                            omega_handoff: f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed))
+                                .abs()
+                                .max(40.0),
+                            accel: param_get(param::OMEGA_ACCEL),
+                            duty: 0.0, // duty comes from CMD_AMP
+                        }));
+                    }
                     if mode == 3 {
                         // Sensorless: feedforward FOC (flux is measured now),
                         // I-f sequencer toward the commanded direction, speed
@@ -1106,7 +1178,7 @@ unsafe extern "C" fn ADC1_2() {
     if s.mode != 0 {
         // Six-step drives the enables itself; everything else wants all three
         // phases live (a previous six-step run may have left one Hi-Z).
-        if s.mode != 5 {
+        if s.mode != 5 && s.mode != 6 {
             stage_on();
         }
         let omega_target = f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed));
@@ -1270,6 +1342,49 @@ unsafe extern "C" fn ADC1_2() {
                 let v_ab = inverse_park(v_dq, sc);
                 duties = svpwm(v_ab, s.vbus_filt.max(1.0));
                 v_ab
+            } else if s.mode == 6 {
+                // Sensorless six-step. The idle phase is sampled during the
+                // PWM on-time (ADC2 on TIM1_TRGO2), where it swings about
+                // V_bus/2 — see docs/SIXSTEP.md for the identity.
+                let v_ref = s.vbus_filt * 0.5;
+                let v_float = vb_phase(sixstep::floating_phase(s.ss_sector));
+                let duty = s.amp.clamp(0.0, MAX_DUTY);
+
+                if !s.ss_sensing {
+                    let want = s.ss_ramp.as_mut().unwrap().update(CTRL_DT);
+                    if want != s.ss_sector {
+                        s.ss_sector = want;
+                        s.ss_zc.as_mut().unwrap().commutated();
+                    }
+                    // Watch the detector during the ramp without obeying it.
+                    s.ss_zc
+                        .as_mut()
+                        .unwrap()
+                        .update(s.ss_sector, v_float, v_ref, CTRL_DT);
+                    let r = s.ss_ramp.as_ref().unwrap();
+                    if r.done() {
+                        let zc = s.ss_zc.as_mut().unwrap();
+                        if !zc.locked() {
+                            zc.seed(r.omega_e());
+                        }
+                        s.ss_sensing = true;
+                    }
+                    s.omega = r.omega_e();
+                } else {
+                    let zc = s.ss_zc.as_mut().unwrap();
+                    if zc.update(s.ss_sector, v_float, v_ref, CTRL_DT) == ZcEvent::Commutate {
+                        s.ss_sector = (s.ss_sector + 1) % sixstep::SECTORS;
+                    }
+                    s.omega = zc.omega_e();
+                }
+
+                let (hi, lo, float) = sixstep::TABLE[s.ss_sector];
+                duties = [0.0; 3];
+                duties[hi as usize] = duty;
+                duties[lo as usize] = 0.0;
+                stage_phases(!(1u8 << float) & 0b111);
+                SIXSTEP_SECTOR.store(s.ss_sector as u8, Ordering::Relaxed);
+                AlphaBeta::default()
             } else if s.mode == 5 {
                 // Forced six-step commutation: two phases conduct, the third
                 // is Hi-Z. `amp` is the high-side duty (0..1), not volts.
@@ -1384,7 +1499,7 @@ unsafe extern "C" fn ADC1_2() {
     put(channel::VB_W, vb(1));
     put(
         channel::SECTOR,
-        if s.mode == 5 {
+        if s.mode == 5 || s.mode == 6 {
             SIXSTEP_SECTOR.load(Ordering::Relaxed) as f32
         } else {
             0.0

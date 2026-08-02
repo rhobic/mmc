@@ -3,6 +3,64 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-02 — session 18: on-time sampling on hardware — back-EMF is there, closed loop is not yet
+
+**The MS8 step 1 finding is superseded: the idle phase now carries back-EMF.**
+Firmware v9 moved the idle-phase sample into the PWM on-time; v10 added
+closed-loop commutation. Bench, motor 2, V_bus 25.16 V, duty 0.07.
+
+**The trigger (fw v9).** TIM1 CH5 is not routed to a pin, so it is free to
+place a second ADC trigger: OC5 in PWM mode 1 with `CCR5 = 100` counts puts
+OC5REF's rising edge just before the counter valley, i.e. inside the high-side
+on-time. `CR2.MMS2 = OC5REF` publishes it as TRGO2 and ADC2's `JEXTSEL` moves
+from 1 (TIM1_CC4) to 8 (TIM1_TRGO2). **ADC1 keeps CC4 at the counter peak**,
+where the low-side shunts carry phase current, so current sensing is untouched.
+
+**A timing constraint had to be solved first.** ADC2's four conversions at 47.5
+cycles take 5.65 µs and *cannot* fit the on-window, which is only 3.5 µs at duty
+0.07. Dropping to 6.5 cycles gives 1.79 µs, which fits with margin — and the
+divider's ~1.8 kΩ Thevenin source still settles in about eleven time constants.
+
+**It works, and the identity is confirmed on hardware.** The idle phase now
+parks at **12.85 V measured against the predicted V_bus/2 = 12.58** — where in
+step 1 it sat near ground. Back-EMF is visible with the correct alternating
+slope: at 10 Hz el the odd (rising) sectors ramp **+1.53 V against a predicted
+1.5·e = 1.77 V (86%)**, and the even sectors ramp negative as the detector
+expects.
+
+**Two honest limits, both measured:**
+- **Only about half the sectors carry a clean ramp.** Odd sectors track the
+  prediction; even sectors are weak (−0.45 V vs −1.77 at 10 Hz) and at 2–5 Hz
+  every even window hits a rail. Not yet understood.
+- **Closed loop does not track.** Mode 6 ramps, hands off, then commutates at
+  ~1.9 el rev/s (~12 rad/s el) on the timeout fallback rather than on real
+  crossings, drawing 0.81 A with the rotor barely turning. The front end is not
+  yet clean enough to time commutation.
+
+**Rig headroom bit again:** the first closed-loop attempt at duty 0.10–0.12
+tripped overcurrent within 23 ms (1.5 A limit). Everything here runs at 0.07.
+
+**An aggregate metric misled me and is worth recording.** Peak-to-peak swing per
+window *fell* with speed (13.8 V at 2 Hz → 0.32 V at 30 Hz), which looks like
+"no back-EMF" — but it was dominated by rail excursions from flyback and ADC
+clipping at low speed, not signal. Measuring the *monotonic ramp* within each
+window, split by sector parity, shows the opposite and correct picture. The
+shape matters; the summary statistic lied.
+
+**Note on ADC range:** at the on-time sample point the driven high phase sits at
+V_bus → 4.54 V at the ADC input and saturates. That is harmless and expected —
+only the idle phase is meaningful, and the crossing sits at mid-scale, so
+clipping the extremes cannot affect zero-cross timing. The idle phase's own
+positive peak clips above ~203 rad/s el (32 Hz) for the same reason.
+
+**Next:** find why one sector parity is weak — the first suspects are the ADC
+sequence position within the on-window (each conversion samples 0.45 µs later
+than the last) and charge injected by the clamp diodes during the long off-time
+being held on the divider. Then retune blanking and retry closed loop.
+
+Captures: `testresults/ms8-ontime/` (speed sweep) and
+`testresults/ms8-closedloop/`.
+
 ## 2026-08-02 — session 17: MS8 steps 2–3 — six-step in simulation, and the theory written down
 
 **The control concept is now built, tested and documented; the one thing left

@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 5",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-g474 (BoardG474) over mmc-proto; 4967 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 10,
+    "drive": "SixStepForced { duty: 0.07, omega_e: 12.566371 }",
+    "drive_step": null,
+    "duration_s": 5.0,
+    "iq_A": null
+  },
+  "title": "Six-step, on-time idle-phase sampling, 2 Hz electrical",
+  "unix_time": 1785709885
+}
