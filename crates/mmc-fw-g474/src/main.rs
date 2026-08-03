@@ -782,7 +782,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 14, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 15, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -1107,6 +1107,68 @@ unsafe extern "C" fn ADC1_2() {
                 stage_off();
                 burst_abort();
                 STATE.store(ST_FAULT_VBUS, Ordering::Relaxed);
+            } else if s.mode == 3
+                && mode == 6
+                && matches!(s.seq.as_ref().map(|q| q.phase()), Some(Phase::Closed))
+                && s.omega > 40.0
+            {
+                // Live handover: closed-loop sensorless FOC has the rotor at a
+                // verified speed, and six-step takes over commutation from the
+                // observer's angle. Open-loop six-step ramps on this rig lose
+                // the rotor (pull-out) well below any speed worth handing off
+                // at — carrying it up under current control is both the robust
+                // startup and the only way to put a *synchronized* rotor under
+                // the back-EMF detector at speed. Forward spin only: the
+                // sector table runs one direction.
+                let w = s.omega;
+                // The FOC angle and the six-step table share one convention
+                // (inverse_park and the sixstep shape both give
+                // e_u = -psi*omega*sin(theta)), so the observer angle seeds the
+                // sector directly. Verified on the bench by contradiction: a
+                // deliberate +pi seed drew the ~1.9 A an antipodal pair
+                // predicts within two control ticks, while this seed starts at
+                // the ~0.3 A an aligned one does.
+                s.ss_sector = sixstep::sector_of(s.theta);
+                // Blanking here is NOT the ramp path's 250 us: it only has to
+                // clear the freewheel demag (L*I/V ~ 2.5 us on this motor) and
+                // the divider settle. At speed the window is ~1 ms and a late
+                // commutation pushes the next crossing toward window entry —
+                // a long blank then swallows it, the timeout fires, and one
+                // missed window is desync (measured: tracked 5 sectors at
+                // 898 rad/s, then lost exactly the window whose crossing
+                // arrived early).
+                let mut zc = ZeroCross::new(ZcCfg {
+                    blank: 30e-6,
+                    ..Default::default()
+                });
+                zc.seed(w);
+                s.ss_zc = Some(zc);
+                let mut pi = Pi::new(
+                    PiGains {
+                        kp: param_get(param::SS_KP),
+                        ki: param_get(param::SS_KI),
+                    },
+                    MAX_DUTY,
+                );
+                // Seed the duty loop at this speed's feedforward so the
+                // modulation change is bumpless.
+                let ff = (param_get(param::FLUX) * w
+                    + param_get(param::IQ_LIMIT) * 2.0 * param_get(param::R))
+                    / s.vbus_filt.max(1.0);
+                pi.preload(ff.clamp(0.01, MAX_DUTY));
+                s.ss_speed = Some(pi);
+                s.ss_ramp = None;
+                s.ss_sensing = true;
+                s.ss_target = w;
+                // `amp` becomes the duty ceiling now; slewing down from the
+                // FOC current amplitude would cap harder than commanded.
+                s.amp = f32::from_bits(CMD_AMP.load(Ordering::Relaxed)).clamp(0.0, MAX_DUTY);
+                s.mode = 6;
+            } else if s.mode != 0 && mode != s.mode {
+                // Any other cross-mode switch while running is unsupported:
+                // the new mode's control state was never built, and running it
+                // would dereference None — a panic halts the firmware. Keep
+                // the current drive; the host goes through Off.
             } else {
                 if s.mode == 0 {
                     // clean start — control blocks built from the runtime

@@ -208,6 +208,13 @@ struct CaptureArgs {
     /// capture — records a live speed-step response.
     #[arg(long, requires = "drive")]
     step_hz: Option<f32>,
+    /// Drive kind for the 60% retarget when it differs from --drive: hands a
+    /// running drive to another scheme live (e.g. `sl` spin-up to `six-cl`).
+    #[arg(long, value_parser = ["volt", "if", "sl", "six", "six-cl"], requires = "step_hz")]
+    step_kind: Option<String>,
+    /// Amplitude for the 60% retarget (defaults to --amp).
+    #[arg(long, requires = "step_hz")]
+    step_amp: Option<f32>,
     /// Output CSV path.
     #[arg(long, default_value = "capture.csv")]
     out: PathBuf,
@@ -429,7 +436,13 @@ fn main() -> std::io::Result<()> {
                     };
                     (
                         Some(mode_for(kind, amp, hz)),
-                        args.step_hz.map(|hz2| mode_for(kind, amp, hz2)),
+                        args.step_hz.map(|hz2| {
+                            mode_for(
+                                args.step_kind.as_deref().unwrap_or(kind),
+                                args.step_amp.unwrap_or(amp),
+                                hz2,
+                            )
+                        }),
                     )
                 }
             };
