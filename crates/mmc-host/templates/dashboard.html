@@ -47,7 +47,31 @@
                      background: var(--surface); border: 1px solid var(--border);
                      border-radius: 4px; padding: 1px 5px; }
   h2 { font-size: 15px; font-weight: 650; color: var(--ink);
-       margin: 36px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--grid); }
+       margin: 36px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--grid);
+       display: flex; align-items: baseline; gap: 8px; scroll-margin-top: 14px; }
+  h2 .gmeta { margin-left: auto; font-weight: 500; font-size: 12px; color: var(--muted);
+              font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .badge { font-size: 10px; font-weight: 650; letter-spacing: .05em; text-transform: uppercase;
+           color: var(--s1); border: 1px solid var(--s1); border-radius: 999px;
+           padding: 1px 7px; }
+  /* Contents: the landing view. Groups arrive newest-first from the generator,
+     so the top row is always the most recent session's work. */
+  .toc { background: var(--surface); border: 1px solid var(--border);
+         border-radius: 12px; padding: 15px 18px 8px; margin-top: 8px; }
+  .toc .th { color: var(--muted); font-size: 11.5px; font-weight: 650;
+             text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+  .toc ul { list-style: none; margin: 0; padding: 0;
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 0 26px; }
+  .toc li { display: flex; align-items: baseline; gap: 10px; padding: 6px 0;
+            border-bottom: 1px solid var(--grid); }
+  .toc li:last-child { border-bottom: 0; }
+  .toc a { color: var(--ink); text-decoration: none; font-weight: 550; }
+  .toc a:hover, .toc a:focus-visible { text-decoration: underline; }
+  .toc .n { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums;
+            margin-left: auto; white-space: nowrap; }
+  .toc .when { color: var(--ink2); font-size: 12px; font-variant-numeric: tabular-nums;
+               white-space: nowrap; min-width: 6.5em; text-align: right; }
   .card {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: 12px; padding: 20px 22px 14px; margin-bottom: 20px;
@@ -171,6 +195,11 @@ function fmt(v) {
   if (a >= 10) return +v.toFixed(1) + "";
   if (a >= 0.01 || v === 0) return +v.toFixed(3) + "";
   return v.toExponential(2);
+}
+function fmtDay(unix) {
+  if (!unix) return null;
+  return new Date(unix * 1000).toLocaleDateString(undefined,
+    { year: "numeric", month: "short", day: "numeric" });
 }
 function fmtDate(unix) {
   if (!unix) return null;
@@ -447,10 +476,33 @@ function runCard(run) {
       "No runs found. Run the suite to populate this dashboard."));
     return;
   }
+  // Contents first, so 80-odd runs open on an index rather than on whichever
+  // group sorts first. Groups arrive newest-first from the generator.
+  const toc = h("nav", "toc");
+  toc.appendChild(h("div", "th", "Contents — newest first"));
+  const ul = document.createElement("ul");
   for (const g of DATA.groups) {
-    app.appendChild(h("h2", null, g.title));
-    for (const run of g.runs) app.appendChild(runCard(run));
+    const li = document.createElement("li");
+    const a = h("a", null, g.title);
+    a.href = "#" + g.name;
+    li.appendChild(a);
+    li.appendChild(h("span", "n", g.runs.length + (g.runs.length === 1 ? " run" : " runs")));
+    li.appendChild(h("span", "when", fmtDay(g.newest_unix) || "–"));
+    ul.appendChild(li);
   }
+  toc.appendChild(ul);
+  app.appendChild(toc);
+
+  DATA.groups.forEach((g, i) => {
+    const head = h("h2", null, g.title);
+    head.id = g.name;
+    if (i === 0 && g.newest_unix) head.appendChild(h("span", "badge", "latest"));
+    head.appendChild(h("span", "gmeta",
+      g.runs.length + (g.runs.length === 1 ? " run" : " runs") +
+      (g.newest_unix ? "  ·  " + fmtDate(g.newest_unix) : "")));
+    app.appendChild(head);
+    for (const run of g.runs) app.appendChild(runCard(run));
+  });
 })();
 </script>
 </body>
