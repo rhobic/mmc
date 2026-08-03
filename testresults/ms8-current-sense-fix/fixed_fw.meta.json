@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 5",
+  "description": "The same command again after returning ADC1 to the TIM1_CC4 trigger, leaving ADC2 on TRGO2 where the back-EMF sensing needs it.",
+  "notes": [
+    "Phase current 0.7108 A RMS, matching the pre-six-step reference to 0.15 %.",
+    "Confirms the on-time trigger work keeps what it needed while current sensing is restored."
+  ],
+  "order": 12,
+  "params": {
+    "divider": 10,
+    "drive": "OpenLoopVoltage { volts: 1.5, omega_e: 50.265484 }",
+    "drive_step": null,
+    "duration_s": 5.0,
+    "iq_A": null
+  },
+  "title": "Fixed: current-sense ADC back on the counter peak",
+  "unix_time": 1785728688
+}

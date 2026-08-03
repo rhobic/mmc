@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 8",
+  "description": "Closed-loop six-step at duty 0.17 with an 8 Hz handoff, a run that captures lock. Reduced channel mask for 2.4 kHz resolution.",
+  "notes": [
+    "Settles at 52.35 rad/s electrical, 19.3 % interval jitter, 0.169 A phase RMS.",
+    "Four starts in five look like this."
+  ],
+  "order": 20,
+  "params": {
+    "divider": 8,
+    "drive": "SixStepSensorless { duty: 0.17, omega_handoff: 50.265484 }",
+    "drive_step": null,
+    "duration_s": 8.0,
+    "iq_A": null
+  },
+  "title": "Six-step handoff: lock captured",
+  "unix_time": 1785762536
+}

@@ -1,0 +1,19 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 5",
+  "description": "I-f current mode at 0.3 A, the drive that previously faulted within about 50 ms as its current loop wound up against current it could not see.",
+  "notes": [
+    "i_q regulates to 0.3004 A against a 0.3 A command.",
+    "Holds the full 5 s with no fault; previously tripped fault_drv (state 3) in ~50 ms.",
+    "Phase RMS 0.219 A ~= 0.3/sqrt(2), as expected for a 0.3 A vector amplitude."
+  ],
+  "order": 13,
+  "params": {
+    "divider": 10,
+    "drive": "IfCurrent { amps: 0.3, omega_e: 50.265484 }",
+    "drive_step": null,
+    "duration_s": 5.0,
+    "iq_A": null
+  },
+  "title": "Closed current loop restored under I-f",
+  "unix_time": 1785728528
+}

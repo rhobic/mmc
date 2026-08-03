@@ -1,0 +1,19 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 8",
+  "description": "The same command on a start that fails to capture lock and falls into mistimed but periodic commutation. One start in five.",
+  "notes": [
+    "Collapses to 17.29 rad/s electrical with 41.3 % jitter and 0.798 A \u2014 about 4x the current of a locked run, with duty pinned at the ceiling.",
+    "The 50.3 rad/s handoff is only 1.26x the measured 40 rad/s back-EMF sensing floor.",
+    "Kept deliberately: a single capture of this drive proves nothing about the drive."
+  ],
+  "order": 21,
+  "params": {
+    "divider": 8,
+    "drive": "SixStepSensorless { duty: 0.17, omega_handoff: 50.265484 }",
+    "drive_step": null,
+    "duration_s": 8.0,
+    "iq_A": null
+  },
+  "title": "Six-step handoff: lock missed",
+  "unix_time": 1785762562
+}

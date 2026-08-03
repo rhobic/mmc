@@ -1,0 +1,20 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 5",
+  "description": "Open-loop voltage, 1.5 V at 8 Hz electrical, on firmware 92fb226 flashed into a detached worktree. The control against which the regression was measured.",
+  "notes": [
+    "Phase current 0.7125 A RMS.",
+    "Duties correct at 0.500 +/- 0.090; bus 12.07 V.",
+    "Same bench, bus and session as the other runs here \u2014 the binary is the only variable.",
+    "This build CRC-fails the newer stored parameter blob (param COUNT 10 vs 13) and so runs compiled-in defaults. Fine for a does-current-flow verdict."
+  ],
+  "order": 10,
+  "params": {
+    "divider": 10,
+    "drive": "OpenLoopVoltage { volts: 1.5, omega_e: 50.265484 }",
+    "drive_step": null,
+    "duration_s": 5.0,
+    "iq_A": null
+  },
+  "title": "Reference: last pre-six-step firmware",
+  "unix_time": 1785728394
+}
