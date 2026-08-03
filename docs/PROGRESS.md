@@ -3,6 +3,58 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-03 — session 24: what actually blocks six-step on this motor
+
+**It is not the zero-cross detector. It is PWM ripple current, and the sample
+point has been hiding it the whole time.**
+
+**Two firmware changes landed.** The six-step ramp applied `amp` as a flat duty
+from standstill, where there is no back-EMF to oppose it and the whole bus
+voltage lands on the winding — so the duty needed to reach a high handoff is
+the same duty that trips overcurrent on the way there. The ramp now feeds
+forward the duty its commanded speed implies, `(ψ·ω + i·2R)/V_bus`, clamped to
+`amp` as a ceiling. Measured on the bench: duty climbs 0.123 → 0.213 across the
+ramp and holds current near 0.75 A where a flat duty sat at 1.3 A from rest.
+
+The second is a bug this exposed. `f32::clamp` **panics when min > max**, and
+the ramp branch runs from the first tick of the mode — one tick where the
+amplitude has not landed yet puts the ceiling below the 0.01 floor, and a
+panicking `no_std` firmware simply halts. It did: the device stopped answering
+the serial port until reset. Both this and the pre-existing occurrence in the
+speed-loop branch are now non-panicking `max`/`min`.
+
+**The real blocker.** This motor is 30 µH. Six-step conducts two phases in
+series, so at 20 kHz the ripple current is `V_bus·d·(1−d)/(2L·f_sw)`:
+
+| duty | ripple pk-pk | sampled | true peak |
+|---|---|---|---|
+| 0.10 | 0.90 A | 0.45 A | 1.35 A |
+| 0.16 | 1.35 A | 0.62 A | 1.97 A |
+| 0.20 | 1.60 A | 1.18 A | 2.78 A |
+| 0.35 | 2.28 A | 0.45 A | 2.73 A |
+
+**The telemetry sample sits at the counter peak — the middle of the freewheel,
+which is the ripple minimum.** The true peak is a full ΔI above it and has
+never been visible in any capture. That is why the gate driver faulted at
+1.12 A "measured": the actual peak was about 2.6 A, well past the 1.5 A limit.
+Every earlier reading of "current" in a six-step run is a ripple trough, not an
+average and certainly not a peak.
+
+This also retires the earlier suspicion of the detector's 200 µs blanking as
+the high-speed cause. The detector genuinely cannot work at low speed on this
+motor — back-EMF there is 0.1–0.3 V against a 1–3 V artefact floor, and the
+idle-phase signal *shrank* as speed tripled, which back-EMF cannot do. But the
+high-speed path never got far enough to test the detector at all, because the
+bridge faults first.
+
+**What it would take.** Ripple scales as `1/f_sw`, so the fix is a faster PWM:
+about 32 kHz to bring the true peak under the limit at 0.5 A, 40–60 kHz for
+margin. Control cannot simply move with it — the FOC ISR is 4061 cycles and a
+40 kHz tick allows 4250, which is no margin at all — so PWM and control have to
+decouple, triggering the ADC every other PWM period. That is a change to the
+same timer and ADC trigger configuration that produced the current-sense
+regression two sessions ago, so it is being raised rather than assumed.
+
 ## 2026-08-03 — session 23: motor swapped back, refit, and a real speed sweep
 
 **The bench motor was changed back to the small one because OCP kept blocking

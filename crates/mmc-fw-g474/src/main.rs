@@ -1403,9 +1403,10 @@ unsafe extern "C" fn ADC1_2() {
                 let (hi_i, lo_i, fl_i) = sixstep::TABLE[s.ss_sector];
                 let v_ref = 0.5 * (vb_phase(hi_i as usize) + vb_phase(lo_i as usize));
                 let v_float = vb_phase(fl_i as usize);
-                // In the ramp `amp` is the duty directly; once sensing, it
-                // becomes the duty ceiling and the speed loop sets the rest.
-                let mut duty = s.amp.clamp(0.0, MAX_DUTY);
+                // `amp` is a duty ceiling in both phases: the ramp feeds forward
+                // the duty its commanded speed needs, and once sensing the speed
+                // loop sets it. Each branch below assigns it.
+                let duty;
 
                 if !s.ss_sensing {
                     let want = s.ss_ramp.as_mut().unwrap().update(CTRL_DT);
@@ -1419,6 +1420,25 @@ unsafe extern "C" fn ADC1_2() {
                         .unwrap()
                         .update(s.ss_sector, v_float, v_ref, CTRL_DT);
                     let r = s.ss_ramp.as_ref().unwrap();
+                    // Feedforward the ramp duty instead of applying `amp` flat.
+                    // A fixed duty is worst at standstill, where there is no
+                    // back-EMF to oppose it and the whole voltage lands on the
+                    // winding: reaching a high handoff needs a duty that trips
+                    // overcurrent on the way there. Asking instead for the duty
+                    // that produces a chosen current — bus volts to cover the
+                    // back-EMF the ramp speed implies, plus i·R across the two
+                    // conducting phases — holds current roughly flat all the way
+                    // up, so `amp` becomes a ceiling the ramp rarely reaches
+                    // rather than the thing that trips.
+                    let i_ramp = param_get(param::IQ_LIMIT);
+                    let r_path = 2.0 * param_get(param::R);
+                    let ff = (param_get(param::FLUX) * r.omega_e().abs() + i_ramp * r_path)
+                        / s.vbus_filt.max(1.0);
+                    // max/min rather than clamp: `clamp` panics when min > max,
+                    // and the ceiling is below the 0.01 floor for one tick if a
+                    // mode arrives before its amplitude. A panic here halts the
+                    // firmware outright.
+                    duty = ff.max(0.01).min(s.amp.clamp(0.0, MAX_DUTY));
                     if r.done() {
                         let zc = s.ss_zc.as_mut().unwrap();
                         if !zc.locked() {
@@ -1444,7 +1464,7 @@ unsafe extern "C" fn ADC1_2() {
                     s.ss_target += (want - s.ss_target).clamp(-accel * CTRL_DT, accel * CTRL_DT);
                     let pi = s.ss_speed.as_mut().unwrap();
                     let raw = pi.update(s.ss_target - measured, CTRL_DT);
-                    duty = raw.clamp(0.01, s.amp.clamp(0.0, MAX_DUTY));
+                    duty = raw.max(0.01).min(s.amp.clamp(0.0, MAX_DUTY));
                     if raw != duty {
                         // Back-calculation: a six-step bridge has no braking
                         // quadrant, so the loop saturates low on every
