@@ -3,6 +3,54 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-03 — session 25: PWM decoupled from control; six-step still blocked, but for a different reason
+
+**PWM now switches at 40 kHz while the control loop still ticks at 20 kHz.**
+`PWM_ARR` halved and the ADC interrupt, which arrives every PWM period, drops
+every second conversion (`PWM_DIV`). Every gain, slew rate and tick counter
+downstream keeps the timebase it was tuned for. Measured on the bench:
+**control loop 20005 Hz**, telemetry unchanged. ADC1 stays on CC4 at the
+counter peak — dividing instead via the repetition counter and TRGO was
+rejected because in centre-aligned mode the update event lands on the
+*underflow*, i.e. the on-time, which is exactly the position that caused the
+current-sense regression two sessions ago.
+
+Two follow-on corrections came with it: the `ontime_ccr5` upper bound now
+tracks `PWM_ARR/2` rather than being a fixed 2000 counts, and the on-window is
+half as long in absolute time, so six-step back-EMF sensing needs **duty ≳
+0.10** at 40 kHz where 0.07 sufficed at 20 kHz.
+
+**A measurement bias surfaced.** At identical commanded voltage the open-loop
+current draw rose 1.47× (0.474 → 0.697 A per volt) purely from doubling the
+switching frequency. True average current cannot depend on switching frequency
+— same resistance, same back-EMF — so the 20 kHz reading was biased low.
+Halving the ripple halved the bias, which is consistent with the sample sitting
+off the centre of the ripple triangle. The R/L probe is unaffected (R 0.887 vs
+0.885 Ω, L 0.029 vs 0.030 mH, and *tighter* error bars) because it takes a
+differential across folded edges, where a ripple-position bias cancels. This
+also explains the standing puzzle of the driver faulting while telemetry showed
+modest current: the drive was under-reading, and the hardware protection was
+seeing the real thing.
+
+**Six-step got much closer and is still blocked.** With the feedforward ramp at
+40 kHz the ramp holds 0.35–0.5 A and reaches **1641 rad/s el**, against ~1200
+before, with applied duty tracking the feedforward prediction exactly (0.194
+against 0.194). But it still faults short of handoff, and the reason is not
+average current: the trips are **spikes of 1.2–1.36 A that do not scale with
+the target** — dropping the ramp current from 0.45 A to 0.30 A left them
+unchanged. That is commutation transient, not ripple. At each commutation
+`di/dt = V_bus/2L` = 200 A/ms on this 60 µH series pair, and a faster PWM does
+nothing to that: the transient is set by bus voltage and inductance alone.
+
+**Conclusion: this motor cannot run six-step on this hardware.** 30 µH at 12 V
+puts commutation transients into the 1.5 A protection regardless of switching
+frequency or commanded current. The 4-pole motor is 377 µH — 12.5× the
+inductance, so 12.5× smaller transients — and 20× the flux, so its back-EMF
+clears the sense noise floor as well. It is the right machine for six-step, and
+that is why the MS8 results happened on it. The PWM work stands on its own
+merits: halved ripple, a corrected current measurement, and headroom for any
+low-inductance motor.
+
 ## 2026-08-03 — session 24: what actually blocks six-step on this motor
 
 **It is not the zero-cross detector. It is PWM ripple current, and the sample

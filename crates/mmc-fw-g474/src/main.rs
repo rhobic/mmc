@@ -70,9 +70,21 @@ bind_interrupts!(struct Irqs {
 
 // ---------------------------------------------------------------- constants
 
-const PWM_ARR: u16 = 4250; // 170 MHz / (2·4250) = 20 kHz center-aligned
-const CTRL_FREQ: f32 = 20_000.0;
+const CTRL_FREQ_HZ: u32 = 20_000;
+const CTRL_FREQ: f32 = CTRL_FREQ_HZ as f32;
 const CTRL_DT: f32 = 1.0 / CTRL_FREQ;
+/// PWM periods per control tick. The bridge switches faster than the loop
+/// runs because ripple current is `V_bus·d·(1−d)/(2L·f_sw)`, and on a
+/// low-inductance motor (30 µH here) 20 kHz put the six-step *peak* past the
+/// driver's limit while the average still looked modest — the current sample
+/// sits at the counter peak, which is the middle of the freewheel and so the
+/// ripple *minimum*, so the peak never appeared in any capture. Doubling the
+/// switching frequency halves the ripple. Control cannot simply follow it: the
+/// FOC tick is ~4060 cycles against the 4250 a 40 kHz tick would allow, which
+/// is no margin, so every second conversion is dropped instead.
+const PWM_DIV: u32 = 2;
+/// 170 MHz / (2·2125) = 40 kHz center-aligned; control ticks every 2nd period.
+const PWM_ARR: u16 = (170_000_000 / (2 * CTRL_FREQ_HZ * PWM_DIV)) as u16;
 
 const ADC_VOLTS_PER_LSB: f32 = 3.3 / 4096.0;
 const CUR_VOLTS_PER_AMP: f32 = 1.528 * 0.33; // amp gain × shunt
@@ -101,8 +113,13 @@ const CAL_TICKS: u32 = 8192;
 /// referenced to V_bus/2 rather than to ground. 100 counts = 0.59 us.
 ///
 /// It must sit inside the on-window, i.e. below the commanded duty's compare
-/// value: at duty 0.07 that leaves (100 + 297)/170 MHz = 2.3 us before the
-/// high side turns off, and ADC2's four conversions take 1.79 us.
+/// value, with room left for ADC2's four conversions (1.79 us). The window
+/// scales with the PWM period, so raising the switching frequency raises the
+/// minimum usable duty: at 40 kHz (`PWM_ARR` 2125) the trigger leaves
+/// `(100 + d·2125)/170 MHz`, which clears 1.79 us only from **duty ≈ 0.10**
+/// upward. Below that the sample lands while the bridge is freewheeling and
+/// the idle phase reads nothing useful. At 20 kHz the same default cleared it
+/// from duty 0.07.
 const ONTIME_CCR5_DEFAULT: u16 = 100;
 /// Six-step duty→speed loop defaults. Crossover well under the commutation
 /// rate; the integral corner an order below the crossover, per the simulator.
@@ -234,8 +251,9 @@ fn param_range(id: u8) -> Option<(f32, f32)> {
         // Current ceiling: 1.2 A leaves 20% margin to the 1.5 A trips.
         param::IQ_LIMIT => (0.05, 1.2),
         // Sample point, timer counts before the valley. 20 counts = 0.12 us;
-        // the upper bound keeps it inside a 50% duty on-window.
-        param::ONTIME_CCR5 => (20.0, 2000.0),
+        // the upper bound keeps it inside a 50% duty on-window, so it tracks
+        // the PWM period rather than being a fixed count.
+        param::ONTIME_CCR5 => (20.0, (PWM_ARR / 2) as f32),
         // Duty per rad/s electrical: 1e-3 already commands full duty from a
         // 900 rad/s error, so the useful range is small.
         param::SS_KP => (0.0, 0.01),
@@ -356,6 +374,9 @@ fn burst_abort() {
 // ---------------------------------------------------------------- ISR state
 
 struct IsrState {
+    /// Which PWM period of the current control tick this interrupt is; see
+    /// [`PWM_DIV`]. Counts up and wraps, gating the loop down to CTRL_FREQ.
+    pwm_phase: u32,
     // calibration
     cal_count: u32,
     cal_sum: [u32; 3],
@@ -401,6 +422,7 @@ struct IsrCell(UnsafeCell<IsrState>);
 unsafe impl Sync for IsrCell {}
 
 static ISR_STATE: IsrCell = IsrCell(UnsafeCell::new(IsrState {
+    pwm_phase: 0,
     cal_count: 0,
     cal_sum: [0; 3],
     offset_v: [1.558; 3],
@@ -1007,15 +1029,26 @@ fn set_duties(d: [f32; 3]) {
 
 /// The 20 kHz control loop, clocked by the injected-conversion ADC interrupt
 /// (which TIM1 CH4 fires at the counter peak — mid low-side conduction).
+/// The interrupt itself arrives at the PWM rate; see [`PWM_DIV`].
 #[no_mangle]
 unsafe extern "C" fn ADC1_2() {
     if !ADC1.isr().read().jeos() {
         return;
     }
     ADC1.isr().write(|w| w.set_jeos(true));
-    let isr_t0 = cortex_m::peripheral::DWT::cycle_count();
 
     let s = &mut *ISR_STATE.0.get();
+    // Drop the conversions that fall between control ticks. Sampling still
+    // happens every PWM period — the discarded ones cost only this test — but
+    // the loop runs at CTRL_FREQ, so every gain, slew rate and tick counter
+    // downstream keeps the timebase it was tuned for.
+    s.pwm_phase += 1;
+    if s.pwm_phase < PWM_DIV {
+        return;
+    }
+    s.pwm_phase = 0;
+
+    let isr_t0 = cortex_m::peripheral::DWT::cycle_count();
     let ticks = CONTROL_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
 
     let raw = [
