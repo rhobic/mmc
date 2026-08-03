@@ -1,17 +1,20 @@
 {
-  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 6",
-  "description": "Ad-hoc telemetry capture.",
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 8",
+  "description": "Forced-angle I-f current FOC at the speed six-step settles to, with the current magnitude matched to six-step phase RMS for equal copper loss.",
   "notes": [
-    "Captured live from mmc-g474 (BoardG474) over mmc-proto; 5962 frames."
+    "Captured live over mmc-proto at 990 Hz effective; 7949 frames, 0 rejected.",
+    "Matched-speed pair with six.csv. 0.23 A commanded gives 0.1754 A phase RMS against six-step 0.1688 A \u2014 matched within 4 %.",
+    "Current-vector ripple 8.4 % sd / 36.8 % pk-pk, i.e. 3.3x smoother than six-step.",
+    "Forced angle, not closed-loop sensorless: the flux observer stalls at this speed (back-EMF is only ~47 mV at 52 rad/s electrical), so sensorless FOC could not be the counterpart here. Rotor sync therefore cannot be confirmed from telemetry alone."
   ],
-  "order": 100,
+  "order": 11,
   "params": {
-    "divider": 10,
-    "drive": "IfCurrent { amps: 0.3, omega_e: 50.265484 }",
+    "divider": 8,
+    "drive": "IfCurrent { amps: 0.23, omega_e: 52.338936 }",
     "drive_step": null,
-    "duration_s": 6.0,
+    "duration_s": 8.0,
     "iq_A": null
   },
-  "title": "Matched speed comparison: if at 8 Hz electrical",
-  "unix_time": 1785713872
+  "title": "Matched-speed comparison: I-f current FOC, 52.3 rad/s el",
+  "unix_time": 1785762448
 }

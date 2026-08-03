@@ -1,17 +1,21 @@
 {
-  "command": "mmc-host capture --serial auto --baud 1000000 --divider 10 --duration 6",
-  "description": "Ad-hoc telemetry capture.",
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 8",
+  "description": "Closed-loop sensorless six-step at the rig duty ceiling (0.17), commutated from measured back-EMF zero crossings. Settles at 52.4 rad/s electrical.",
   "notes": [
-    "Captured live from mmc-g474 (BoardG474) over mmc-proto; 5962 frames."
+    "Captured live over mmc-proto at 990 Hz effective; 7949 frames, 0 rejected.",
+    "Matched-speed pair with if.csv: same rotor, same 12.07 V bus, same session.",
+    "Torque is matched by construction \u2014 both legs hold the same steady speed against the same unloaded rotor friction, so average torque is equal and current is a result.",
+    "Current-vector ripple 27.5 % sd / 136 % pk-pk; commutation-interval jitter 19.5 % sd.",
+    "Lock at this handoff is not reliable: 4 of 5 starts capture lock at ~52.4 rad/s, 1 of 5 collapses to ~17.3 rad/s with duty pinned and ~4x current. The 50.3 rad/s handoff is only 1.26x the measured 40 rad/s back-EMF sensing floor. This capture is a locked run."
   ],
-  "order": 100,
+  "order": 10,
   "params": {
-    "divider": 10,
+    "divider": 8,
     "drive": "SixStepSensorless { duty: 0.17, omega_handoff: 50.265484 }",
     "drive_step": null,
-    "duration_s": 6.0,
+    "duration_s": 8.0,
     "iq_A": null
   },
-  "title": "Matched speed comparison: six at 8 Hz electrical",
-  "unix_time": 1785713878
+  "title": "Matched-speed comparison: six-step closed loop at 52.3 rad/s el",
+  "unix_time": 1785762592
 }

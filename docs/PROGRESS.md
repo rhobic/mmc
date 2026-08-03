@@ -51,8 +51,56 @@ so the fix costs nothing that `984ba81` was for.
 **This invalidated committed results.** `ms8-compare/if.csv` was a fault trace,
 not a comparison — 0.0037 A at state 3 (`fault_drv`) throughout — and
 `six.csv` was sampled at the wrong point in the PWM period. Both legs are
-re-taken in this session's entry below. The ISR cycle counts from session 21
-stand: that arithmetic ran regardless of the values it ran on.
+re-taken below. The ISR cycle counts from session 21 stand: that arithmetic ran
+regardless of the values it ran on.
+
+### MS8 step 5 completed: the torque-quality half
+
+**Torque is matched by construction, so current is a result, not a knob.** Both
+schemes hold the same steady speed against the same unloaded rotor friction, so
+their average torque is equal by definition. That makes the honest comparison
+"same speed, same job — what does each scheme spend, and how clean is it?"
+
+The operating point is set by the rig, not by preference: six-step cannot go
+faster (duty 0.18+ trips the 1.5 A limit), and **closed-loop sensorless FOC
+stalls here** — at 52 rad/s electrical the back-EMF is only about **47 mV**, so
+the flux observer never converges and the run ends in `ST_STALL`. The FOC leg
+therefore has to be forced-angle I-f, which is what session 21 had planned.
+
+Matched at 52.4 rad/s electrical, currents matched within 4 % for equal copper
+loss (`--drive if --amp 0.23` against `--drive six-cl --amp 0.17`):
+
+| metric | six-step closed loop | I-f current FOC |
+|---|---|---|
+| settled speed | 52.42 rad/s el (8.34 Hz) | 52.34 rad/s el (forced) |
+| phase current RMS | 0.1688 A | 0.1754 A |
+| current-vector \|i\| mean | 0.2207 A | 0.2308 A |
+| **\|i\| ripple, sd/mean** | **27.5 %** | **8.4 %** |
+| \|i\| ripple, peak-to-peak | 136.3 % | 36.8 % |
+| commutation jitter | 19.5 % sd | n/a (angle is forced) |
+| ISR cost (session 21) | 2653 cyc | 4061 cyc |
+
+**FOC's current vector is 3.3× smoother for the same speed and the same RMS
+current.** That is the trade the milestone was built to measure: six-step buys
+its 35 % cheaper ISR with 3.3× the current ripple. The six-step figure is
+structural, not noise — |i| collapses and rebuilds through every commutation,
+which is what the 136 % peak-to-peak swing is. Cross-checked against 2.4 kHz
+reduced-mask captures (27.5 % and 7.9 %), so it is not a sampling artefact; the
+idle measurement noise floor is about 0.02 A peak, ~2 % of these means.
+
+**Six-step lock is not reliable at this handoff.** Five starts on the identical
+command: four capture lock at 52.34–52.42 rad/s (jitter 19.1–19.5 %, current
+0.169 A — repeatable to three digits), and **one collapses to 17.3 rad/s** with
+41 % jitter and 0.798 A, the documented below-floor signature of mistimed but
+periodic commutation. The handoff at 50.3 rad/s is only 1.26× the measured
+40 rad/s sensing floor. The committed capture is a locked run, and the first
+archival attempt was a collapsed one — worth knowing that a single capture of
+this drive proves nothing about the drive.
+
+**Caveat carried forward:** with no rotor-angle sensor, I-f sync cannot be
+confirmed from telemetry — the current loop regulates its magnitude whether or
+not the rotor is following, and at this speed the back-EMF is too small to
+settle it. That is MS7's job.
 
 ## 2026-08-02 — session 21: MS8 step 5 — ISR cost measured; FOC path blocked on hardware
 
