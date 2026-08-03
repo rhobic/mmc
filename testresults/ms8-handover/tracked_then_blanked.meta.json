@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 16",
+  "description": "Live FOC-to-six-step handover at 898 rad/s el with the 250 us blanking still in place. The detector commutates with the rotor for five sectors - the idle-phase ramps are textbook, +/-1.5 V about the measured mid, crossing mid-window - then one crossing arrives at window entry, inside the blank, and the drive desyncs and trips.",
+  "notes": [
+    "First measurement of the idle-phase signal on a SYNCHRONIZED rotor at speed: the sensing works; the low-speed artifact floor does not extrapolate up.",
+    "The failure is timing, not signal: 250 us of blanking is 21% of a 1.17 ms window, while demag on this motor needs ~2.5 us."
+  ],
+  "order": 10,
+  "params": {
+    "divider": 8,
+    "drive": "Sensorless { amps: 0.5, omega_e: 898.49554 }",
+    "drive_step": "SixStepSensorless { duty: 0.35, omega_handoff: 898.49554 }",
+    "duration_s": 16.0,
+    "iq_A": null
+  },
+  "title": "Handover tracks 5 sectors, then the blank swallows a crossing",
+  "unix_time": 1785770365
+}

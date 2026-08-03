@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 20",
+  "description": "The same handover with blanking cut to 30 us. Locked within ~10 ms of the modulation switch and held for the rest of the capture with zero faults.",
+  "notes": [
+    "Sector rate 829-941 rad/s el, rotor-driven (crossing-timed commutation is a rotor measurement, unlike a forced drive).",
+    "Settled current 0.03-0.14 A: the duty loop finds torque balance - closed-loop six-step is as economical as closed-loop FOC. The earlier 0.5 A six-step figures were forced-mode artifacts."
+  ],
+  "order": 11,
+  "params": {
+    "divider": 8,
+    "drive": "Sensorless { amps: 0.5, omega_e: 898.49554 }",
+    "drive_step": "SixStepSensorless { duty: 0.35, omega_handoff: 898.49554 }",
+    "duration_s": 20.0,
+    "iq_A": null
+  },
+  "title": "First lock: 30 us blanking, held 8 s",
+  "unix_time": 1785770456
+}

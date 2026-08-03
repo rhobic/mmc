@@ -3,6 +3,47 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-03 — session 26: the six-step review — and first lock on the small motor
+
+**A hostile review of every six-step conclusion, prompted by the fact that
+hobby-ESC practice runs six-step on exactly this class of motor. The full
+review with all evidence is [SIXSTEP-REVIEW.md](SIXSTEP-REVIEW.md); the
+outcome: closed-loop sensorless six-step locked at ~865 rad/s el on the small
+motor — the motor session 25 declared incapable of it.**
+
+The chain, compressed — each item overturned a prior conclusion:
+
+1. **Sector rate is not rotor speed on a forced drive.** A coast-tail check
+   showed the rotor at 771 rad/s against a 1200 rad/s commutation clock. All
+   high-speed forced-six-step claims measured the clock; the high-speed
+   sensing data was taken on a slipping rotor and meant nothing.
+2. **The ramp trips were pull-out, not commutation transients** — the
+   feedforward's voltage-budget error starves current at speed, torque
+   collapses, and the desync surge (0.9→1.47 A across ~15 windows) trips OC.
+   No hunting line in the envelope spectrum.
+3. **The low-speed floor is real; the high-speed floor was fiction.** On a
+   *synchronized* rotor (carried by FOC), the idle-phase ramps at 898 rad/s
+   are textbook — ±1.5 V about the measured mid, crossing mid-window.
+4. **Live FOC → six-step handover shipped (fw v15)** — sector seeded from the
+   observer's angle (conventions verified by a deliberate-π contradiction
+   test), detector seeded with ω̂, duty preloaded; plus a guard that stops
+   any unsupported live mode switch from dereferencing uninitialized state
+   (previously a silent panic-halt). Host: `capture --step-kind/--step-amp`.
+5. **First failure tracked 5 sectors then lost the one whose crossing arrived
+   inside the 250 µs blank** (21% of a window). Demag here is 2.5 µs. At
+   **30 µs blanking: lock in 6 ms, held 8 s, zero faults, reproduced.**
+   Settled current 0.03–0.14 A — torque balance, same economy as FOC.
+
+ISR worst case at 40 kHz PWM: idle 580 · FOC 4118 · sensorless 4247 ·
+six-step ≤ 4247, of 8500. The f_sw question the review set out to answer is a
+split verdict (good for ripple and measurement fidelity, actively bad for the
+low-speed sensing floor); the table is in the review doc. Captures in
+`testresults/ms8-handover/`; the forced sweep legs at 597/898 in
+`ms8-speed-sweep` now carry unverified-speed caveats in their metadata.
+
+**Next:** adaptive blanking in core with sim coverage, then the lock-band map
+and the honest closed-loop-vs-closed-loop comparison.
+
 ## 2026-08-03 — session 25: PWM decoupled from control; six-step still blocked, but for a different reason
 
 **PWM now switches at 40 kHz while the control loop still ticks at 20 kHz.**

@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 20",
+  "description": "Reproduction of the lock with the terminal-voltage channels: 6 ms to lock, 7+ s locked, clean idle-phase ramps sweeping every window.",
+  "notes": [
+    "Companion to first_lock_behavior; same command, back-EMF divider channels enabled."
+  ],
+  "order": 12,
+  "params": {
+    "divider": 8,
+    "drive": "Sensorless { amps: 0.5, omega_e: 898.49554 }",
+    "drive_step": "SixStepSensorless { duty: 0.35, omega_handoff: 898.49554 }",
+    "duration_s": 20.0,
+    "iq_A": null
+  },
+  "title": "Locked run, sensing channels",
+  "unix_time": 1785770543
+}

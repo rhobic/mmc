@@ -188,7 +188,16 @@ sync — normal for motor control in any language.
      (which arrives via `RunTest`, not `SetDrive`). Use 5 = forced commutation,
      6 = BEMF zero-cross, keeping wire and firmware namespaces aligned.
   5. **FOC-vs-six-step bench comparison** on one motor and one profile: torque
-     ripple, acoustic signature, ISR cost.
+     ripple, acoustic signature, ISR cost. *(Forced-mode comparison done
+     2026-08-03 across 100–900 rad/s el; ISR cost measured. The closed-loop
+     comparison unblocked by step 6 is still open.)*
+  6. **FOC → six-step live handover** *(shipped 2026-08-03, fw v15 — see
+     [SIXSTEP-REVIEW.md](SIXSTEP-REVIEW.md))*: closed-loop sensorless FOC
+     carries the rotor to speed, six-step takes commutation at the observer's
+     angle. First lock on the small motor at ~865 rad/s el. Remaining:
+     adaptive blanking in `mmc-core` + a sim handover scenario (this path is
+     not CI-covered yet), lock-band mapping, per-parity offset calibration
+     for the low-speed floor, a current-closed ramp for standalone starts.
 
 ## Backlog (deferred, not yet scheduled)
 
