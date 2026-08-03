@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 6",
+  "description": "Closed-loop sensorless FOC. Below the 150 rad/s handoff the observer never converges and the run ends in ST_STALL.",
+  "notes": [
+    "Startup authority 0.5 A; sl_handoff is 150 rad/s el, above this target.",
+    "Marks the low-speed limit of the closed-loop FOC leg."
+  ],
+  "order": 30,
+  "params": {
+    "divider": 8,
+    "drive": "Sensorless { amps: 0.5, omega_e: 100.53097 }",
+    "drive_step": null,
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "Sensorless FOC (closed loop), 101 rad/s el \u2014 stalls",
+  "unix_time": 1785765686
+}

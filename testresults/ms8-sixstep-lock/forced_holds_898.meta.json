@@ -1,0 +1,19 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 6",
+  "description": "Forced commutation at duty 0.15 drives the rotor to 898 rad/s electrical and holds it indefinitely. The mechanics reach the speed the detector needs.",
+  "notes": [
+    "Ramps 136 -> 375 -> 625 -> 854 -> 898 rad/s and stays there for the rest of the run.",
+    "Current falls from 0.94 to 0.72 A as back-EMF builds, which is the expected direction.",
+    "Pair with sixcl_collapses_898.csv: same speed, same duty, only the angle source differs."
+  ],
+  "order": 10,
+  "params": {
+    "divider": 8,
+    "drive": "SixStepForced { duty: 0.15, omega_e: 898.49554 }",
+    "drive_step": null,
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "Forced six-step holds 898 rad/s el",
+  "unix_time": 1785765409
+}

@@ -3,6 +3,86 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-03 — session 23: motor swapped back, refit, and a real speed sweep
+
+**The bench motor was changed back to the small one because OCP kept blocking
+the work. Re-identifying it first turned out to matter more than expected: it
+invalidates a chunk of what MS8 recorded.**
+
+**What was in flash was neither motor's truth.** The stored blob decoded to
+R 1.056 Ω, L 377 µH, flux 18.7 mWb, **2 pole pairs** — the 4-pole motor,
+written by a 10-parameter firmware. The current 13-parameter build CRC-fails
+that blob and silently falls back to compiled-in defaults, so the device had
+been running defaults, not the stored fit, for some time.
+
+**Refit of the small motor** (`mmc-host profile`, then `tools/profile.py`):
+
+| | fitted now | previously on record |
+|---|---|---|
+| R (drive path) | 0.8847 Ω | 0.97 Ω |
+| L | 30.15 µH | 28 µH |
+| flux | 0.937 mWb ±0.025 (5/5 points) | 0.894 mWb |
+| J | 1.980 µN·m·s² | 1.75 µN·m·s² |
+| kt | 9.839 mN·m/A | — |
+
+Applied and persisted; the flash blob is now valid for the 13-parameter build.
+
+**Correction to MS8: the six-step characterisation was done on the 4-pole
+motor, not this one.** Back-EMF is `ψ·ω`, so the "40 rad/s el sensing floor"
+recorded for six-step corresponds to about **0.75 V** — which needs the 4-pole
+motor's 18.7 mWb. This motor has **20× less flux**, so the same 0.75 V would
+need roughly 800 rad/s el. Every speed-referenced six-step number in the MS8
+notes is specific to that motor and does not transfer.
+
+**Six-step closed loop does not lock on this motor at all.** Forced
+commutation is fine: it ramps to **898 rad/s el and holds it indefinitely**,
+with current falling 0.94 → 0.72 A as back-EMF builds. Closed loop, same duty,
+same speed, climbs the same ramp to 646 rad/s and then **collapses to ~40 rad/s
+within half a second** of handoff, free-running on the timeout fallback and
+never reporting lock (`ST_SL_RAMP` → `ST_SS_UNLOCKED`). It collapses to the
+same ~40 rad/s for **every** commanded handoff from 31 to 898 rad/s, so the
+outcome is independent of the command. Not a back-EMF magnitude problem — at
+646 rad/s el this motor produces ~0.6 V. Diagnosing further needs 20 kHz
+visibility the 1 kHz telemetry cannot give; the detector's fixed 200 µs
+blanking against a 34 µs electrical time constant is the first suspect.
+
+### Three schemes across 100–900 rad/s electrical
+
+Six-step duty trimmed per speed so the current vector matches the FOC legs at
+~0.53 A, and I-f commanded at 0.500 A — so the two forced legs differ only in
+modulation:
+
+| ω_e [rad/s el] | six-step \|i\| ripple | I-f FOC \|i\| ripple | ratio | six-step jitter |
+|---|---|---|---|---|
+| 101 | 5.9 % | 0.7 % | 8.4× | 2.1 % |
+| 302 | 15.4 % | 1.2 % | 12.8× | 3.9 % |
+| 597 | 29.4 % | 1.9 % | 15.5× | 13.8 % |
+| 898 | 42.6 % | 3.0 % | 14.2× | 20.3 % |
+
+**Sinusoidal modulation is an order of magnitude smoother, and the gap widens
+with speed** — six-step ripple grows 7× across the range while FOC's grows 4×
+from a far lower base, and six-step's commutation jitter grows 10×.
+
+**The closed-loop result is the more interesting one.** Sensorless FOC holds
+the same speeds on about **0.08 A against the forced legs' 0.50 A** — roughly
+6× less current for the same mechanical job — because a closed speed loop
+supplies only the torque friction actually demands, while a forced leg pushes
+whatever it was told to. That is a much stronger argument for closed-loop
+sensorless control than ripple is. Its low-speed limit is the 150 rad/s
+handoff: at 101 rad/s el the observer never converges and the run stalls.
+
+**Two measurement limits, stated rather than buried.** The 6×-electrical
+ripple is well resolved only at the low end — 25 samples per ripple period at
+101 rad/s, 8.3 at 302, but **4.2 at 597 and 2.8 at 898**, where the figures are
+lower bounds. Both schemes are sampled identically at each speed, so the ratio
+column survives even where the absolute values do not. And the sensorless leg's
+ripple percentage is **not** comparable to the 0.5 A legs: at 0.078 A the
+0.020 A noise floor is 26 % of the signal, so that number is noise, not torque.
+
+**Next:** the six-step lock failure is now the blocking item for a like-for-like
+closed-loop comparison, and it needs on-device instrumentation rather than more
+captures — log the detector's crossing decisions in the ISR and stream those.
+
 ## 2026-08-03 — session 22: the FOC blocker was ours, not the bench
 
 **Last session's blocker was a regression we shipped, and the diagnosis in that

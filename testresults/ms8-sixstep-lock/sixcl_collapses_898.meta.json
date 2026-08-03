@@ -1,0 +1,20 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 8",
+  "description": "The same command with back-EMF-timed commutation. The forced ramp climbs normally, then the drive loses the rotor the moment it hands off to the zero-cross detector.",
+  "notes": [
+    "Climbs to 646 rad/s on the ramp, drops to 470, then collapses to ~40 rad/s within half a second and free-runs there on the timeout fallback.",
+    "States go ST_SL_RAMP (6) -> ST_SS_UNLOCKED (9); it never reports lock.",
+    "Collapses to the same ~40 rad/s for every commanded handoff from 31 to 898 rad/s, so the result is independent of the command \u2014 the detector is not tracking at all.",
+    "Not a back-EMF magnitude problem: at 646 rad/s el this motor's back-EMF is ~0.6 V."
+  ],
+  "order": 11,
+  "params": {
+    "divider": 8,
+    "drive": "SixStepSensorless { duty: 0.15, omega_handoff: 898.49554 }",
+    "drive_step": null,
+    "duration_s": 8.0,
+    "iq_A": null
+  },
+  "title": "Closed-loop six-step collapses at handoff",
+  "unix_time": 1785765472
+}

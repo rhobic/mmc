@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host profile",
+  "description": "Profiling capture for the small bench motor after the motor swap, re-establishing R, L, flux and inertia before any comparison was run.",
+  "notes": [
+    "Fit: R 0.8847 ohm, L 30.15 uH, flux 0.937 mWb, J 1.980 uN*m*s^2, kt 9.839 mN*m/A.",
+    "Confirms the small motor (30 uH), not the 4-pole one (377 uH) whose stale parameters were still sitting in flash."
+  ],
+  "order": 13,
+  "params": {
+    "divider": 20,
+    "drive": "IfCurrent { amps: 0.3, omega_e: 300.0 }",
+    "drive_step": null,
+    "duration_s": 4.099999904632568,
+    "iq_A": null
+  },
+  "title": "Refit: sweep i030 w300",
+  "unix_time": 1785765106
+}

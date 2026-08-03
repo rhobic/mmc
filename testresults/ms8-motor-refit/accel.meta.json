@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host profile",
+  "description": "Profiling capture for the small bench motor after the motor swap, re-establishing R, L, flux and inertia before any comparison was run.",
+  "notes": [
+    "Fit: R 0.8847 ohm, L 30.15 uH, flux 0.937 mWb, J 1.980 uN*m*s^2, kt 9.839 mN*m/A.",
+    "Confirms the small motor (30 uH), not the 4-pole one (377 uH) whose stale parameters were still sitting in flash."
+  ],
+  "order": 10,
+  "params": {
+    "divider": 20,
+    "drive": "Sensorless { amps: 0.5, omega_e: 300.0 }",
+    "drive_step": "Sensorless { amps: 0.5, omega_e: 900.0 }",
+    "duration_s": 8.0,
+    "iq_A": null
+  },
+  "title": "Refit: accel",
+  "unix_time": 1785765128
+}

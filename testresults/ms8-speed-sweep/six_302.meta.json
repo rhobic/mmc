@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 6",
+  "description": "Forced six-step at duty 0.093, chosen so the current vector matches the FOC legs at about 0.53 A. Angle is forced, so this isolates the commutation scheme from the angle source.",
+  "notes": [
+    "Matched-current leg of the three-scheme sweep on the small bench motor (flux 0.937 mWb, 7 pole pairs).",
+    "Ripple marginally resolved: 8.3 samples per ripple period."
+  ],
+  "order": 11,
+  "params": {
+    "divider": 8,
+    "drive": "SixStepForced { duty: 0.093, omega_e: 301.5929 }",
+    "drive_step": null,
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "Six-step (trapezoidal), 302 rad/s el",
+  "unix_time": 1785765767
+}

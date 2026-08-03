@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 6",
+  "description": "Forced-angle current FOC at 0.500 A, the same speed and the same current vector magnitude as the six-step leg. Differs from it only in modulation.",
+  "notes": [
+    "Matched-current leg of the three-scheme sweep.",
+    "Ripple well resolved: 25 samples per 6x-electrical ripple period."
+  ],
+  "order": 20,
+  "params": {
+    "divider": 8,
+    "drive": "IfCurrent { amps: 0.5, omega_e: 100.53097 }",
+    "drive_step": null,
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "I-f FOC (sinusoidal), 101 rad/s el",
+  "unix_time": 1785765680
+}

@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host capture --serial auto --baud 1000000 --divider 8 --duration 6",
+  "description": "Closed-loop sensorless FOC holding the same speed. Current is a result here, not a command: the speed loop supplies only the torque friction actually demands.",
+  "notes": [
+    "Draws about 0.08 A against the forced legs' 0.50 A for the same speed \u2014 roughly 6x less current for the same mechanical job.",
+    "Its ripple percentage is NOT comparable to the 0.5 A legs: at 0.078 A the 0.020 A measurement noise floor is 26 % of the signal, so the figure is noise, not torque ripple."
+  ],
+  "order": 33,
+  "params": {
+    "divider": 8,
+    "drive": "Sensorless { amps: 0.5, omega_e: 898.49554 }",
+    "drive_step": null,
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "Sensorless FOC (closed loop), 898 rad/s el",
+  "unix_time": 1785765726
+}
