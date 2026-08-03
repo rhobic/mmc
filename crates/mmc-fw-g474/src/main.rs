@@ -630,9 +630,14 @@ fn init_motor_peripherals() {
         ADC1.cfgr().modify(|w| w.set_jqdis(true));
 
         use pac::adc::vals::Exten;
+        // ADC1 stays on CC4 at the counter peak: the low-side shunts only carry
+        // phase current while the low side conducts. ADC2's move into the PWM
+        // on-time (below) is for the BEMF nodes and must not be copied here —
+        // sampling the shunts inside the high-side on-time reads zero current
+        // no matter what the bridge is actually doing.
         ADC1.jsqr().write(|w| {
             w.set_jl(3); // 4 conversions
-            w.set_jextsel(8); // tim1_trgo2 (= OC5REF), inside the on-time
+            w.set_jextsel(1); // tim1_cc4
             w.set_jexten(Exten::RISING_EDGE);
             w.set_jsq(0, 2); // iU  PA1
             w.set_jsq(1, 12); // iV  PB1

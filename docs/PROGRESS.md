@@ -3,6 +3,57 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-03 — session 22: the FOC blocker was ours, not the bench
+
+**Last session's blocker was a regression we shipped, and the diagnosis in that
+entry was wrong.** No scope was needed, the motor and the driver were fine, and
+it did not predate the six-step work — it arrived with it.
+
+**Method: A/B the firmware, not the theory.** The last pre-six-step build
+(`92fb226`) was checked out into a detached worktree, flashed, and driven with
+the *identical* host command as the current build — same bench, same bus, same
+session, so the binary is the only variable. Protocol drift between the two is
+purely additive (one telemetry channel, three params, two drive codes), and the
+firmware clamps `mask & channel::ALL` and bounds-checks param ids, so a current
+host talks to the old firmware unmodified.
+
+Open-loop voltage, 1.5 V commanded at 8 Hz electrical, duties identical at
+0.500 ± 0.090 in every run:
+
+| firmware | phase current RMS |
+|---|---|
+| `92fb226`, pre-six-step (fw 7) | **0.7125 A** |
+| `89fc095`, current (fw 14) | **0.0035 A** |
+| current + this fix | **0.7108 A** |
+
+**Cause: `984ba81` moved ADC1's trigger along with ADC2's.** That commit's own
+message and its inline comment both state that ADC1 keeps CC4 at the counter
+peak so current sensing is untouched — but the diff set `jextsel(8)`
+(TIM1_TRGO2, inside the PWM on-time) on *both* ADCs. ADC1 carries the phase
+shunts. Low-side shunts only conduct at the counter peak, so sampling them
+inside the high-side on-time reads zero no matter what the bridge is doing.
+
+**The current was always flowing; the measurement was blind.** That is why I-f
+faulted: the current loop saw zero, wound up, and drove real current until the
+gate driver's own overcurrent protection tripped. Nothing in our firmware was
+limiting it — worth remembering when a current reading looks impossibly clean.
+
+**Fix:** ADC1 back to `jextsel(1)` (tim1_cc4); ADC2 stays on TRGO2, which is
+what the on-time work actually needed. One line, plus a comment saying why the
+two ADCs must not share a trigger.
+
+**Verified on hardware:** open-loop voltage back to 0.7108 A, matching the old
+firmware to 0.15%; I-f at 0.3 A regulates `i_q` to **0.3004 A** and holds five
+seconds with no fault, where it previously tripped in ~50 ms; six-step closed
+loop still commutates (sectors cycling 0–5, BEMF nodes swinging the full bus),
+so the fix costs nothing that `984ba81` was for.
+
+**This invalidated committed results.** `ms8-compare/if.csv` was a fault trace,
+not a comparison — 0.0037 A at state 3 (`fault_drv`) throughout — and
+`six.csv` was sampled at the wrong point in the PWM period. Both legs are
+re-taken in this session's entry below. The ISR cycle counts from session 21
+stand: that arithmetic ran regardless of the values it ran on.
+
 ## 2026-08-02 — session 21: MS8 step 5 — ISR cost measured; FOC path blocked on hardware
 
 **One axis of the comparison completed, one blocked by a hardware fault that
