@@ -3,6 +3,91 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-08 — session 28: the dead-time measurement, built and validated against the sim
+
+**Bench is set up with the rotor locked (same motor 1), so this session built
+the one measurement that needs exactly that condition — and validated the
+whole pipeline against a simulator with a known answer before it goes near
+hardware.**
+
+### New profiler stage: `vdead`
+
+A DC voltage ladder at ω_e = 0, ascending then descending, fitting
+`v = R·i + v_dead·sign(i)`. No new firmware — it drives the existing
+`OpenLoopVoltage` mode at zero frequency, which is what makes it available
+today.
+
+The shape has more structure than "a line with an intercept", and that is
+what makes both parameters identifiable. A DC vector at θ = 0 puts
+`i_a = i_d` but `i_b = i_c = −i_d/2`, so the legs sit at different points on
+their own sign curves, and Clarke gives
+
+```
+e_d = (2/3)·[f(i_d) + f(i_d/2)],   f(x) = clip(x/i_thresh, −1, 1)
+```
+
+which bends **twice** — phase A saturates at `i_thresh`, phases B/C only at
+`2·i_thresh`. Fitting is a scan over `i_thresh` with a 2-parameter linear
+solve at each (numpy only; scipy is not a dependency), so there is no initial
+guess to get wrong.
+
+**Validated against `mmc-host serve --deadtime`, three controls:**
+
+| truth | fit | model-free cross-check |
+|---|---|---|
+| `0.12, 0.5` | 118.6 mV, 0.497 A | **120.0 mV, R 0.904 Ω** |
+| `0.30, 0.35` | 300.0 mV, 0.350 A | **300.0 mV, R 0.904 Ω** |
+| ideal | **"none measurable"** | — |
+
+The cross-check is model-free — a straight-line fit whose intercept reads
+`v_dead` without the shape function — and it lands exactly. R comes back at
+0.904 Ω against the sim's 0.904.
+
+**A hardware constraint the sim surfaced before the bench could.** The 1.5 A
+trip caps the ladder at about `2·i_thresh` on this motor, so the *fully
+saturated* regime is out of reach and the cross-check has to run between the
+knees, where the line is `[R + v_dead/(3·i_thresh)]·i + (2/3)·v_dead`. The
+fit handles both regimes and reports which one it used.
+
+**Two safety behaviours, because a locked winding has no rotation to carry
+heat away.** The ladder sizes itself from the device's own `R` (0.7·I_trip),
+and *predicts* each rung before commanding it — verified by lying to the sim
+(`r = 2.7` against a true 0.904): it stops before the rung that would have
+drawn 1.37 A, rather than after. The descending branch is the thermal
+control: copper gains 0.39%/°C and a warming winding fits a resistance that
+was never true at any single point, so if the two branches disagree the fit
+says so.
+
+### Two more sim/hardware divergences closed
+
+**`apply` could not target the sim at all** — serial only, while `profile` and
+`capture` both take `--addr`. That breaks the project's own "same host tooling
+against sim and hardware" invariant. It now takes `--addr`.
+
+**The sim rebuilt its parameter table on every connection.** So `apply` wrote,
+verified, printed success — and the table reverted the moment the tool
+disconnected. A `profile → fit → apply → capture` loop against the sim quietly
+ran on defaults. The table now lives with the *device* (the `serve` loop), as
+it does in firmware RAM; motor and controller state still restart per session,
+which is correct. This is the third divergence of the same family in two
+sessions, after the speed-gain regression and the 10-vs-13 param table.
+
+**Operational note worth recording:** the sim server paces to wall-clock time,
+so a loaded host degrades its captures — one busy run turned a 0.1 mV fit
+residual into 3.0 mV and pulled `v_dead` to 96 mV. Idle, the same ladder
+repeats bit-identically across fresh servers. Check the load before the code.
+
+**Verification:** 76 workspace tests, clippy clean, fmt clean, `cargo check`
+inside `crates/mmc-fw-g474/`.
+
+**Next, on the locked bench:** run `--only rl,vdead` (in that order — the
+ladder wants a fresh R), compare the ladder's R against the probe's as the
+check that the extra term is real, then enable `Foc::deadtime` and re-measure.
+Also available while the rotor is clamped and still open from session 9: the
+**saliency re-clamp-45° confirmation**, which needs a rotor held at a *chosen*
+angle — real saliency rotates with the rotor, a stator-locked gain artefact
+does not.
+
 ## 2026-08-08 — session 27: back to FOC — two live bugs, and the sim grows the low-speed physics
 
 **Six-step paused while the bench hardware is reviewed. This session is all

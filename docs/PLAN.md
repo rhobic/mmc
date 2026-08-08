@@ -222,12 +222,16 @@ sync — normal for motor control in any language.
   is the constraint. Build FW in the sim if it is wanted as a capability; do
   not expect it to buy anything on this bench.
 
-  1. **Measure `v_dead`** *(no new firmware)* — locked rotor, `OpenLoopVoltage`
-     at ω_e = 0, sweep v_d and fit `v = R·i + v_dead·sign(i)`: the intercept is
-     `v_dead`, the knee width is `i_thresh`. The R/L probe cancels this term by
-     construction, so it has never been fitted. Then enable `Foc::deadtime`
-     and re-run the low-speed legs. *(Model + compensation + sim coverage
-     landed session 27; the measurement is the missing half.)*
+  1. **Measure `v_dead`** — *tooling shipped session 28 as profiler stage
+     `vdead`; needs no new firmware (it drives `OpenLoopVoltage` at ω_e = 0)
+     and is validated against `serve --deadtime` to 1.2% with a model-free
+     cross-check that is exact. What remains is running it on the bench:*
+     `--only rl,vdead` with the rotor clamped, then compare the ladder's R
+     against the probe's — agreement is the check that the extra term is real
+     rather than R being mis-assigned — then enable `Foc::deadtime` and
+     re-run the low-speed legs. Note the 1.5 A trip caps the ladder near
+     `2·i_thresh`, so the fully-saturated regime is not reachable on this
+     motor and the fit works between the knees.
   2. **Lower the sensorless floor.** The 150 rad/s el handoff is inherited, not
      derived. With the flux magnitude now honest at low speed and the dead-time
      bias removable, find where the observer actually stops working and set the

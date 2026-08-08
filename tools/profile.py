@@ -121,6 +121,136 @@ def fit_rl(path):
     }
 
 
+def vdead_shape(i_d, i_th):
+    """Per-amp shape of the bridge's error, seen on the d axis.
+
+    A DC vector at theta = 0 puts i_a = i_d and i_b = i_c = -i_d/2 (the
+    amplitude-invariant inverse Clarke), so each leg sits at a different point
+    on its own sign curve. Clarke back to alpha:
+
+        e_d = (2/3) * (f(i_d) + f(i_d/2)),   f(x) = clip(x/i_th, -1, 1)
+
+    which bends twice — phase A saturates at i_d = i_th, phases B and C only
+    at 2*i_th. Those two knees are what separate v_dead from i_th; a single
+    saturating curve would leave them degenerate.
+    """
+    f = lambda x: np.clip(x / i_th, -1.0, 1.0)  # noqa: E731
+    return (2.0 / 3.0) * (f(i_d) + f(i_d / 2.0))
+
+
+def fit_vdead(points):
+    """Fit v_d = R*i_d + v_dead*shape(i_d) over the DC ladder.
+
+    Linear in (R, v_dead) once i_th is fixed, so scan i_th and solve the
+    2-parameter least squares at each — no initial guess to get wrong, and
+    the residual curve doubles as the confidence statement. (scipy is not a
+    dependency of this repo; numpy is.)
+    """
+    i = np.array([p["i"] for p in points])
+    v = np.array([p["v"] for p in points])
+    if len(i) < 6:
+        raise SystemExit(f"vdead: only {len(i)} points — need the full ladder")
+
+    # i_th below the smallest measured current is unidentifiable (every point
+    # saturated); above the largest, the shape is a straight line and merges
+    # with R. Scan strictly inside.
+    lo, hi = max(1e-3, 0.3 * i.min()), 2.0 * i.max()
+    grid = np.geomspace(lo, hi, 400)
+    best = None
+    for i_th in grid:
+        a = np.column_stack([i, vdead_shape(i, i_th)])
+        sol, *_ = np.linalg.lstsq(a, v, rcond=None)
+        resid = float(np.sum((a @ sol - v) ** 2))
+        if best is None or resid < best[0]:
+            best = (resid, i_th, float(sol[0]), float(sol[1]))
+    resid, i_th, r, v_dead = best
+
+    # Model-free cross-check: on any straight segment the INTERCEPT reads
+    # v_dead without the shape function, so a disagreement means the shape is
+    # wrong rather than just the numbers.
+    #
+    # Which segment is reachable is set by the hardware, not by preference.
+    # Phase A saturates at i_d = i_th but phases B/C, carrying half the
+    # current, only at 2*i_th — and the 1.5 A trip caps this ladder at about
+    # 2*i_th on the bench motor, so the fully-saturated regime is normally out
+    # of reach. Between the knees the curve is still a line, just a steeper
+    # one:  v = [R + v_dead/(3*i_th)]*i + (2/3)*v_dead.
+    line = None
+    for name, sel, k_int, k_slope in (
+        ("saturated", i > 2.0 * i_th, 4.0 / 3.0, 0.0),
+        ("between knees", (i > 1.4 * i_th) & (i <= 2.0 * i_th), 2.0 / 3.0, 1.0),
+    ):
+        if sel.sum() >= 3:
+            slope, intercept = np.polyfit(i[sel], v[sel], 1)
+            line = {
+                "regime": name,
+                "v_dead": float(intercept) / k_int,
+                "r_implied": float(slope) - k_slope * v_dead / (3.0 * i_th),
+                "points": int(sel.sum()),
+            }
+            break
+
+    # Thermal check: the ladder runs up then back down, so if the winding
+    # warmed, the descending branch needs more volts for the same current.
+    drift = None
+    ups = [p for p in points if p["leg"] == "up"]
+    downs = [p for p in points if p["leg"] == "down"]
+    if ups and downs:
+        pred = lambda pts: np.array(  # noqa: E731
+            [r * p["i"] + v_dead * vdead_shape(p["i"], i_th) for p in pts]
+        )
+        du = float(np.mean(np.array([p["v"] for p in ups]) - pred(ups)))
+        dd = float(np.mean(np.array([p["v"] for p in downs]) - pred(downs)))
+        drift = {"up_resid": du, "down_resid": dd, "delta": dd - du}
+
+    # With no dead time there is no knee, so i_th is unidentifiable and the
+    # scan returns whatever fits the noise. Say so rather than reporting a
+    # confident number for a parameter the data cannot constrain. The floor
+    # is deliberately well under any plausible bridge (250 ns on a 40 kHz
+    # 12 V leg is 120 mV) and above the fit's own residual.
+    rms = float(np.sqrt(resid / len(i)))
+    measurable = v_dead > max(3.0 * rms, 5e-3)
+
+    return {
+        "v_dead": v_dead,
+        "i_thresh": float(i_th) if measurable else None,
+        "measurable": bool(measurable),
+        "r_from_ladder": r,
+        "points": len(i),
+        "rms_resid": rms,
+        "i_range": [float(i.min()), float(i.max())],
+        "line_check": line if measurable else None,
+        "thermal": drift,
+    }
+
+
+def load_vdead(dir_):
+    """One steady-state (i_d, v_d) point per ladder capture.
+
+    The firmware slews open-loop voltage at 5 V/s and the electrical time
+    constant is ~34 us, so everything after the slew is settled; take the
+    last 40% of each record and let the remainder cover both.
+    """
+    points = []
+    for path in sorted(glob.glob(os.path.join(dir_, "vdead_*.csv"))):
+        c = load(path)
+        t = c["t"]
+        keep = t >= t[0] + 0.6 * (t[-1] - t[0])
+        if keep.sum() < 20:
+            continue
+        leg = "down" if "_down_" in os.path.basename(path) else "up"
+        points.append(
+            {
+                "leg": leg,
+                "v": float(np.mean(c["v_d"][keep])),
+                "i": float(np.mean(c["i_d"][keep])),
+                "i_sd": float(np.std(c["i_d"][keep])),
+                "file": os.path.basename(path),
+            }
+        )
+    return points
+
+
 def fit_accel(path, kt, pole_pairs, targets=(300.0, 900.0), omega_slew=OMEGA_SLEW):
     c = load(path)
     st, w, iq, t = c["state"], c["omega_est"], c["i_q"], c["t"]
@@ -181,6 +311,50 @@ def main(dir_):
     else:
         print("R/L probe: rl_step.csv missing — skipped "
               "(capture: mmc-host profile --only rl)")
+
+    vd_points = load_vdead(dir_)
+    if vd_points:
+        vd = fit_vdead(vd_points)
+        span = (f"{vd['points']} DC points over {vd['i_range'][0]:.2f}-"
+                f"{vd['i_range'][1]:.2f} A, rms resid {vd['rms_resid'] * 1e3:.1f} mV")
+        if vd["measurable"]:
+            print(f"dead time: v_dead = {vd['v_dead'] * 1e3:.1f} mV, "
+                  f"i_thresh = {vd['i_thresh']:.3f} A ({span})")
+        else:
+            print(f"dead time: none measurable (v_dead = {vd['v_dead'] * 1e3:.1f} mV, "
+                  f"below the noise floor; i_thresh unidentifiable) ({span})")
+        # The ladder's own R is an independent read of the same quantity the
+        # R/L probe fits. The probe differences across folded edges where the
+        # current sign never changes, so it CANNOT see v_dead; the ladder can.
+        # Agreement on R is therefore the check that the extra term is real
+        # and not R being mis-assigned.
+        print(f"           ladder R = {vd['r_from_ladder']:.3f} ohm", end="")
+        if "r" in profile:
+            d = 100.0 * (vd["r_from_ladder"] - profile["r"]) / profile["r"]
+            print(f" vs probe R {profile['r']:.3f} ({d:+.1f}%)")
+        else:
+            print(" (no R/L probe to compare against)")
+        if vd["line_check"]:
+            lc = vd["line_check"]
+            print(f"           model-free cross-check, {lc['regime']} "
+                  f"({lc['points']} pts): v_dead = {lc['v_dead'] * 1e3:.1f} mV, "
+                  f"R = {lc['r_implied']:.3f} ohm")
+        if vd["thermal"]:
+            th = vd["thermal"]
+            warn = "  <-- winding warmed; rerun cooler" if abs(th["delta"]) > 0.01 else ""
+            print(f"           thermal: down-branch residual "
+                  f"{th['delta'] * 1e3:+.1f} mV vs up{warn}")
+        # Not a device parameter yet: `apply` iterates param::NAMES, so
+        # nesting these keeps them out of its way until they have ids.
+        if vd["measurable"]:
+            profile["inverter"] = {
+                "v_dead": vd["v_dead"],
+                "i_thresh": vd["i_thresh"],
+            }
+        fit_info["vdead"] = vd
+    else:
+        print("dead time: no vdead_*.csv — skipped "
+              "(capture: mmc-host profile --only vdead)")
 
     psi = kt = None
     sweep = sorted(glob.glob(os.path.join(dir_, "sweep_*.csv")))

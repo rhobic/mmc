@@ -50,6 +50,22 @@ pub fn r_drive_path(kind: DeviceKind) -> f32 {
 const SAL_V_LOW: f32 = 0.3;
 const SAL_V_HIGH: f32 = 0.9;
 
+/// Hardware overcurrent trip [A], mirrored from the firmware. The dead-time
+/// ladder sizes its top voltage against this — unlike the saliency sweep,
+/// nothing on the device clamps a plain open-loop voltage command to a
+/// current, so the ceiling has to be chosen here.
+const I_TRIP_A: f32 = 1.5;
+
+/// Fraction of the trip the dead-time ladder refuses to exceed. The rungs are
+/// sized at 0.7·I_trip, so hitting this means the device's `R` parameter is
+/// wrong for the connected motor, not that the ladder was aimed too high.
+const VDEAD_I_CEILING: f32 = 0.85;
+
+/// Safety margin on the next rung's predicted current. Linear extrapolation
+/// from the previous rung under-predicts by the bridge error's share of the
+/// command — ~17% at the top of a bench ladder — so round it up.
+const VDEAD_PREDICT_MARGIN: f32 = 1.25;
+
 /// Per-stage excitation, tunable per motor. The defaults are sized for the
 /// original bench BLDC; a motor with more flux hits the voltage ceiling
 /// (ω_max ≈ 0.7·(VBUS/√3)/ψ) far lower, and a heavier rotor needs more I-f
@@ -118,7 +134,7 @@ pub struct StageDef {
     pub order: u32,
 }
 
-pub const STAGES: [StageDef; 4] = [
+pub const STAGES: [StageDef; 5] = [
     StageDef {
         id: "sweep",
         title: "Rotating I-f flux sweep",
@@ -160,6 +176,18 @@ pub const STAGES: [StageDef; 4] = [
                 rotor only dithers a few electrical degrees; a clamp gives \
                 the cleanest data",
         order: 11,
+    },
+    StageDef {
+        id: "vdead",
+        title: "Inverter dead-time voltage error",
+        rotor: Rotor::Parks,
+        what: "DC voltage ladder at omega_e = 0, up then back down; fits \
+               v = R*i + v_dead*sign(i). The intercept is what the bridge \
+               keeps -- dead time plus diode drops -- which the R/L probe \
+               cancels by construction and so has never been measured",
+        needs: "nothing - a DC vector parks the rotor; a clamped shaft is \
+                ideal and makes the descending branch a clean thermal check",
+        order: 12,
     },
 ];
 
@@ -332,6 +360,7 @@ pub fn run_stages(
             "accel" => stage_accel(link, dir, tuning.accel, tuning.accel_amps, log)?,
             "rl" => stage_rl(link, dir, tuning.rl_volts, log)?,
             "saliency" => stage_saliency(link, dir, log)?,
+            "vdead" => stage_vdead(link, dir, log)?,
             _ => unreachable!(),
         };
         log(&format!("stage {}: {}", s.id, note));
@@ -497,6 +526,151 @@ fn stage_rl(
     )?;
     println!("profile: {pairs} pairs -> {}", out.display());
     Ok(format!("{pairs} pairs"))
+}
+
+/// Fractions of the ladder's top voltage. Dense at the bottom because that
+/// is where the knee lives: phase A leaves the zero-current band at
+/// `i_d = i_thresh` and phases B/C — which carry `i_d/2` — only at `2·i_thresh`,
+/// so the curve has two bends and both are needed to separate `v_dead` from
+/// `i_thresh`.
+const VDEAD_FRACTIONS: [f32; 10] = [0.06, 0.10, 0.15, 0.22, 0.30, 0.42, 0.55, 0.70, 0.85, 1.0];
+
+/// Settled `i_d` from a capture the stage just wrote.
+///
+/// The ladder sizes itself from the device's `R` parameter, which on a fresh
+/// motor is whatever the last profile left there — and a locked winding fed
+/// from a too-high `R` estimate draws proportionally too much current with no
+/// rotation to carry the heat away. So each rung is checked against what it
+/// actually drew rather than against what it was predicted to draw.
+fn settled_id(path: &Path) -> Option<f32> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    let col = lines.next()?.split(',').position(|h| h.trim() == "i_d")?;
+    let vals: Vec<f32> = lines
+        .filter_map(|l| l.split(',').nth(col)?.trim().parse::<f32>().ok())
+        .collect();
+    if vals.len() < 20 {
+        return None;
+    }
+    let tail = &vals[vals.len() * 3 / 5..];
+    Some(tail.iter().sum::<f32>() / tail.len() as f32)
+}
+
+/// Dead-time voltage error: a DC ladder at ω_e = 0, ascending then
+/// descending.
+///
+/// The descending branch is not redundancy — it is the thermal control. A
+/// locked rotor dissipates `1.5·R·i_d²` with no rotation to carry heat away,
+/// and copper gains 0.39%/°C, so a sweep that warms the winding fits a
+/// resistance that was never true at any single point. If the two branches
+/// disagree, the fit says so instead of quietly splitting the difference.
+fn stage_vdead(link: &mut Link, dir: &Path, log: &mut dyn FnMut(&str)) -> std::io::Result<String> {
+    // Size the ladder from the device's own R so it scales to whatever motor
+    // is connected and still lands under the 1.5 A trip: 0.7·I_trip.
+    let r = match link.request(
+        &Message::GetParam { id: param::R },
+        |m| matches!(m, Message::ParamValue { id, .. } if *id == param::R),
+        Duration::from_secs(2),
+    ) {
+        Ok(Message::ParamValue { value, .. }) if value > 0.0 => value,
+        _ => {
+            return Err(std::io::Error::other(
+                "vdead: cannot read the device's R parameter, which sizes the \
+                 ladder — run `--only rl` first, or apply a profile",
+            ))
+        }
+    };
+    let v_top = 0.7 * I_TRIP_A * r;
+    log(&format!(
+        "  DC ladder at omega_e = 0: {} points to {v_top:.3} V (~{:.2} A peak, \
+         R = {r:.3} Ω), up then down",
+        2 * VDEAD_FRACTIONS.len(),
+        v_top / r
+    ));
+
+    // Ascending then descending, each point its own capture so the drive
+    // rests between them and the vector re-parks from the same angle.
+    let legs: [(&str, Vec<f32>); 2] = [
+        ("up", VDEAD_FRACTIONS.iter().map(|f| f * v_top).collect()),
+        (
+            "down",
+            VDEAD_FRACTIONS.iter().rev().map(|f| f * v_top).collect(),
+        ),
+    ];
+    let mut n = 0u32;
+    let mut last: Option<(f32, f32)> = None; // (volts, settled amps)
+    for (leg, volts) in &legs {
+        for (i, &v) in volts.iter().enumerate() {
+            // Look before stepping. `i/v` rises with `v` (the bridge's cut is
+            // a smaller share of a bigger command), so scaling the previous
+            // rung linearly *under*-predicts — by at most the error's share of
+            // the command, hence the margin. The point is never to command the
+            // rung that trips; the post-hoc check below is the backstop.
+            if let Some((v_last, i_last)) = last {
+                let predicted = i_last * (v / v_last) * VDEAD_PREDICT_MARGIN;
+                if predicted > VDEAD_I_CEILING * I_TRIP_A {
+                    log(&format!(
+                        "  STOP before {v:.3} V: it would draw ~{predicted:.2} A, over the \
+                         {:.2} A ceiling. The ladder is sized from the device's R = {r:.3} Ω, \
+                         too high for this motor — profile and apply `rl` first.",
+                        VDEAD_I_CEILING * I_TRIP_A
+                    ));
+                    return Ok(format!("{n} DC points (stopped short of {v:.3} V)"));
+                }
+            }
+            let name = format!("vdead_{leg}_{:03}", (v * 1000.0) as u32);
+            let out = dir.join(format!("{name}.csv"));
+            log(&format!(
+                "  {leg} {}/{}: {v:.3} V (~{:.2} A)",
+                i + 1,
+                volts.len(),
+                v / r
+            ));
+            capture::run(
+                link,
+                &CaptureCfg {
+                    divider: 20,
+                    mask: mmc_proto::channel::ALL,
+                    // 5 V/s slew + settle + ~0.7 s of averaging. Kept short:
+                    // every millisecond here is heat into a stationary rotor.
+                    duration: 1.2,
+                    iq: None,
+                    drive: Some(DriveMode::OpenLoopVoltage {
+                        volts: v,
+                        omega_e: 0.0,
+                    }),
+                    drive_step: None,
+                    title: &format!("Dead-time ladder: {v:.3} V DC ({leg})"),
+                    description: "Profiler dead-time input: locked-rotor DC \
+                                  voltage at omega_e = 0. v = R*i + v_dead*sign(i), \
+                                  so the intercept is the bridge's own drop.",
+                    order: 20 + n,
+                    command: "mmc-host profile".into(),
+                },
+                out.as_path(),
+            )?;
+            n += 1;
+
+            // What it actually drew. Aborting keeps whatever rungs already
+            // landed — a ladder that covers the knee is still fittable, and a
+            // partial result beats a tripped bridge or a cooked winding.
+            if let Some(i_meas) = settled_id(&out) {
+                last = Some((v, i_meas.abs().max(1e-4)));
+                if i_meas.abs() > VDEAD_I_CEILING * I_TRIP_A {
+                    log(&format!(
+                        "  ABORT: {i_meas:.2} A at {v:.3} V exceeds {:.2} A. The ladder \
+                         is sized from the device's R = {r:.3} Ω, which is too high for \
+                         this motor — profile and apply `rl` first.",
+                        VDEAD_I_CEILING * I_TRIP_A
+                    ));
+                    return Ok(format!(
+                        "{n} DC points (ABORTED at {v:.3} V / {i_meas:.2} A)"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(format!("{n} DC points to {v_top:.3} V (up+down)"))
 }
 
 /// Saliency sweep: shared `mmc_core::probe` schedule, (i_d, i_q) pairs in

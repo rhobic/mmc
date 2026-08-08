@@ -67,7 +67,7 @@ struct ProfileArgs {
     /// Output directory for the profiling captures.
     #[arg(long, default_value = "testresults/ms6-profile")]
     dir: PathBuf,
-    /// Comma-separated stage subset (see --list): sweep,accel,rl,saliency.
+    /// Comma-separated stage subset (see --list): sweep,accel,rl,saliency,vdead.
     #[arg(long, value_delimiter = ',')]
     only: Option<Vec<String>>,
     /// Rerun stages profile_state.json already marks completed.
@@ -118,6 +118,11 @@ struct ApplyArgs {
     serial: String,
     #[arg(long, default_value_t = 1_000_000)]
     baud: u32,
+    /// TCP address of a sim server instead of hardware (e.g. 127.0.0.1:7770) —
+    /// the same target selection `profile` and `capture` take, so a profile
+    /// can be dry-run end to end without the bench.
+    #[arg(long)]
+    addr: Option<String>,
     /// Profile JSON written by tools/profile.py.
     #[arg(long)]
     profile: PathBuf,
@@ -168,6 +173,11 @@ struct ServeArgs {
     /// Mechanically clamp the virtual rotor (locked-rotor bench).
     #[arg(long)]
     locked: bool,
+    /// Give the virtual bridge a dead-time voltage error, `v_dead[,i_thresh]`
+    /// in volts and amps — the defect `profile --only vdead` measures. The
+    /// bench estimate is `0.12,0.5`. Default is an ideal bridge.
+    #[arg(long, value_name = "V[,A]")]
+    deadtime: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -385,6 +395,24 @@ fn main() -> std::io::Result<()> {
                 _ => mmc_sim::PmsmParams::small_bldc(),
             };
             params.lq = params.ld * args.saliency;
+            let deadtime = match &args.deadtime {
+                None => Default::default(),
+                Some(s) => {
+                    let mut it = s.split(',');
+                    let v_dead = it
+                        .next()
+                        .and_then(|t| t.trim().parse().ok())
+                        .ok_or_else(|| std::io::Error::other("--deadtime: bad v_dead"))?;
+                    let i_thresh = match it.next() {
+                        None => 0.5,
+                        Some(t) => t
+                            .trim()
+                            .parse()
+                            .map_err(|_| std::io::Error::other("--deadtime: bad i_thresh"))?,
+                    };
+                    mmc_core::inverter::DeadtimeModel { v_dead, i_thresh }
+                }
+            };
             server::serve(
                 listener,
                 &server::ServeCfg {
@@ -392,6 +420,7 @@ fn main() -> std::io::Result<()> {
                     once: args.once,
                     params,
                     locked: args.locked,
+                    deadtime,
                     ..Default::default()
                 },
             )
@@ -522,7 +551,10 @@ fn main() -> std::io::Result<()> {
             )
         }
         Command::Apply(args) => {
-            let mut link = link::Link::serial(&args.serial, args.baud)?;
+            let mut link = match &args.addr {
+                Some(addr) => link::Link::tcp(addr)?,
+                None => link::Link::serial(&args.serial, args.baud)?,
+            };
             profile::apply(&mut link, &args.profile, args.persist)
         }
     }

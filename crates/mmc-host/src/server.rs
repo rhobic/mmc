@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use mmc_core::angle::AngleEstimator;
 use mmc_core::foc::{Decoupling, Foc, FocOutput};
+use mmc_core::inverter::DeadtimeModel;
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
 use mmc_core::pi::PiGains;
@@ -71,6 +72,9 @@ pub struct ServeCfg {
     pub params: PmsmParams,
     /// Mechanically clamp the rotor (locked-rotor test bench).
     pub locked: bool,
+    /// Dead-time voltage error to give the virtual bridge. Default ideal;
+    /// set it to give `profile --only vdead` something known to recover.
+    pub deadtime: DeadtimeModel,
 }
 
 impl Default for ServeCfg {
@@ -82,6 +86,7 @@ impl Default for ServeCfg {
             once: false,
             params: PmsmParams::small_bldc(),
             locked: false,
+            deadtime: DeadtimeModel::default(),
         }
     }
 }
@@ -515,10 +520,18 @@ impl SimControl {
 
 pub fn serve(listener: TcpListener, cfg: &ServeCfg) -> std::io::Result<()> {
     println!("sim server listening on {}", listener.local_addr()?);
+    // The parameter table belongs to the *device*, not to the connection.
+    // On hardware it lives in the firmware's RAM (and optionally flash) and
+    // outlives any host tool; rebuilding it per session made `apply` verify a
+    // write that silently reverted the moment the tool disconnected, so a
+    // profile → fit → apply → capture loop against the sim quietly ran on
+    // defaults. Motor and controller state stay per-session — that part
+    // *should* start fresh.
+    let mut sim_params = default_params(cfg);
     loop {
         let (stream, peer) = listener.accept()?;
         println!("client {peer} connected");
-        match session(stream, cfg) {
+        match session(stream, cfg, &mut sim_params) {
             Ok(()) => println!("client {peer} disconnected"),
             Err(e) if e.kind() == ErrorKind::ConnectionReset => {
                 println!("client {peer} disconnected")
@@ -531,36 +544,20 @@ pub fn serve(listener: TcpListener, cfg: &ServeCfg) -> std::io::Result<()> {
     }
 }
 
-/// One client session: fresh motor, fresh controller, zero reference.
-fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
-    stream.set_nodelay(true)?;
-    stream.set_read_timeout(Some(Duration::from_millis(1)))?;
-
+/// The device's parameter table as it powers up: motor values from the
+/// virtual motor, gains derived from it — the sim's equivalent of the
+/// firmware's compiled-in bench fits. A session that never writes params
+/// behaves as before; one that does actually retunes the loop (see
+/// `set_drive`), which is the path `apply` exercises.
+fn default_params(cfg: &ServeCfg) -> [f32; param::COUNT] {
     let params = cfg.params;
-    let ctrl_dt = 1.0 / cfg.ctrl_freq;
-    let mut rig = VirtualMotor::new(params, cfg.vbus);
-    rig.motor.locked = cfg.locked;
-    rig.enable();
-    let mut control = SimControl::new(params, ctrl_dt, cfg.bandwidth);
-
-    let mut deframer = Deframer::new();
-    let mut mask = channel::ALL;
-    let mut divider: u32 = 10;
-    let mut streaming = false;
-    // Runtime parameter table (profiler read/apply target), seeded from this
-    // motor and mirroring the firmware's ids. The sim stores and range-validates
-    // them but does not yet re-tune its control loop from a write.
-    // Speed gains default to this motor's model-derived pair, the sim's
-    // equivalent of the firmware's compiled-in bench fits — so a session that
-    // never writes params behaves as before, and one that does actually
-    // retunes the loop (see `set_drive`).
     let seed_speed = speed_pi_gains(
         params.inertia,
         params.torque_constant(),
         params.pole_pairs,
         SPEED_BW,
     );
-    let mut sim_params = [
+    [
         params.rs,
         params.lq,
         params.flux,
@@ -577,9 +574,31 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
         ONTIME_CCR5_DEFAULT,
         SS_KP_DEFAULT,
         SS_KI_DEFAULT,
-    ];
-    debug_assert_eq!(sim_params.len(), param::COUNT);
+    ]
+}
 
+/// One client session: fresh motor, fresh controller, zero reference. The
+/// parameter table is owned by the caller and persists across sessions.
+fn session(
+    mut stream: TcpStream,
+    cfg: &ServeCfg,
+    sim_params: &mut [f32; param::COUNT],
+) -> std::io::Result<()> {
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(Duration::from_millis(1)))?;
+
+    let params = cfg.params;
+    let ctrl_dt = 1.0 / cfg.ctrl_freq;
+    let mut rig = VirtualMotor::new(params, cfg.vbus);
+    rig.motor.locked = cfg.locked;
+    rig.inverter_error = cfg.deadtime;
+    rig.enable();
+    let mut control = SimControl::new(params, ctrl_dt, cfg.bandwidth);
+
+    let mut deframer = Deframer::new();
+    let mut mask = channel::ALL;
+    let mut divider: u32 = 10;
+    let mut streaming = false;
     let started = Instant::now();
     let mut steps_done: u64 = 0;
     let mut rx = [0u8; 256];
@@ -598,7 +617,7 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
                             &mut mask,
                             &mut divider,
                             &mut streaming,
-                            &mut sim_params,
+                            sim_params,
                         )?;
                     }
                     // Frame errors over TCP mean a client bug; ignore & resync.

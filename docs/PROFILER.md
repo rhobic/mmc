@@ -67,6 +67,7 @@ so a dialed-in motor no longer needs its params re-entered by hand.
 | `accel` | free-spinning | inertia J + friction from a sensorless 300→900 rad/s el step | shaft spins freely; R/L/ψ already roughly right |
 | `rl` | parks rotor | R (differential) and L (folded exponential) from a d-axis square wave | nothing — aligns itself; clamp is fine |
 | `saliency` | parks rotor | Ld/Lq ratio — the zero-speed-sensorless gate | nothing — ± angle pairing cancels net torque; clamp gives cleanest data |
+| `vdead` | parks rotor | inverter dead-time voltage error `v_dead` + its zero-current band `i_thresh` | nothing — a DC vector parks the rotor; a clamp makes the thermal check clean |
 
 Run order is enforced (spinning stages before parking probes): a probe-parked
 rotor released straight into an I-f start sits on the torque-well separatrix
@@ -189,6 +190,30 @@ the probes are designed for); `--saliency` sets Lq/Ld. A positive control
 (1.5 → fit recovers ≈1.48) and negative control (1.0 → NOT USABLE) validate
 the whole pipeline; run both whenever the fit or schedule changes — on
 hardware alone, "no saliency" and "broken fit" are indistinguishable.
+
+The dead-time ladder has the same controls, via `--deadtime v_dead[,i_thresh]`:
+
+```
+mmc-host serve --port 7770 --motor bench --locked --deadtime 0.12,0.5
+mmc-host profile --addr 127.0.0.1:7770 --only vdead --yes --dir /tmp/p
+```
+
+| truth | fit | model-free cross-check |
+|---|---|---|
+| `0.12,0.5` | 118.6 mV, 0.497 A | 120.0 mV, R 0.904 Ω |
+| `0.30,0.35` | 300.0 mV, 0.350 A | 300.0 mV, R 0.904 Ω |
+| ideal (no flag) | **none measurable** | — |
+
+Run the negative control too: on hardware, "this bridge has no dead time" and
+"the fit is broken" look identical.
+
+The sim server paces to wall-clock time, so a busy host degrades its captures
+— a loaded machine turned the first table's 0.1 mV fit residual into 3.0 mV
+and pulled `v_dead` to 96 mV. Idle, the same ladder repeats bit-identically.
+If a sim fit looks noisy, check the load before you check the code.
+
+Parameters written by `apply` persist for the life of the sim server, as they
+do on a device; only motor and controller state restart per connection.
 
 ## Troubleshooting
 
