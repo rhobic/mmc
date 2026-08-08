@@ -80,8 +80,22 @@ impl FluxObserver {
     }
 
     /// Rotor-flux magnitude [Wb]; converges to the magnet flux linkage and
-    /// doubles as a lock-quality indicator.
+    /// doubles as the lock-quality indicator the stall detector trips on.
+    ///
+    /// Corrected for the leaky integrator's attenuation, for the same reason
+    /// [`Self::electrical_angle`] is corrected for its phase lead: the
+    /// transfer `jω/(jω+leak)` costs `|ω|/√(ω²+leak²)` of magnitude, which is
+    /// 11% at `ω = 2·leak` and 29% at `ω = leak`. Reporting the raw integral
+    /// would make a healthy drive look progressively less healthy the slower
+    /// it ran — precisely backwards for a detector whose job is to catch
+    /// low-speed stalls.
     pub fn flux_mag(&self) -> f32 {
+        self.flux_mag / self.leak_attenuation_at(self.omega)
+    }
+
+    /// The uncompensated integral, for diagnostics and for anything that
+    /// needs the same quantity the PLL normalizes by.
+    pub fn flux_mag_raw(&self) -> f32 {
         self.flux_mag
     }
 
@@ -96,6 +110,21 @@ impl FluxObserver {
         }
         // atan(x) ≈ x·(π/4 + 0.273·(1−x)) for x ∈ [0,1], err < 0.005 rad.
         (x * (FRAC_PI_4 + 0.273 * (1.0 - x))) * omega.signum()
+    }
+
+    /// Magnitude counterpart of [`Self::lead_compensation_at`]: the leaky
+    /// integrator's gain `|ω|/√(ω²+leak²)` = `cos(atan(leak/ω))`. Clamped at
+    /// the same place the angle compensation clamps — below `|ω| ≈ leak` the
+    /// estimate is not trustworthy, so the correction stops growing rather
+    /// than dividing a small number by a smaller one.
+    fn leak_attenuation_at(&self, omega: f32) -> f32 {
+        let w = omega.abs().max(1e-3);
+        let x = self.cfg.leak / w;
+        if x >= 1.0 {
+            // cos(π/4), matching the lead compensation's own clamp.
+            return core::f32::consts::FRAC_1_SQRT_2;
+        }
+        1.0 / sqrt(1.0 + x * x)
     }
 }
 

@@ -10,6 +10,7 @@ use mmc_core::angle::AngleEstimator;
 use mmc_core::foc::{Decoupling, Foc, FocOutput};
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
+use mmc_core::pi::PiGains;
 use mmc_core::probe;
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
 use mmc_core::svpwm::svpwm;
@@ -41,6 +42,24 @@ const PROBE_PRE_PAIRS: usize = 256;
 const BURST_PAIRS: usize = 4096;
 const I_TRIP_A: f32 = 1.5;
 const V_AMP_MAX: f32 = 3.0;
+// Six-step param defaults, mirrored from the firmware so the table the host
+// reads back is the same shape and scale on both targets.
+const ONTIME_CCR5_DEFAULT: f32 = 100.0;
+const SS_KP_DEFAULT: f32 = 2.0e-4;
+const SS_KI_DEFAULT: f32 = 5.0e-4;
+
+/// The slice of the runtime parameter table the sensorless drive reads at a
+/// clean start. The firmware rebuilds its control blocks from `param_get` on
+/// every `SetDrive`; mirroring that here is what makes `apply` → behaviour
+/// testable without hardware — the coverage gap that let the FOC speed loop
+/// run on six-step's gains from `0882ae7` until 2026-08-08.
+#[derive(Copy, Clone, Debug)]
+struct StartupParams {
+    handoff: f32,
+    omega_accel: f32,
+    iq_limit: f32,
+    speed_gains: PiGains,
+}
 
 pub struct ServeCfg {
     pub ctrl_freq: f32,
@@ -107,6 +126,7 @@ struct SimControl {
     sl_handoff: f32,
     omega_accel: f32,
     iq_limit: f32,
+    speed_gains: PiGains,
     /// Consecutive low-observer-flux ticks in closed-loop sensorless.
     stall_strikes: u32,
     /// Latched fault code (ST_STALL) until the next SetDrive.
@@ -152,6 +172,12 @@ impl SimControl {
             sl_handoff: SL_OMEGA_HANDOFF,
             omega_accel: OMEGA_SLEW,
             iq_limit: SL_IQ_LIMIT,
+            speed_gains: speed_pi_gains(
+                params.inertia,
+                params.torque_constant(),
+                params.pole_pairs,
+                SPEED_BW,
+            ),
             stall_strikes: 0,
             fault: 0.0,
             probe_kind: 0,
@@ -212,9 +238,12 @@ impl SimControl {
     /// `SetDrive`: `mode` 0 off, 1 open-loop voltage, 2 I-f, 3 sensorless.
     /// A new running mode starts from rest with fresh control blocks; a repeat
     /// of the same mode just retargets amplitude/speed (smooth live changes).
-    /// `sl` = (handoff, omega accel, iq limit) from the session param table.
-    fn set_drive(&mut self, mode: u8, amp: f32, omega: f32, sl: (f32, f32, f32)) {
-        (self.sl_handoff, self.omega_accel, self.iq_limit) = sl;
+    /// `sl` carries the sensorless slice of the session param table.
+    fn set_drive(&mut self, mode: u8, amp: f32, omega: f32, sl: StartupParams) {
+        self.sl_handoff = sl.handoff;
+        self.omega_accel = sl.omega_accel;
+        self.iq_limit = sl.iq_limit;
+        self.speed_gains = sl.speed_gains;
         self.fault = 0.0;
         self.stall_strikes = 0;
         if mode == 0 {
@@ -244,7 +273,6 @@ impl SimControl {
         self.rebuild_foc();
         self.obs = FluxObserver::new(FluxObserverCfg::new(self.params.rs, self.params.lq));
         if mode == 3 {
-            let p = self.params;
             let dir = if omega < 0.0 { -1.0 } else { 1.0 };
             let i_start = amp.abs().clamp(0.1, self.iq_limit);
             self.seq = Some(Sequencer::new(SequencerCfg {
@@ -253,10 +281,7 @@ impl SimControl {
                 omega_handoff: self.sl_handoff * dir,
                 ..SequencerCfg::default()
             }));
-            self.speed = Some(SpeedLoop::new(
-                speed_pi_gains(p.inertia, p.torque_constant(), p.pole_pairs, SPEED_BW),
-                self.iq_limit,
-            ));
+            self.speed = Some(SpeedLoop::new(self.speed_gains, self.iq_limit));
             self.omega_ref_cur = self.sl_handoff * dir;
             self.sl_preload = i_start * dir;
         } else {
@@ -525,17 +550,33 @@ fn session(mut stream: TcpStream, cfg: &ServeCfg) -> std::io::Result<()> {
     // Runtime parameter table (profiler read/apply target), seeded from this
     // motor and mirroring the firmware's ids. The sim stores and range-validates
     // them but does not yet re-tune its control loop from a write.
+    // Speed gains default to this motor's model-derived pair, the sim's
+    // equivalent of the firmware's compiled-in bench fits — so a session that
+    // never writes params behaves as before, and one that does actually
+    // retunes the loop (see `set_drive`).
+    let seed_speed = speed_pi_gains(
+        params.inertia,
+        params.torque_constant(),
+        params.pole_pairs,
+        SPEED_BW,
+    );
     let mut sim_params = [
         params.rs,
         params.lq,
         params.flux,
         cfg.bandwidth,
-        2.0e-4,
-        2.0e-3,
+        seed_speed.kp,
+        seed_speed.ki,
         params.pole_pairs as f32,
         SL_OMEGA_HANDOFF,
         OMEGA_SLEW,
         SL_IQ_LIMIT,
+        // Six-step knobs: stored and range-checked so `apply`/`panel` round-
+        // trip the whole table against the sim, though the dq sim has no
+        // ADC trigger to move and no six-step mode to tune.
+        ONTIME_CCR5_DEFAULT,
+        SS_KP_DEFAULT,
+        SS_KI_DEFAULT,
     ];
     debug_assert_eq!(sim_params.len(), param::COUNT);
 
@@ -656,11 +697,15 @@ fn handle(
                 m,
                 amp,
                 omega,
-                (
-                    params[param::SL_HANDOFF as usize],
-                    params[param::OMEGA_ACCEL as usize],
-                    params[param::IQ_LIMIT as usize],
-                ),
+                StartupParams {
+                    handoff: params[param::SL_HANDOFF as usize],
+                    omega_accel: params[param::OMEGA_ACCEL as usize],
+                    iq_limit: params[param::IQ_LIMIT as usize],
+                    speed_gains: PiGains {
+                        kp: params[param::SPEED_KP as usize],
+                        ki: params[param::SPEED_KI as usize],
+                    },
+                },
             );
             send(
                 stream,
@@ -785,6 +830,11 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
         param::IQ_LIMIT => (0.05, 1.2),
         param::SPEED_KP => (0.0, 0.1),
         param::SPEED_KI => (0.0, 10.0),
+        // The firmware's upper bound is PWM_ARR/2, which is a property of its
+        // timer, not of the parameter; 1062 is that value at 40 kHz PWM.
+        param::ONTIME_CCR5 => (20.0, 1062.0),
+        param::SS_KP => (0.0, 0.01),
+        param::SS_KI => (0.0, 0.1),
         _ => return None,
     })
 }

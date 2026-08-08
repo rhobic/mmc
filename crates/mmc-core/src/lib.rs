@@ -24,6 +24,8 @@ pub mod current_loop;
 #[cfg(feature = "foc")]
 pub mod foc;
 #[cfg(feature = "foc")]
+pub mod inverter;
+#[cfg(feature = "foc")]
 pub mod observer;
 #[cfg(feature = "foc")]
 pub mod probe;

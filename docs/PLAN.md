@@ -199,6 +199,63 @@ sync — normal for motor control in any language.
      not CI-covered yet), lock-band mapping, per-parity offset calibration
      for the low-speed floor, a current-closed ramp for standalone starts.
 
+- **MS9 — FOC operating envelope** *(started 2026-08-08, session 27)*: make the
+  FOC path good at the edges — low speed, high speed, and the limits — now that
+  six-step has shown what the rig can and cannot do. Ordered by measured value,
+  not by textbook glamour.
+
+  **The envelope, in numbers, on bench motor 1** (ψ 0.937 mWb, L 30.15 µH,
+  R 0.885 Ω, pp 7, 12 V bus) — because two of the obvious ideas are worthless
+  here and it is better to say so up front:
+
+  | | |
+  |---|---|
+  | voltage limit `V_bus/√3` | 6.93 V |
+  | no-load speed ceiling | **7394 rad/s el** (~10 100 rpm mech) |
+  | MS4's 0.7× usable ceiling | 5176 rad/s el |
+  | best FOC speed run so far | ~600 rad/s el — **8% of the ceiling** |
+  | characteristic current ψ/Ld | **31.1 A**, against a 1.2 A i_q ceiling |
+
+  So: **FOC on this rig has never been voltage-limited**, and **field
+  weakening is worth ~4% of top speed even if the entire current budget goes
+  to the d axis and none to torque** (ψ/Ld is 26× the current limit). Neither
+  is the constraint. Build FW in the sim if it is wanted as a capability; do
+  not expect it to buy anything on this bench.
+
+  1. **Measure `v_dead`** *(no new firmware)* — locked rotor, `OpenLoopVoltage`
+     at ω_e = 0, sweep v_d and fit `v = R·i + v_dead·sign(i)`: the intercept is
+     `v_dead`, the knee width is `i_thresh`. The R/L probe cancels this term by
+     construction, so it has never been fitted. Then enable `Foc::deadtime`
+     and re-run the low-speed legs. *(Model + compensation + sim coverage
+     landed session 27; the measurement is the missing half.)*
+  2. **Lower the sensorless floor.** The 150 rad/s el handoff is inherited, not
+     derived. With the flux magnitude now honest at low speed and the dead-time
+     bias removable, find where the observer actually stops working and set the
+     handoff from that. Speed-adaptive `leak` (`leak ∝ |ω̂|`) is the next lever:
+     it holds the lag angle constant instead of letting it grow to the π/4 clamp.
+  3. **Feed the observer the *realized* voltage.** It currently integrates the
+     pre-SVPWM demand, so whenever the modulator clamps — saturation, the duty
+     floor, overmodulation — the observer is lied to exactly at the limit.
+     Reconstructing v from the duties actually emitted is nearly free.
+  4. **Derive the correct `advance_periods`.** `Foc`'s own doc says a backend
+     that latches duties a period after sampling should use 1.5; both firmware
+     and sim run the 0.5 default. With PWM at 40 kHz and control at 20 kHz the
+     right value needs deriving rather than assuming. Costs 0.15 rad (8.6°) of
+     angle at 3000 rad/s el, ~2.5° at 865 — real only up high, which is where
+     item 6 wants to go.
+  5. **Limits hygiene, all in `mmc-core`:** a *circle* limit on the dq current
+     reference (d and q are limited independently today, so |i| can exceed the
+     hardware trip on any non-zero i_d); back-calculation anti-windup at the
+     voltage circle instead of clamping (the six-step duty loop already has
+     it); overmodulation to the hexagon, worth +10.3% voltage over `V_bus/√3`.
+  6. **Map the real high-speed ceiling on the bench.** Nothing above
+     ~600 rad/s el has been tried in FOC, and the six-step review's lesson
+     applies twice over: check the coast tail, do not trust a rate that could
+     be a clock. The suspects up there are current-sense window (the low-side
+     shunts need a minimum low-side on-time, which sets a duty ceiling and
+     therefore a speed ceiling), loop delay (item 4), and the observer's own
+     `ω·dt` discretization skew, not voltage.
+
 ## Backlog (deferred, not yet scheduled)
 
 - **Parameter flash persistence.** *(done 2026-07-20, session 14, fw v7:

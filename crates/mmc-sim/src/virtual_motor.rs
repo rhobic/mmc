@@ -1,7 +1,8 @@
-//! The virtual motor rig behind the `mmc-hal` traits: PMSM model + ideal
-//! inverter + (for now, ideal) sensors. Drop-in replacement for real hardware
-//! from the control loop's point of view.
+//! The virtual motor rig behind the `mmc-hal` traits: PMSM model + inverter +
+//! (for now, ideal) sensors. Drop-in replacement for real hardware from the
+//! control loop's point of view.
 
+use mmc_core::inverter::DeadtimeModel;
 use mmc_core::transforms::{clarke, Abc, AlphaBeta};
 use mmc_hal::{BusVoltageSense, CurrentSense, PositionSensor, PwmOutput};
 
@@ -14,6 +15,10 @@ pub struct VirtualMotor {
     pub load_torque: f32,
     /// Physics substep [s]; must stay well under L/R.
     pub physics_dt: f32,
+    /// Dead-time / diode voltage error, the defect side of
+    /// [`DeadtimeModel`]. Default is the ideal inverter, so scenarios written
+    /// against it are unchanged.
+    pub inverter_error: DeadtimeModel,
     duties: [f32; 3],
     enabled: bool,
     time: f64,
@@ -26,6 +31,7 @@ impl VirtualMotor {
             v_bus,
             load_torque: 0.0,
             physics_dt: 1e-6,
+            inverter_error: DeadtimeModel::default(),
             duties: [0.0; 3],
             enabled: false,
             time: 0.0,
@@ -38,7 +44,12 @@ impl VirtualMotor {
     }
 
     /// Stator-frame terminal voltage produced by the latched duties.
-    /// Star-connected balanced load: v_x = (d_x − mean(d)) · v_bus.
+    /// Star-connected balanced load: v_x = (d_x − mean(d)) · v_bus, less the
+    /// dead-time error each leg loses to its own phase current's sign.
+    ///
+    /// Held for the whole control period, like the duties themselves: this is
+    /// an average-value inverter, and the compensation on real hardware is
+    /// likewise computed once per period from one current sample.
     fn v_ab(&self) -> AlphaBeta {
         if !self.enabled {
             // Approximation: a disabled (high-Z) stage is modeled as zero
@@ -46,11 +57,19 @@ impl VirtualMotor {
             return AlphaBeta::default();
         }
         let mean = (self.duties[0] + self.duties[1] + self.duties[2]) / 3.0;
-        clarke(Abc {
+        let ideal = clarke(Abc {
             a: (self.duties[0] - mean) * self.v_bus,
             b: (self.duties[1] - mean) * self.v_bus,
             c: (self.duties[2] - mean) * self.v_bus,
-        })
+        });
+        if self.inverter_error.is_ideal() {
+            return ideal;
+        }
+        let err = self.inverter_error.error_ab(self.motor.phase_currents());
+        AlphaBeta {
+            alpha: ideal.alpha - err.alpha,
+            beta: ideal.beta - err.beta,
+        }
     }
 
     /// Advance the physics by one control period with the latched duties

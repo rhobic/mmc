@@ -1244,10 +1244,19 @@ unsafe extern "C" fn ADC1_2() {
                             omega_handoff: handoff * dir,
                             ..SequencerCfg::default()
                         }));
+                        // SPEED_KP/SPEED_KI, in amps per rad/s el — the FOC
+                        // speed loop's own gains, which `tools/profile.py`
+                        // fits from J and kt and `mmc-host apply` writes.
+                        // NOT ss_kp/ss_ki: those are six-step's duty→speed
+                        // loop, a different plant in different units.
+                        // `0882ae7` bled them into this block while adding
+                        // the six-step loop, which made MS6's speed-gain
+                        // autotune a no-op and left this loop under-gained by
+                        // 6× (kp) / 23× (ki) on motor 1 and ~45× on motor 2.
                         s.speed = Some(SpeedLoop::new(
                             PiGains {
-                                kp: param_get(param::SS_KP),
-                                ki: param_get(param::SS_KI),
+                                kp: param_get(param::SPEED_KP),
+                                ki: param_get(param::SPEED_KI),
                             },
                             iq_lim,
                         ));
@@ -1634,6 +1643,11 @@ unsafe extern "C" fn ADC1_2() {
             // with flux magnitude ≈ L·|i| instead of ψ (an order of
             // magnitude low; the MS4/MS5 fake-lock lesson). 100 ms below
             // 0.35·ψ while nominally closed-loop trips a stall fault.
+            //
+            // `flux_mag()` is leak-compensated, so this threshold now means
+            // the same thing at every speed — it used to read 11% low at
+            // 40 rad/s el purely from the leaky integrator. A stall reads
+            // L·|i|/ψ ≈ 0.01·ψ here, so the margin to 0.35 is untouched.
             if s.mode == 3 && s.seq.as_ref().is_some_and(|q| q.phase() == Phase::Closed) {
                 if obs.flux_mag() < 0.35 * param_get(param::FLUX) {
                     s.stall_strikes += 1;

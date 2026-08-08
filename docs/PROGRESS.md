@@ -3,6 +3,134 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-08 — session 27: back to FOC — two live bugs, and the sim grows the low-speed physics
+
+**Six-step paused while the bench hardware is reviewed. This session is all
+sim and core: two silent defects found by reading the FOC path end to end,
+then the model work that has to land before any low-speed control work can be
+believed.**
+
+### Two live bugs, both silent
+
+**1. The FOC speed loop has been running on six-step's gains since session
+20.** `0882ae7` added the six-step duty→speed loop and, in the same diff,
+changed the *sensorless FOC* block from `SPEED_KP`/`SPEED_KI` (param ids 4–5)
+to `SS_KP`/`SS_KI` (ids 11–12). That is precisely what session 20's own note
+said must never happen — and what `mmc-proto`'s doc comment on those ids still
+says. Consequences:
+
+- `tools/profile.py` fits `speed_kp`/`speed_ki` from J and kt, `mmc-host
+  apply` writes them, the firmware verifies the read-back — and then never
+  reads them. **MS6's speed-gain autotune has been a no-op for six sessions.**
+- The loop instead ran the six-step defaults: **6× low on kp and 23× low on ki
+  for motor 1** (fitted 0.00115/0.0115 at the profiler's 40 rad/s design
+  bandwidth, against 2.0e-4/5.0e-4), and ~45× low on motor 2.
+- Tuning either scheme silently retuned the other.
+
+Fixed. Worth re-reading session 23's sensorless numbers with this in mind —
+they were taken on a badly under-gained speed loop.
+
+**2. The sim's parameter table had drifted three entries behind the
+firmware's.** `sim_params` carried 10 values against `param::COUNT == 13`, so
+its own `debug_assert_eq!` fires in a debug build, and `ontime_ccr5`/`ss_kp`/
+`ss_ki` were NAK'd against the sim while the device accepted them. Restored to
+13 with the firmware's defaults and ranges.
+
+**Why no test caught either: the sim server never used the param table for its
+speed loop.** It computed gains from the model directly, so `apply` →
+behaviour was untested by construction. The sim now reads
+`SPEED_KP`/`SPEED_KI` from the table like the firmware does, seeded from the
+model so existing scenarios are unchanged.
+
+### The sim's rotor was 50× too light at low speed
+
+The profiler measures a **Coulomb friction torque** (`T_fric = kt·i_q_fric`,
+0.78 mN·m on motor 1) and `PmsmParams` had nowhere to put it — only `viscous`.
+So the virtual rotor coasted on viscous drag alone and drew **1.5 mA** holding
+100 rad/s el where the real one draws **79 mA**. Any low-speed study on that
+model was studying the wrong machine.
+
+`PmsmParams::coulomb` added, applied as a velocity decrement that cannot
+reverse the rotor (standstill is a fixed point, and stiction comes free).
+`bench_g474` carries the measured 0.78 mN·m; `small_bldc` stays frictionless,
+so every MS2–MS4 regression and every committed scenario is untouched.
+**Cross-check: the sim now settles at i_q = 0.084 A against the bench's
+measured 0.078 A.**
+
+### Dead-time voltage error: modelled, and it is not what it looks like
+
+New `mmc-core::inverter::DeadtimeModel` — one model, two users, the same split
+the commutation table got: the simulator's inverter **subtracts** it, `Foc`
+**adds it back** before modulating. `FocOutput.v_ab` deliberately stays the
+*uncompensated* vector, because that is what lands on the winding once the
+bridge takes its cut, and that is what the observer must integrate.
+
+The interesting part is what the model says about *this* rig. `rs` already
+absorbs every resistive drop in the drive path (0.885 Ω against a ~0.1 Ω
+winding), so what is left is the `sign(i)` term — and the R/L probe cancels it
+exactly, by differencing across folded edges where the current sign never
+changes. It has never appeared in a fit. But on 30 µH at 40 kHz the ripple is
+~1.2 A pk-pk, so the drive lives *inside* the zero-current band at its
+0.08–0.5 A operating currents, and there the error is linear in current:
+
+> **On this rig dead time does not look like zero-crossing distortion. It
+> looks like 0.24 Ω of apparent resistance the observer does not know about —
+> ~25% on top of a fitted 0.885 Ω.**
+
+Which changes the prediction, and the sim confirms it quantitatively:
+
+| ω_e [rad/s el] | flux/ψ ideal | flux/ψ, dead time | predicted bias `ΔR·|i|/ω` |
+|---|---|---|---|
+| 40 | 0.994 | **1.554** | +0.564 |
+| 60 | 0.998 | 1.379 | +0.376 |
+| 100 | 0.999 | 1.226 | +0.226 |
+| 300 | 1.000 | 1.078 | +0.075 |
+| 600 | 1.000 | 1.062 | +0.038 |
+
+A current-aligned voltage error integrates to a flux perturbation along **+d**
+— *parallel* to the rotor flux. So it inflates the **magnitude** and barely
+touches the **angle** (rms 0.0095 vs 0.0073 rad at 40 rad/s el). Both halves
+matter:
+
+- **The angle surviving is why sensorless FOC works as well as it does on an
+  uncompensated bridge.** "Dead time is why low speed is hard" is retired as
+  the primary story.
+- **The stall detector is the casualty.** It trips below 0.35·ψ; at 40 rad/s el
+  the flux reads 1.55·ψ, so a real stall would have to drag the estimate
+  through a 1.2·ψ offset before the detector noticed. **It goes blind exactly
+  where stalls happen.**
+
+Compensation returns the ideal-bridge result to within 0.01·ψ at every speed,
+and a half-calibrated `v_dead` removes about half the bias and nothing worse.
+`Foc::deadtime` stays `None` until `v_dead` is measured — over-compensating is
+the dangerous direction.
+
+### The observer compensated its angle for the leak, but not its magnitude
+
+Falling out of the above: the leaky integrator's `jω/(jω+leak)` costs
+`|ω|/√(ω²+leak²)` of magnitude — **11% at 40 rad/s el** on the default 20 rad/s
+leak — and `flux_mag()` reported the raw integral. The angle has been
+lead-compensated analytically since MS4; the magnitude never was. So the one
+number used as a health indicator read *low* in proportion to how slowly the
+drive was running, which is backwards for a low-speed stall detector.
+
+`flux_mag()` now divides the attenuation back out (clamped at cos(π/4), the
+same place the angle compensation clamps); `flux_mag_raw()` keeps the value
+the PLL normalizes by. Measured across 40–600 rad/s el: **0.889→0.994 at the
+bottom of the range, and within 2% of ψ everywhere.** The stall threshold now
+means the same thing at every speed; a stall reads ≈0.01·ψ here, so the margin
+to 0.35 is untouched.
+
+**Verification:** 76 workspace tests (7 new), clippy clean, `cargo check` +
+clippy inside `crates/mmc-fw-g474/`, and `mmc-core` builds on thumbv7em and on
+thumbv6m under `foc`-only and `sixstep`-only. Nothing here has been on
+hardware — it is all model and core work, staged for the bench.
+
+**Next:** measure `v_dead`, which needs no new firmware — locked rotor,
+`OpenLoopVoltage` at ω_e = 0, sweep v_d and fit `v = R·i + v_dead`: the
+*intercept* is `v_dead` and the knee width is `i_thresh`. Then the rest of the
+MS9 list in [PLAN.md](PLAN.md).
+
 ## 2026-08-03 — session 26: the six-step review — and first lock on the small motor
 
 **A hostile review of every six-step conclusion, prompted by the fact that

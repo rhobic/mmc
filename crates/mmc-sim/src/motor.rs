@@ -20,6 +20,15 @@ pub struct PmsmParams {
     pub inertia: f32,
     /// Viscous friction [N·m·s/rad].
     pub viscous: f32,
+    /// Coulomb (dry) friction torque [N·m], opposing motion and independent
+    /// of speed. This is what the profiler's accel stage actually fits —
+    /// `T_fric = kt · i_q_friction`, 0.78 mN·m on bench motor 1 — and until
+    /// now the model had nowhere to put it, so the virtual rotor coasted on
+    /// viscous drag alone and drew ~50× less current at low speed than the
+    /// real one. That gap matters: at 100 rad/s el the bench motor holds
+    /// speed on ~79 mA of friction current, and the sim held it on ~1.5 mA,
+    /// which is far too clean a place to study anything low-speed.
+    pub coulomb: f32,
 }
 
 impl PmsmParams {
@@ -34,6 +43,9 @@ impl PmsmParams {
             pole_pairs: 7,
             inertia: 1.0e-5,
             viscous: 2.0e-6,
+            // Frictionless, as every MS2–MS4 regression test was written
+            // against. The bench preset below carries the measured value.
+            coulomb: 0.0,
         }
     }
 
@@ -51,6 +63,10 @@ impl PmsmParams {
             pole_pairs: 7,
             inertia: 1.75e-6,
             viscous: 1.0e-6,
+            // MS5's measured bench friction: 0.78 mN·m, which at
+            // kt = 9.39 mN·m/A is the ~83 mA the closed-loop drive is
+            // observed to settle on with no load attached.
+            coulomb: 0.78e-3,
         }
     }
 
@@ -128,6 +144,19 @@ impl PmsmModel {
             // Semi-implicit: mechanics see the updated currents.
             let acc = (self.torque() - load_torque - p.viscous * self.omega_m) / p.inertia;
             self.omega_m += acc * dt;
+            // Coulomb friction as a velocity decrement that may bring the
+            // rotor to rest but never past it. Applying it this way rather
+            // than as a `−T·sign(ω)` force term is what makes standstill a
+            // fixed point instead of a chatter source, and it gives stiction
+            // for free: below breakaway torque the rotor simply stays put.
+            if p.coulomb > 0.0 {
+                let dw = p.coulomb / p.inertia * dt;
+                self.omega_m = if self.omega_m > 0.0 {
+                    (self.omega_m - dw).max(0.0)
+                } else {
+                    (self.omega_m + dw).min(0.0)
+                };
+            }
             self.theta_m = wrap_angle(self.theta_m + self.omega_m * dt);
         }
     }

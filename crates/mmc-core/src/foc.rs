@@ -3,6 +3,7 @@
 //! and the simulator calls per control period.
 
 use crate::current_loop::CurrentLoop;
+use crate::inverter::DeadtimeModel;
 use crate::math::{sin_cos, sqrt, FRAC_1_SQRT_3};
 use crate::pi::PiGains;
 use crate::svpwm::svpwm;
@@ -45,6 +46,16 @@ pub struct Foc {
     /// cycles. 0.5 compensates the zero-order hold itself; hardware backends
     /// where duties latch a full PWM period after sampling should use 1.5.
     pub advance_periods: f32,
+    /// Dead-time compensation. The PI pair cannot clean this up on its own:
+    /// the error steps at every current zero crossing, so a loop fast enough
+    /// to chase it is a loop fast enough to amplify current-sense noise.
+    /// Feeding the known shape forward is the standard answer, and it uses
+    /// the same [`DeadtimeModel`] the simulator's inverter subtracts.
+    ///
+    /// `None` until `v_dead` is measured on the rig. Over-compensating is
+    /// worse than not compensating: the correction then pushes the current
+    /// back across zero and the error reverses sign underneath it.
+    pub deadtime: Option<DeadtimeModel>,
 }
 
 /// Everything a step produced, for telemetry as much as for actuation.
@@ -67,6 +78,7 @@ impl Foc {
             current_loop: CurrentLoop::new(current_gains),
             feedforward: None,
             advance_periods: 0.5,
+            deadtime: None,
         }
     }
 
@@ -75,6 +87,7 @@ impl Foc {
             current_loop: CurrentLoop::new(current_gains),
             feedforward: Some(decoupling),
             advance_periods: 0.5,
+            deadtime: None,
         }
     }
 
@@ -119,8 +132,30 @@ impl Foc {
         // Command the vector where the rotor will be, not where it was.
         let sc_out = sin_cos(theta_e + self.advance_periods * omega_e * dt);
         let v_ab = inverse_park(v_dq, sc_out);
+
+        // Modulate the *pre-distorted* vector, so what the winding sees is
+        // `v_ab`. `FocOutput.v_ab` deliberately stays the uncompensated one:
+        // it is the voltage that actually lands once the bridge subtracts its
+        // own error, and it is the voltage the flux observer must integrate.
+        // Reporting the padded vector instead would hand the observer back
+        // exactly the error this is removing, with the sign flipped.
+        //
+        // The correction can push the demand past the voltage circle; svpwm
+        // clamps per phase there. That only bites near full modulation, where
+        // v_dead is a fraction of a percent of the demand and the whole term
+        // is irrelevant anyway.
+        let v_mod = match self.deadtime {
+            Some(dt_model) if !dt_model.is_ideal() => {
+                let c = dt_model.error_ab(i_abc);
+                AlphaBeta {
+                    alpha: v_ab.alpha + c.alpha,
+                    beta: v_ab.beta + c.beta,
+                }
+            }
+            _ => v_ab,
+        };
         FocOutput {
-            duties: svpwm(v_ab, v_bus),
+            duties: svpwm(v_mod, v_bus),
             i_dq,
             v_dq,
             v_ab,
