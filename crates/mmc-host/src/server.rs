@@ -60,6 +60,7 @@ struct StartupParams {
     omega_accel: f32,
     iq_limit: f32,
     speed_gains: PiGains,
+    deadtime_comp: DeadtimeModel,
 }
 
 pub struct ServeCfg {
@@ -132,6 +133,9 @@ struct SimControl {
     omega_accel: f32,
     iq_limit: f32,
     speed_gains: PiGains,
+    /// The controller's belief about the bridge, from the param table —
+    /// distinct from `rig.inverter_error`, the bridge's actual behaviour.
+    deadtime_comp: DeadtimeModel,
     /// Consecutive low-observer-flux ticks in closed-loop sensorless.
     stall_strikes: u32,
     /// Latched fault code (ST_STALL) until the next SetDrive.
@@ -183,6 +187,7 @@ impl SimControl {
                 params.pole_pairs,
                 SPEED_BW,
             ),
+            deadtime_comp: DeadtimeModel::default(),
             stall_strikes: 0,
             fault: 0.0,
             probe_kind: 0,
@@ -229,6 +234,11 @@ impl SimControl {
                 flux: p.flux,
             },
         );
+        // What the *controller* believes the bridge takes, from the param
+        // table — deliberately separate from `rig.inverter_error`, which is
+        // what the bridge actually takes. Setting them independently is how
+        // a mis-calibrated compensation gets tested.
+        self.foc.deadtime = Some(self.deadtime_comp);
     }
 
     /// `SetIqRef`: live i_q for I-f, torque command otherwise (legacy path).
@@ -249,6 +259,7 @@ impl SimControl {
         self.omega_accel = sl.omega_accel;
         self.iq_limit = sl.iq_limit;
         self.speed_gains = sl.speed_gains;
+        self.deadtime_comp = sl.deadtime_comp;
         self.fault = 0.0;
         self.stall_strikes = 0;
         if mode == 0 {
@@ -574,6 +585,9 @@ fn default_params(cfg: &ServeCfg) -> [f32; param::COUNT] {
         ONTIME_CCR5_DEFAULT,
         SS_KP_DEFAULT,
         SS_KI_DEFAULT,
+        // Compensation off until the rig is measured; see param::V_DEAD.
+        0.0,
+        0.5,
     ]
 }
 
@@ -724,6 +738,10 @@ fn handle(
                         kp: params[param::SPEED_KP as usize],
                         ki: params[param::SPEED_KI as usize],
                     },
+                    deadtime_comp: DeadtimeModel {
+                        v_dead: params[param::V_DEAD as usize],
+                        i_thresh: params[param::I_THRESH as usize],
+                    },
                 },
             );
             send(
@@ -854,6 +872,8 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
         param::ONTIME_CCR5 => (20.0, 1062.0),
         param::SS_KP => (0.0, 0.01),
         param::SS_KI => (0.0, 0.1),
+        param::V_DEAD => (0.0, 2.0),
+        param::I_THRESH => (0.01, 5.0),
         _ => return None,
     })
 }

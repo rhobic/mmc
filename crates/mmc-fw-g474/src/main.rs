@@ -49,6 +49,7 @@ use panic_halt as _;
 
 use mmc_core::angle::AngleEstimator;
 use mmc_core::foc::{Decoupling, Foc};
+use mmc_core::inverter::DeadtimeModel;
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
 use mmc_core::pi::{Pi, PiGains};
@@ -125,6 +126,14 @@ const ONTIME_CCR5_DEFAULT: u16 = 100;
 /// rate; the integral corner an order below the crossover, per the simulator.
 const SS_KP_DEFAULT: f32 = 2.0e-4;
 const SS_KI_DEFAULT: f32 = 5.0e-4;
+
+/// Dead-time compensation, off until measured — see `param::V_DEAD`. An
+/// over-compensated bridge is worse than an uncompensated one, so this stays
+/// 0 until `profile --only vdead` has run on the connected rig.
+const V_DEAD_DEFAULT: f32 = 0.0;
+/// Zero-current band; only meaningful once `v_dead` is non-zero. The bench
+/// estimate is the FOC ripple amplitude, ~0.5 A on 30 µH at 40 kHz.
+const I_THRESH_DEFAULT: f32 = 0.5;
 
 // Motor parameters measured on this bench (Stage F0 rotating I-f sweep,
 // `tools/fit_params.py`): flux 0.894 ± 0.04 mWb, apparent R 0.97 Ω
@@ -227,6 +236,8 @@ static PARAMS: [AtomicU32; param::COUNT] = [
     p32(ONTIME_CCR5_DEFAULT as f32),
     p32(SS_KP_DEFAULT),
     p32(SS_KI_DEFAULT),
+    p32(V_DEAD_DEFAULT),
+    p32(I_THRESH_DEFAULT),
 ];
 
 fn param_get(id: u8) -> f32 {
@@ -258,6 +269,13 @@ fn param_range(id: u8) -> Option<(f32, f32)> {
         // 900 rad/s error, so the useful range is small.
         param::SS_KP => (0.0, 0.01),
         param::SS_KI => (0.0, 0.1),
+        // 0 disables. The ceiling is generous — a slow driver on a high bus
+        // can genuinely lose a volt — but it is still a ceiling: a fitted
+        // value near it means the fit found something other than dead time.
+        param::V_DEAD => (0.0, 2.0),
+        // Below ~10 mA the correction is a step at every zero crossing, which
+        // is the chatter the band exists to avoid.
+        param::I_THRESH => (0.01, 5.0),
         _ => return None,
     })
 }
@@ -274,7 +292,15 @@ mod nvparam {
     const NV_OFFSET: u32 = 0x7_F800; // last bank-2 page, from FLASH_BASE
     const NV_ADDR: usize = 0x0807_F800;
     const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
-    const VERSION: u32 = 1;
+    /// Bumped whenever `param::COUNT` changes, because the blob is a flat
+    /// `[f32; COUNT]` and a longer table shifts the CRC word. The CRC alone
+    /// would reject a stale blob anyway; the version makes that a deliberate
+    /// rejection rather than a lucky one.
+    ///
+    /// v2 (2026-08-08): added `v_dead`/`i_thresh`, 13 → 15 params. **A device
+    /// flashed across this boundary loads compiled-in defaults and needs its
+    /// profile re-applied and re-persisted.**
+    const VERSION: u32 = 2;
     const HDR: usize = 2; // magic + version
     const CRC_IDX: usize = HDR + param::COUNT;
     const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, then round up to even (8-byte write)
@@ -1267,6 +1293,17 @@ unsafe extern "C" fn ADC1_2() {
                         s.seq = None;
                         s.speed = None;
                         s.sl_preload = 0.0;
+                    }
+                    // Dead-time compensation applies to every FOC-modulated
+                    // mode, not just sensorless: the bridge takes its cut
+                    // from an I-f current vector exactly the same way.
+                    // `v_dead = 0` (the default until the rig is measured)
+                    // leaves the modulator untouched.
+                    if let Some(foc) = s.foc.as_mut() {
+                        foc.deadtime = Some(DeadtimeModel {
+                            v_dead: param_get(param::V_DEAD),
+                            i_thresh: param_get(param::I_THRESH),
+                        });
                     }
                     stage_on();
                 }

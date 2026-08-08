@@ -90,7 +90,18 @@ pub mod param {
     /// must not share a tuning knob.
     pub const SS_KP: u8 = 11;
     pub const SS_KI: u8 = 12;
-    pub const COUNT: usize = 13;
+    /// Inverter dead-time voltage error [V] and the half-width of its
+    /// zero-current band [A] — the two numbers `profile --only vdead` fits.
+    /// The FOC modulator adds `v_dead·clip(i/i_thresh)` back per phase, so
+    /// what reaches the winding is what the controller asked for.
+    ///
+    /// `v_dead = 0` disables the compensation, and that is the default:
+    /// over-compensating is worse than not compensating, because the
+    /// correction then drives the current back across zero and the error
+    /// reverses sign underneath it. Measure before enabling.
+    pub const V_DEAD: u8 = 13;
+    pub const I_THRESH: u8 = 14;
+    pub const COUNT: usize = 15;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -105,6 +116,8 @@ pub mod param {
         "ontime_ccr5",
         "ss_kp",
         "ss_ki",
+        "v_dead",
+        "i_thresh",
     ];
 }
 

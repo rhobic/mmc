@@ -344,13 +344,13 @@ def main(dir_):
             warn = "  <-- winding warmed; rerun cooler" if abs(th["delta"]) > 0.01 else ""
             print(f"           thermal: down-branch residual "
                   f"{th['delta'] * 1e3:+.1f} mV vs up{warn}")
-        # Not a device parameter yet: `apply` iterates param::NAMES, so
-        # nesting these keeps them out of its way until they have ids.
+        # Device params 13/14. Only written when the fit found something:
+        # `apply` skips absent keys, so an unmeasurable bridge leaves the
+        # device's compensation off rather than pushing a zero over a value
+        # someone measured properly earlier.
         if vd["measurable"]:
-            profile["inverter"] = {
-                "v_dead": vd["v_dead"],
-                "i_thresh": vd["i_thresh"],
-            }
+            profile["v_dead"] = vd["v_dead"]
+            profile["i_thresh"] = vd["i_thresh"]
         fit_info["vdead"] = vd
     else:
         print("dead time: no vdead_*.csv — skipped "
@@ -446,6 +446,8 @@ def main(dir_):
         "cur_bw": ("current BW", "rad/s", 1.0),
         "speed_kp": ("speed Kp", "", 1.0),
         "speed_ki": ("speed Ki", "", 1.0),
+        "v_dead": ("dead-time V", "mV", 1e3),
+        "i_thresh": ("zero-I band", "A", 1.0),
     }
     print()
     print(f"Profile (pole pairs = {pole_pairs:.0f}) -- applied by `apply`:")

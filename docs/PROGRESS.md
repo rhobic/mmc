@@ -77,10 +77,46 @@ so a loaded host degrades its captures — one busy run turned a 0.1 mV fit
 residual into 3.0 mV and pulled `v_dead` to 96 mV. Idle, the same ladder
 repeats bit-identically across fresh servers. Check the load before the code.
 
-**Verification:** 76 workspace tests, clippy clean, fmt clean, `cargo check`
-inside `crates/mmc-fw-g474/`.
+### Closing the loop: `v_dead`/`i_thresh` are device params now
 
-**Next, on the locked bench:** run `--only rl,vdead` (in that order — the
+A measurement nothing can act on is inert, so the compensation is wired
+through: **param ids 13/14**, defaulting to `v_dead = 0` — compensation off
+until the connected rig has actually been measured, because over-compensating
+is worse than not compensating. `Foc::deadtime` is set for every
+FOC-modulated mode, not just sensorless: the bridge takes its cut from an I-f
+current vector exactly the same way.
+
+**Verified end to end against the sim** — measure → `apply` → observe, holding
+0.5 A on a locked rotor:
+
+| | v_q to hold 0.5 A | duty_b − duty_c |
+|---|---|---|
+| compensation off | 0.5720 V | 0.04128 |
+| compensation on | **0.4527 V** | **0.04128** |
+
+The 0.1193 V difference matches the predicted 0.1193 V exactly, and the
+**duties are identical** — which is the check that matters. The bridge is
+doing the same thing and the current is the same; what changed is that the
+0.119 V moved off the PI's integrator and onto the feedforward, so the
+voltage the observer integrates is now the voltage that reaches the winding.
+That is the entire point of the exercise.
+
+The ladder itself is deliberately immune: it drives `OpenLoopVoltage`, which
+bypasses `Foc`, so re-measuring always reads the true bridge no matter what
+compensation is loaded. Confirmed — the post-apply re-measurement returns the
+same 118.6 mV.
+
+**⚠️ Flash note:** `param::COUNT` 13 → 15 changes the persisted blob's layout,
+so `nvparam::VERSION` is bumped to 2. **A device flashed across this boundary
+boots on compiled-in defaults and needs its profile re-applied and
+re-persisted** — the same fallback session 23 hit, now a deliberate version
+rejection instead of a lucky CRC miss.
+
+**Verification:** 76 workspace tests, clippy clean, fmt clean, `cargo check`
+and clippy inside `crates/mmc-fw-g474/`.
+
+**Next, on the locked bench:** flash, re-apply and re-persist the motor-1
+profile (see the flash note), then run `--only rl,vdead` (in that order — the
 ladder wants a fresh R), compare the ladder's R against the probe's as the
 check that the extra term is real, then enable `Foc::deadtime` and re-measure.
 Also available while the rotor is clamped and still open from session 9: the
