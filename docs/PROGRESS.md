@@ -3,6 +3,67 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-08-08 — session 29: bench blocked — the ST-LINK VCP transmits but does not receive
+
+**The locked-rotor `vdead` run could not happen: the host→device half of the
+serial link is dead. The firmware is healthy and the device→host half works
+perfectly, so this is the ST-LINK's VCP, not our code.** Recording the
+diagnosis because it is specific and it cost a session.
+
+**Symptom:** `mmc-host` times out with "no device responded within 6 s" on
+COM6, at every baud, before *and* after flashing.
+
+**What was ruled out, in order, all via the debug probe:**
+
+| check | result |
+|---|---|
+| `CONTROL_TICKS` sampled twice | advancing at ~20 kHz — ISR alive |
+| `ISR_MAX_CYCLES` | 585 cycles — matches the documented 586 idle |
+| `STATE` | 0 = `ST_OFF`, so calibration completed |
+| LPUART1 `CR1` / `BRR` | UE+TE+RE set, TEACK+REACK up, BRR 0xAA00 = exactly 1 Mbaud on 170 MHz |
+| LPUART1 `ISR` | no ORE, no framing/noise/parity errors — never saw an edge |
+| GPIOA `MODER`/`AFRL` | PA2/PA3 in AF12 (LPUART1) — correct |
+| RX DMA (**DMA1 CH2**, not CH1) | `CCR` 0x308B enabled, `CPAR` = LPUART1_RDR, `CNDTR` armed at 128 |
+| host writes 20 bytes | `CNDTR` stays 128 — **zero bytes arrive** |
+| host writes at 9600 / 115k / 460k / 921k / 1M | nothing arrives at any rate |
+
+**The direction that works.** Setting the firmware's `STREAMING` flag through
+the probe (`probe-rs write b8 <STREAMING> 1`) made the device stream telemetry
+on its defaults — **12302 bytes in 800 ms on COM6**. So PA2/TX, the 1 Mbaud
+configuration, and the whole tx path are fine. Only host→device is broken.
+
+**A trap worth recording:** `Uart::new(peri, rx_pin, tx_pin, tx_dma, rx_dma,…)`
+— the DMA arguments are **tx first**. Reading DMA1 CH1 for "the RX channel"
+shows all zeros and looks exactly like a dead executor. It is the idle TX
+channel. The RX channel is CH2.
+
+**Not fully resolved:** PA3 reads high against an internal pull-down, which
+means *something* holds it high — an idle ST-LINK driver, or an external
+pull-up with the driver disconnected. Those two cannot be told apart from the
+MCU side, so "the wire is intact" is not proven, only "the pin is not
+floating".
+
+**Not attempted, deliberately.** Commands could be injected by poking
+`CMD_MODE`/`CMD_AMP`/`CMD_EPOCH` over the probe, and the telemetry defaults
+(MASK all, DIVIDER 20 → 1 kHz) are already what the ladder wants. But the
+deadman cuts the stage after 2 s of host silence (`DEADMAN_TICKS`), so it
+would also have to be held off by hand — leaving current in a locked winding
+with no working stop path. That is what the deadman is for; it was left alone.
+
+**Bench state left clean:** `STREAMING` 0, `STATE` `ST_OFF`, `CMD_MODE` 0,
+GPIOA `MODER`/`PUPDR` restored to `ab2affaf`/`64400000`.
+
+**To unblock, in order of likelihood:** replug the ST-LINK USB (power-cycles
+its VCP), try a different cable/port, then update the ST-LINK firmware
+(STSW-LINK007 / CubeProgrammer) — a VCP that transmits but does not receive is
+a known failure mode there. If it persists, check the Nucleo bridge carrying
+ST-LINK-TX → PA3 (the module header's SB17/SB23 note) and that the shield is
+not loading Arduino D0.
+
+**Also note:** the device now carries the session-28 firmware, and the flash
+param blob is invalid across `nvparam::VERSION` 1 → 2 — so once the link is
+back, **re-apply and re-persist motor 1's profile before measuring anything**.
+
 ## 2026-08-08 — session 28: the dead-time measurement, built and validated against the sim
 
 **Bench is set up with the rotor locked (same motor 1), so this session built
