@@ -3,6 +3,33 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-01 — session 22: two firmware bugs from a code review (fw v15)
+
+**Switching drive mode while running could panic the control ISR with the
+bridge live.** The ISR only built a mode's control blocks on a start from Off,
+so going straight from one running mode to another (e.g. open-loop voltage →
+sensorless via the panel's Apply button) reached an `unwrap()` on a block that
+did not exist. `panic-halt` then froze the ISR — and with it the overcurrent,
+driver-fault and deadman checks — while TIM1 kept driving the last duties. Now
+any change of mode is a clean start, the rule the sim's `set_drive` already
+followed; a repeat of the same mode is still a live retarget. Leaving a probe
+mid-recording hands back the partial buffer.
+
+**The FOC sensorless speed loop was reading the six-step gains.** Session 20
+switched it from `speed_kp`/`speed_ki` to `ss_kp`/`ss_ki`, against the stated
+rule that the two schemes do not share a tuning knob. Closed-loop sensorless
+ran with ki = 5e-4 instead of 2e-3, and profiler or panel writes to the speed
+gains had no effect. Restored.
+
+Neither fix has been run on hardware yet; both firmware crates build and pass
+clippy. Worth re-checking sensorless behaviour on the bench, since its speed
+loop gains change back to the pre-session-20 values.
+
+**Still open from the review:** no hardware break input or MOE-clearing panic
+handler, so any future ISR fault leaves PWM running; stale "RAM only" comments
+on the (now flash-persisted) parameters; `mmc-fw-g474` is not rustfmt-clean and
+CI does not fmt/clippy the firmware crates.
+
 ## 2026-08-02 — session 21: MS8 step 5 — ISR cost measured; FOC path blocked on hardware
 
 **One axis of the comparison completed, one blocked by a hardware fault that
