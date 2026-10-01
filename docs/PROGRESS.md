@@ -82,6 +82,45 @@ fixed 32 ticks. The fitter assumes settled plateaus, so any motor with
 motor. The first sim-board test failed on exactly this (τ = 1.2 ms → R read
 5× high) before it was pointed at a short-τ motor.
 
+### Chunk 3 — the F302 board, on the HAL
+
+`mmc-fw-f302`: 72 MHz from the debugger's MCO (HSE bypass ×9), **10 kHz
+control on a 20 kHz center-aligned PWM** (`PWM_DIV` 2, the G474's scheme at
+half speed). Clocks, GPIO, TIM1 (`timer::low_level::Timer` — only CH5, which
+embassy's 4-channel API doesn't model, uses the typed register block), the
+USART and flash are embassy drivers. The ADC is register-level in one
+function (`init_adc`): embassy's F3 ADC driver has blocking single reads
+only, and timer-synchronized sampling is the point. Injected currents + VBUS
+on TIM1_CC4 just past the peak; BEMF as a regular sequence on TIM1_TRGO2 into
+a 3-word circular DMA ring (the G474 used a second ADC for that). A custom
+`memory.x` keeps the last flash page out of the image for the param blob.
+Footprint: 37.4 KB flash, 10.7 KB static RAM (8 KB of it the burst buffer).
+
+**Bring-up, in order:**
+
+| step | result |
+|---|---|
+| ISR / calibration via probe | ticks at 10 kHz, idle ISR 356 cycles, offsets cal'd, currents ±0.5 mA at rest |
+| VBUS | 29.8 V — PS is set to 30 V (operator), so the 169k/9.31k scaling is right |
+| serial link | both directions at 1 Mbaud on this ST-LINK (session 29's dead RX was that board) |
+| first drive, 0.5 V open-loop | **driver fault** + PS into its 1.5 A limit (scope: phase sagged to 23 V) |
+| → diagnosis | TIM1 config perfect; **PA8-10 in analog mode** — embassy's `PwmPin` resets its pin on drop, and `let _ = PwmPin::new(..)` dropped it at once. L6230 IN pins floated with EN high. Pins now live in the board struct. |
+| 0.5 V again | runs, PWM verified on the scope (20 kHz, 50% ± the vector, rail to rail at 30 V) — but ~10 mA: **dead time eats ~0.8 V** at 30 V |
+| 2 V open-loop | 0.76 A mean, phase peak 2.3 A → software OC trip (the trip works) |
+| BEMF channels | "stuck" at 18.30 V = full scale: the 10k/2.2k divider saturates above 18 V (see hw/README) — DMA is fine |
+
+**R/L probe on the new motor (motor 3):** first fit R = 1.61 ± 0.48 Ω. The
+spread was the rotor, not noise: after the 300 ms align it was still
+swinging in its detent, and its back-EMF put R at 1.5-3.2 Ω on the first ~5
+cycles; every settled edge read 1.41 Ω to 0.5%. `tools/profile.py` now keeps
+only edges within 5% of the median R. Refit: **R = 1.418 ± 0.012 Ω (drive
+path), L = 0.356 mH, τ = 251 µs** (21 edges, 5 dropped). τ is 2.5 ticks at
+10 kHz against a 32-tick plateau, so the fixed half-period is fine for this
+motor after all.
+
+**Scope** (`tools/scope.py`, DS1054Z on one phase): `arm` / `read`. Trap: on
+the DS1000Z `:TRIG:SWE SING` sets the mode but does not arm — send `:SING`.
+
 ## 2026-08-08 — session 29: bench blocked — the ST-LINK VCP transmits but does not receive
 
 **The locked-rotor `vdead` run could not happen: the host→device half of the

@@ -1,0 +1,18 @@
+{
+  "command": "mmc-host capture --serial COM9 --baud 1000000 --divider 10 --duration 3",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 2809 frames.",
+    "2 frames rejected (CRC/framing) during capture."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 10,
+    "drive": "OpenLoopVoltage { volts: 0.5, omega_e: 31.415928 }",
+    "drive_step": null,
+    "duration_s": 3.0,
+    "iq_A": null
+  },
+  "title": "F302 open-loop 0.5 V, 5 Hz el",
+  "unix_time": 1790896181
+}

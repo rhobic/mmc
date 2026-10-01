@@ -102,6 +102,21 @@ def fit_rl(path):
         di_list.append(abs(di))
         z_acc.append((post_i - i[e + 1 : e + half - 4]) / (post_i - pre_i))
 
+    # Keep only edges that agree with the median: a rotor still swinging in
+    # its detent after the align phase puts back-EMF on the early plateaus
+    # (motor 3, session 30: the first ~5 cycles read R 1.5-3.2 ohm against a
+    # settled 1.41), while every settled edge reads the same R to <1%.
+    r_arr = np.array(r_list)
+    keep = np.abs(r_arr - np.median(r_arr)) < 0.05 * np.median(r_arr)
+    if keep.sum() < 4:
+        raise SystemExit(
+            f"rl_step: only {keep.sum()} of {len(r_arr)} edges agree on R — "
+            "rotor never settled? (R per edge: " + ", ".join(f"{x:.2f}" for x in r_arr) + ")"
+        )
+    dropped = len(r_arr) - int(keep.sum())
+    r_list = list(r_arr[keep])
+    di_list = list(np.array(di_list)[keep])
+    z_acc = [z for z, k in zip(z_acc, keep) if k]
     r = float(np.mean(r_list))
     zbar = np.mean(np.array(z_acc), axis=0)
     k = np.flatnonzero((zbar > 0.02) & (zbar < 0.9))
@@ -115,6 +130,7 @@ def fit_rl(path):
         "l": l,
         "tau_us": tau * 1e6,
         "edges": len(r_list),
+        "edges_dropped": dropped,
         "delta_i": float(np.mean(di_list)),
         "r_sigma": float(np.std(r_list)),
         "exp_points": len(k),
@@ -302,7 +318,7 @@ def main(dir_):
         rl = fit_rl(rl_path)
         print(f"R/L probe: R = {rl['r']:.3f} +- {rl['r_sigma']:.3f} ohm, "
               f"L = {rl['l'] * 1e3:.3f} mH (tau {rl['tau_us']:.0f} us, "
-              f"{rl['edges']} edges folded, {rl['exp_points']} exp samples, "
+              f"{rl['edges']} edges folded ({rl.get('edges_dropped', 0)} unsettled dropped), {rl['exp_points']} exp samples, "
               f"dI {rl['delta_i']:.3f} A)")
         profile["r"] = round(rl["r"], 4)
         profile["l"] = rl["l"]
