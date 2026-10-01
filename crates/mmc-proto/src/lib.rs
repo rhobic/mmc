@@ -33,7 +33,8 @@ mod msg;
 
 pub use deframe::Deframer;
 pub use msg::{
-    encode, param, test, BurstChunk, DeviceInfo, DeviceKind, DriveMode, FrameError, Message,
+    encode, param, test, BoardTraits, BurstChunk, DeviceInfo, DeviceKind, DriveMode, FrameError,
+    Message,
     TelemetryFrame, BURST_CHUNK,
 };
 

@@ -3,6 +3,33 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-01 — session 30: a second board — porting to a 72 MHz MCU and an L6230 shield
+
+**New bench:** an F302R8 dev board (Cortex-M4F, 72 MHz, 64 KB flash, 16 KB
+RAM, one ADC) on an L6230 three-shunt inverter shield, a **new motor of
+unknown parameters with hall sensors**, and a USB scope on one phase. Goal:
+run FOC and six-step on it, profile the motor, look at the halls, and fix
+whatever the port exposes about how portable the code really is. Parts and
+pin map: [hw/README.md](../hw/README.md).
+
+Work lands in small commits; this entry grows with each.
+
+### Chunk 1 — the host stops assuming the G474
+
+What the first board had baked into the host:
+
+| assumption | where | now |
+|---|---|---|
+| control loop runs at 20 kHz | `profile.rs` `CTRL_FREQ` (R/L burst time base) | device reports `ctrl_hz` |
+| drive path is the IHM16's 0.85 Ω | `r_drive_path(kind)` | device reports `r_path` |
+| the burst buffer holds 32 KB | saliency stage | device reports `burst_cap`; a sweep that cannot fit fails up front with a reason |
+| a short R/L read is < 1024 pairs | `stage_rl` | < 512 (a full read on a small board is ~1000) |
+
+These ride on `DeviceInfo` as an optional trailing `BoardTraits` block, so
+firmware that predates it still decodes (legacy defaults: 20 kHz, per-kind
+R path). New `DeviceKind::BoardF302`. The fitters were already clean —
+`tools/profile.py` takes `dt` from the CSV.
+
 ## 2026-08-08 — session 29: bench blocked — the ST-LINK VCP transmits but does not receive
 
 **The locked-rotor `vdead` run could not happen: the host→device half of the

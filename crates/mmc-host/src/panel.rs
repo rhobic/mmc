@@ -81,7 +81,7 @@ pub fn run(mut link: Link, cfg: &PanelCfg) -> std::io::Result<()> {
         match link.request(&Message::GetInfo, |m| matches!(m, Message::Info(_)), t)? {
             Message::Info(info) => (
                 format!("{} ({:?})", info.name_str(), info.kind),
-                crate::profile::r_drive_path(info.kind),
+                crate::profile::r_drive_path(&info),
             ),
             _ => unreachable!(),
         };

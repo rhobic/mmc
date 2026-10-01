@@ -18,14 +18,13 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mmc_core::probe;
-use mmc_proto::{param, test, DeviceKind, DriveMode, Message};
+use mmc_proto::{param, test, DeviceInfo, DeviceKind, DriveMode, Message};
 
 use crate::capture::{self, CaptureCfg};
 use crate::link::Link;
 
-const CTRL_FREQ: f32 = 20_000.0;
-
-/// Series resistance of the drive path: gate-driver conducting switch
+/// Series resistance of the G474 rig's drive path, for firmware that predates
+/// `BoardTraits` (newer boards report their own). Gate-driver conducting switch
 /// ≈ 0.5 Ω typ (R_DSon HS+LS = 1 Ω, see hw/README.md) + the 0.33 Ω
 /// low-side shunt duty-weighted ≈ 0.32 Ω. The probes measure winding + this
 /// path (which is what the control loop must use); subtracting it gives the
@@ -35,10 +34,14 @@ const CTRL_FREQ: f32 = 20_000.0;
 /// dominates the residual).
 pub const R_DRIVE_PATH: f32 = 0.85;
 
-/// The drive-path resistance for a device kind: the sim's average-value
-/// inverter has no series resistance, so its probes already read the winding.
-pub fn r_drive_path(kind: DeviceKind) -> f32 {
-    match kind {
+/// The drive-path resistance of a device: what the board reports, else the
+/// legacy per-kind value. The sim's average-value inverter has no series
+/// resistance, so its probes already read the winding.
+pub fn r_drive_path(info: &DeviceInfo) -> f32 {
+    if let Some(b) = info.board {
+        return b.r_path;
+    }
+    match info.kind {
         DeviceKind::Sim => 0.0,
         _ => R_DRIVE_PATH,
     }
@@ -344,8 +347,12 @@ pub fn run_stages(
     }
 
     let mut state = load_state(dir);
-    snapshot_device(link, &mut state, log);
+    let info = snapshot_device(link, &mut state, log);
     save_state(dir, &state)?;
+    // Bursts are recorded one sample per control tick, so their time base is
+    // the device's control rate — 20 kHz on the G474, slower on smaller MCUs.
+    let ctrl_hz = info.as_ref().map_or(20_000.0, |i| i.ctrl_hz());
+    let burst_cap = info.and_then(|i| i.board).map(|b| b.burst_cap as usize);
 
     for (i, s) in stages.iter().enumerate() {
         log(&format!(
@@ -358,8 +365,17 @@ pub fn run_stages(
         let note = match s.id {
             "sweep" => stage_sweep(link, dir, &tuning.sweep, log)?,
             "accel" => stage_accel(link, dir, tuning.accel, tuning.accel_amps, log)?,
-            "rl" => stage_rl(link, dir, tuning.rl_volts, log)?,
-            "saliency" => stage_saliency(link, dir, log)?,
+            "rl" => stage_rl(link, dir, tuning.rl_volts, ctrl_hz, log)?,
+            "saliency" => {
+                let need = probe::SAL_HDR + probe::SAL_TICKS * 2;
+                if burst_cap.is_some_and(|cap| cap < need) {
+                    return Err(std::io::Error::other(format!(
+                        "saliency: the device's burst buffer holds {} f32s but the sweep                          records {need} — this board cannot run it",
+                        burst_cap.unwrap()
+                    )));
+                }
+                stage_saliency(link, dir, log)?
+            }
             "vdead" => stage_vdead(link, dir, log)?,
             _ => unreachable!(),
         };
@@ -378,16 +394,24 @@ pub fn run_stages(
 /// Record the device's identity and full parameter table (as of capture
 /// time) under `state["device"]` — `tools/profile.py` reads `pole_pairs`
 /// from here so the kt/J fits track the connected motor.
-fn snapshot_device(link: &mut Link, state: &mut serde_json::Value, log: &mut dyn FnMut(&str)) {
+fn snapshot_device(
+    link: &mut Link,
+    state: &mut serde_json::Value,
+    log: &mut dyn FnMut(&str),
+) -> Option<DeviceInfo> {
     let t = Duration::from_secs(2);
     let mut dev = serde_json::Map::new();
-    if let Ok(Message::Info(info)) =
-        link.request(&Message::GetInfo, |m| matches!(m, Message::Info(_)), t)
-    {
+    let info = match link.request(&Message::GetInfo, |m| matches!(m, Message::Info(_)), t) {
+        Ok(Message::Info(info)) => Some(info),
+        _ => None,
+    };
+    if let Some(info) = &info {
         dev.insert("name".into(), info.name_str().into());
+        dev.insert("kind".into(), format!("{:?}", info.kind).into());
         dev.insert("fw".into(), info.fw_version.into());
+        dev.insert("ctrl_hz".into(), info.ctrl_hz().into());
         // The fits subtract this to report at-the-motor values (0 on the sim).
-        dev.insert("r_path".into(), r_drive_path(info.kind).into());
+        dev.insert("r_path".into(), r_drive_path(info).into());
     }
     let mut params = serde_json::Map::new();
     for (id, name) in param::NAMES.iter().enumerate() {
@@ -412,6 +436,7 @@ fn snapshot_device(link: &mut Link, state: &mut serde_json::Value, log: &mut dyn
     }
     dev.insert("params".into(), params.into());
     state["device"] = dev.into();
+    info
 }
 
 // ------------------------------------------------------------------- stages
@@ -488,11 +513,12 @@ fn stage_accel(
     Ok(format!("sensorless {lo}->{hi} rad/s el"))
 }
 
-/// Locked-rotor R/L step probe (on-device 20 kHz burst).
+/// Locked-rotor R/L step probe (on-device burst at the control rate).
 fn stage_rl(
     link: &mut Link,
     dir: &Path,
     (v_align, v_step): (f32, f32),
+    ctrl_hz: f32,
     log: &mut dyn FnMut(&str),
 ) -> std::io::Result<String> {
     log(&format!(
@@ -500,7 +526,9 @@ fn stage_rl(
     ));
     let samples = run_probe(link, test::RL_STEP, v_align, v_step)?;
     let pairs = samples.len() / 2;
-    if pairs < 1024 {
+    // A complete recording on the smallest board is ~1000 pairs; the probe
+    // aborting on a trip leaves only the pre-roll.
+    if pairs < 512 {
         return Err(std::io::Error::other(format!(
             "rl: only {pairs} pairs — the probe aborted early (overcurrent trip on a \
              low-R motor?). Retry with lower voltages, e.g. --rl-volts 0.2,0.4"
@@ -510,7 +538,7 @@ fn stage_rl(
     let mut w = std::io::BufWriter::new(std::fs::File::create(&out)?);
     writeln!(w, "t,i_d,v_d")?;
     for (k, p) in samples.chunks_exact(2).enumerate() {
-        writeln!(w, "{},{},{}", k as f32 / CTRL_FREQ, p[0], p[1])?;
+        writeln!(w, "{},{},{}", k as f32 / ctrl_hz, p[0], p[1])?;
     }
     w.flush()?;
     write_meta(
@@ -518,7 +546,7 @@ fn stage_rl(
         "rl_step",
         "R/L step probe",
         "Locked-rotor d-axis voltage step (0.5 V align -> 1.0 V, unslewed), \
-         (i_d, v_d) recorded on-device at 20 kHz and read back over the \
+         (i_d, v_d) recorded on-device at the control rate and read back over the \
          protocol. tools/profile.py fits R from the level change and L from \
          the exponential.",
         0,

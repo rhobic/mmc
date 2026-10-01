@@ -222,6 +222,8 @@ pub enum DeviceKind {
     Sim,
     BoardG0b1,
     BoardG474,
+    /// STM32F302R8 dev board + L6230 three-shunt inverter shield.
+    BoardF302,
     Unknown(u8),
 }
 
@@ -231,6 +233,7 @@ impl DeviceKind {
             DeviceKind::Sim => 0,
             DeviceKind::BoardG0b1 => 1,
             DeviceKind::BoardG474 => 2,
+            DeviceKind::BoardF302 => 3,
             DeviceKind::Unknown(v) => v,
         }
     }
@@ -240,12 +243,13 @@ impl DeviceKind {
             0 => DeviceKind::Sim,
             1 => DeviceKind::BoardG0b1,
             2 => DeviceKind::BoardG474,
+            3 => DeviceKind::BoardF302,
             v => DeviceKind::Unknown(v),
         }
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct DeviceInfo {
     pub proto_version: u8,
     pub kind: DeviceKind,
@@ -253,6 +257,23 @@ pub struct DeviceInfo {
     pub fw_version: u16,
     /// Zero-padded ASCII device name.
     pub name: [u8; 12],
+    /// What a motor board knows about itself that the host would otherwise
+    /// have to hard-code per board. Optional on the wire (a trailing block),
+    /// so firmware that predates it still decodes — as `None`.
+    pub board: Option<BoardTraits>,
+}
+
+/// Board facts the host needs to interpret captures from a motor board.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct BoardTraits {
+    /// Control-loop rate [Hz]: the time base of every burst recording.
+    pub ctrl_hz: u32,
+    /// Series resistance of the drive path (switches + shunt) [Ω], which the
+    /// R/L probe measures on top of the winding.
+    pub r_path: f32,
+    /// Burst-buffer capacity [f32s]. A probe whose schedule does not fit is
+    /// NAKed by the device; the host uses this to skip it up front.
+    pub burst_cap: u32,
 }
 
 impl DeviceInfo {
@@ -265,7 +286,19 @@ impl DeviceInfo {
             kind,
             fw_version,
             name: buf,
+            board: None,
         }
+    }
+
+    pub fn with_board(mut self, board: BoardTraits) -> Self {
+        self.board = Some(board);
+        self
+    }
+
+    /// Control rate, falling back to 20 kHz for firmware that predates
+    /// [`BoardTraits`] (every such motor board ran the loop at 20 kHz).
+    pub fn ctrl_hz(&self) -> f32 {
+        self.board.map_or(20_000.0, |b| b.ctrl_hz as f32)
     }
 
     pub fn name_str(&self) -> &str {
@@ -424,11 +457,21 @@ pub fn parse(raw: &[u8]) -> Result<Message, FrameError> {
             let fw_version = r.u16()?;
             let mut name = [0u8; 12];
             name.copy_from_slice(r.bytes(12)?);
+            let board = if r.0.is_empty() {
+                None
+            } else {
+                Some(BoardTraits {
+                    ctrl_hz: r.u32()?,
+                    r_path: r.f32()?,
+                    burst_cap: r.u32()?,
+                })
+            };
             Message::Info(DeviceInfo {
                 proto_version,
                 kind,
                 fw_version,
                 name,
+                board,
             })
         }
         ty::SET_TELEMETRY => Message::SetTelemetry {
@@ -524,6 +567,11 @@ fn serialize(msg: &Message, raw: &mut [u8]) -> Option<usize> {
             w.u8(info.kind.to_wire())?;
             w.u16(info.fw_version)?;
             w.bytes(&info.name)?;
+            if let Some(b) = info.board {
+                w.u32(b.ctrl_hz)?;
+                w.f32(b.r_path)?;
+                w.u32(b.burst_cap)?;
+            }
         }
         Message::SetTelemetry { divider, mask } => {
             w.u8(ty::SET_TELEMETRY)?;
@@ -714,6 +762,13 @@ mod tests {
             0x0102,
             "mmc-g0b1",
         )));
+        round_trip(Message::Info(
+            DeviceInfo::new(DeviceKind::BoardF302, 1, "mmc-f302").with_board(BoardTraits {
+                ctrl_hz: 10_000,
+                r_path: 1.8,
+                burst_cap: 2048,
+            }),
+        ));
         round_trip(Message::SetTelemetry {
             divider: 10,
             mask: crate::channel::ALL,

@@ -19,7 +19,7 @@ use mmc_core::transforms::{clarke, inverse_clarke, inverse_park, park, Abc, Dq};
 use mmc_core::tuning::{current_pi_gains, speed_pi_gains};
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
 use mmc_proto::{
-    channel, encode, param, test, BurstChunk, Deframer, DeviceInfo, DeviceKind, DriveMode, Message,
+    channel, encode, param, test, BoardTraits, BurstChunk, Deframer, DeviceInfo, DeviceKind, DriveMode, Message,
     MAX_FRAME,
 };
 use mmc_sim::{PmsmParams, TruthAngle, VirtualMotor};
@@ -669,7 +669,14 @@ fn handle(
         Message::Ping { nonce } => send(stream, &Message::Pong { nonce }),
         Message::GetInfo => send(
             stream,
-            &Message::Info(DeviceInfo::new(DeviceKind::Sim, 1, "mmc-sim")),
+            &Message::Info(DeviceInfo::new(DeviceKind::Sim, 1, "mmc-sim").with_board(
+                BoardTraits {
+                    ctrl_hz: (1.0 / control.ctrl_dt).round() as u32,
+                    // Average-value inverter: no series resistance to subtract.
+                    r_path: 0.0,
+                    burst_cap: (BURST_PAIRS * 2).max(probe::SAL_HDR + probe::SAL_TICKS * 2) as u32,
+                },
+            )),
         ),
         Message::SetTelemetry {
             divider: d,
