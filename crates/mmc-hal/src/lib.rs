@@ -76,6 +76,9 @@ pub struct BoardSpec {
     /// (see [`MotorBoard::set_terminal_sample_offset`]), in the board's own
     /// units. 0 when the board cannot move its sample point.
     pub terminal_offset_max: f32,
+    /// The board reads hall sensors ([`MotorBoard::hall_state`] returns
+    /// `Some`), so the hall-sensored drive modes are available.
+    pub has_halls: bool,
 }
 
 /// One synchronous set of conversions, taken at the PWM instant where the

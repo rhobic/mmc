@@ -139,6 +139,84 @@ impl HallSpeed {
     pub fn index(&self) -> Option<usize> {
         self.last_idx
     }
+
+    /// Direction of the last edge in [`SEQUENCE`] order: +1, −1, or 0 before
+    /// the first one.
+    pub fn seq_dir(&self) -> f32 {
+        self.dir
+    }
+}
+
+/// Rotor electrical angle from calibrated halls, good enough to run FOC on.
+///
+/// Between edges the only information is "somewhere in this 60° sector", so
+/// the estimate is: on an edge, the edge's own angle (the boundary the rotor
+/// just crossed, in its direction of travel); between edges, that plus the
+/// edge-timed speed × time, clamped to the sector. With no speed estimate
+/// (at rest) it is the sector centre — at worst 30° from the truth, which
+/// still leaves cos 30° = 87% of the torque, so a sensored drive starts from
+/// rest without the I-f ramp.
+#[derive(Clone, Debug)]
+pub struct HallAngle {
+    pub map: HallMap,
+    speed: HallSpeed,
+    theta: f32,
+    have: bool,
+}
+
+impl HallAngle {
+    pub const fn new(map: HallMap) -> Self {
+        Self {
+            map,
+            speed: HallSpeed::new(),
+            theta: 0.0,
+            have: false,
+        }
+    }
+
+    /// Feed one sample; returns the angle estimate [rad], or `None` until a
+    /// valid state has been seen (and on an invalid one: a sensor fault).
+    pub fn update(&mut self, state: u8, dt: f32) -> Option<f32> {
+        let edge = self.speed.update(state, dt);
+        let center = self.map.angle(state)?;
+        let half = PI / 6.0;
+        if !self.have {
+            self.theta = center;
+            self.have = true;
+        } else if edge {
+            // Entered this sector across the boundary on the side we came
+            // from: the trailing edge in the direction of travel.
+            let travel = self.speed.seq_dir() * self.map.dir;
+            self.theta = if travel == 0.0 {
+                center
+            } else {
+                wrap_angle(center - travel * half)
+            };
+        } else if self.omega() == 0.0 {
+            // No speed estimate (rest, or before two same-direction edges):
+            // the sector centre, never more than 30° wrong. Holding the
+            // entry-edge angle instead stalls six-step — the energised pair
+            // parks the rotor on the far hall edge, 60° from the held
+            // estimate, and nothing ever commutates (session 30, sim).
+            self.theta = center;
+        } else {
+            self.theta = wrap_angle(self.theta + self.omega() * dt);
+        }
+        // Never leave the sector the sensors say the rotor is in.
+        let d = wrap_angle(self.theta - center).clamp(-half, half);
+        self.theta = wrap_angle(center + d);
+        Some(self.theta)
+    }
+
+    /// Electrical speed [rad/s] in the motor's convention.
+    pub fn omega(&self) -> f32 {
+        self.speed.omega() * self.map.dir
+    }
+
+    /// Edge statistics (invalid states, skipped edges) for diagnostics.
+    pub fn speed(&self) -> &HallSpeed {
+        &self.speed
+    }
 }
 
 #[cfg(test)]
@@ -194,6 +272,50 @@ mod tests {
             h.update(ideal(theta), dt);
         }
         assert_eq!(h.omega(), 0.0);
+    }
+
+    #[test]
+    fn angle_tracks_a_spinning_rotor_within_a_few_degrees() {
+        // A map with a non-trivial offset and reversed wiring: the true
+        // halls are `ideal(dir*(theta - offset))`.
+        let map = HallMap {
+            offset: 1.0,
+            dir: -1.0,
+        };
+        for &w in &[300.0f32, -300.0] {
+            let mut est = HallAngle::new(map);
+            let dt = 1e-4;
+            let mut theta = 0.2f32;
+            let mut worst = 0.0f32;
+            for k in 0..20_000 {
+                theta = wrap_angle(theta + w * dt);
+                let a = est
+                    .update(ideal(map.dir * (theta - map.offset)), dt)
+                    .unwrap();
+                if k > 2000 {
+                    worst = worst.max(wrap_angle(a - theta).abs());
+                }
+            }
+            assert!(worst < 0.1, "w {w}: worst error {worst} rad");
+            assert!((est.omega() - w).abs() < 0.05 * w.abs());
+        }
+    }
+
+    #[test]
+    fn angle_at_standstill_is_inside_the_sector() {
+        let map = HallMap {
+            offset: 0.0,
+            dir: 1.0,
+        };
+        let mut est = HallAngle::new(map);
+        for &theta in &[0.0f32, 1.0, 2.5, -2.0] {
+            for _ in 0..100 {
+                est.update(ideal(theta), 1e-4);
+            }
+            let a = est.update(ideal(theta), 1e-4).unwrap();
+            assert!(wrap_angle(a - theta).abs() <= PI / 3.0 + 1e-4);
+        }
+        assert_eq!(est.update(0b111, 1e-4), None, "invalid state is a fault");
     }
 
     #[test]

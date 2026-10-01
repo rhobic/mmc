@@ -5,7 +5,7 @@ use core::sync::atomic::Ordering;
 
 use mmc_core::angle::AngleEstimator;
 use mmc_core::foc::{Decoupling, Foc};
-use mmc_core::hall::HallSpeed;
+use mmc_core::hall::{HallAngle, HallMap, HallSpeed};
 use mmc_core::inverter::DeadtimeModel;
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
@@ -20,7 +20,7 @@ use mmc_hal::MotorBoard;
 use mmc_proto::{channel, param, test};
 
 use crate::{mode, Shared, BURST_DONE, ST_FAULT_DRV, ST_FAULT_OC, ST_FAULT_VBUS, ST_OFF};
-use crate::{ST_RUN, ST_SL_BLEND, ST_SL_RAMP, ST_SS_UNLOCKED, ST_STALL};
+use crate::{ST_FAULT_HALL, ST_RUN, ST_SL_BLEND, ST_SL_RAMP, ST_SS_UNLOCKED, ST_STALL};
 
 const V_SLEW: f32 = 5.0; // V/s
 const I_SLEW: f32 = 2.0; // A/s
@@ -31,6 +31,8 @@ const CAL_TICKS: u32 = 8192;
 const DEADMAN_S: f32 = 2.0;
 /// Consecutive low-observer-flux time before the stall fault trips.
 const STALL_S: f32 = 0.1;
+/// Invalid hall states tolerated in a row (a glitch) before the hall fault.
+const HALL_BAD_S: f32 = 0.003;
 
 // Locked-rotor R/L probe (RunTest RL_STEP): rotor-align time at the first
 // voltage level, then square-wave excitation between the two levels. τ=L/R
@@ -85,6 +87,10 @@ pub struct Engine {
     vbus_filt: f32,
     /// Hall edge timing, fed every tick whether or not anything uses it.
     hall: HallSpeed,
+    /// Calibrated hall angle — the angle source of the hall drive modes.
+    hall_angle: Option<HallAngle>,
+    /// Consecutive invalid hall states while a hall mode runs.
+    hall_bad: u32,
 }
 
 impl Default for Engine {
@@ -121,6 +127,8 @@ impl Engine {
             stall_strikes: 0,
             vbus_filt: 0.0,
             hall: HallSpeed::new(),
+            hall_angle: None,
+            hall_bad: 0,
         }
     }
 
@@ -233,7 +241,10 @@ impl Engine {
             // Six-step drives the enables itself; everything else wants all
             // three phases live (a previous six-step run may have left one
             // Hi-Z).
-            let six_step = self.mode == mode::SS_FORCED || self.mode == mode::SS_SENSORLESS;
+            let six_step = matches!(
+                self.mode,
+                mode::SS_FORCED | mode::SS_SENSORLESS | mode::SS_HALL
+            );
             if !six_step {
                 b.set_phase_enables(0b111);
             }
@@ -335,6 +346,54 @@ impl Engine {
                     let v_ab = inverse_park(v_dq, sc);
                     duties = svpwm(v_ab, vbus);
                     v_ab
+                }
+            } else if self.mode == mode::HALL_FOC || self.mode == mode::SS_HALL {
+                // Hall-sensored: the calibrated halls own the angle. A short
+                // run of invalid states (a glitch) holds the last estimate;
+                // a longer one is a lost sensor and trips.
+                match hall_state.and_then(|h| self.hall_angle.as_mut().unwrap().update(h, dt)) {
+                    Some(theta) => {
+                        self.hall_bad = 0;
+                        self.theta = theta;
+                        self.omega = self.hall_angle.as_ref().unwrap().omega();
+                    }
+                    None => {
+                        self.hall_bad += 1;
+                        if self.hall_bad >= cfg.ticks(HALL_BAD_S) {
+                            self.trip(sh, b, ST_FAULT_HALL);
+                        }
+                    }
+                }
+                if self.mode == mode::OFF {
+                    AlphaBeta::default()
+                } else if self.mode == mode::HALL_FOC {
+                    // Speed loop on the hall speed, FOC on the hall angle:
+                    // the closed-loop half of the sensorless stack, without
+                    // the I-f ramp in front of it.
+                    let accel = p(param::OMEGA_ACCEL);
+                    let d = (omega_target - self.omega_ref_cur).clamp(-accel * dt, accel * dt);
+                    self.omega_ref_cur += d;
+                    iq_ref =
+                        self.speed
+                            .as_mut()
+                            .unwrap()
+                            .update(self.omega_ref_cur, self.omega, dt);
+                    let out = self.foc.as_mut().unwrap().step(
+                        i_abc,
+                        self.theta,
+                        self.omega,
+                        Dq { d: 0.0, q: iq_ref },
+                        vbus,
+                        dt,
+                    );
+                    duties = out.duties;
+                    v_dq = out.v_dq;
+                    i_dq = out.i_dq;
+                    out.v_ab
+                } else {
+                    duties = self.sixstep_hall(sh, b, omega_target, amp_target);
+                    i_dq = park(i_ab, sin_cos(self.theta));
+                    AlphaBeta::default()
                 }
             } else if self.mode == mode::SENSORLESS {
                 // Sensorless: the sequencer owns the angle (I-f ramp → blend
@@ -532,7 +591,10 @@ impl Engine {
         put(channel::VB_U, vt[0]);
         put(channel::VB_V, vt[1]);
         put(channel::VB_W, vt[2]);
-        let six_step = self.mode == mode::SS_FORCED || self.mode == mode::SS_SENSORLESS;
+        let six_step = matches!(
+            self.mode,
+            mode::SS_FORCED | mode::SS_SENSORLESS | mode::SS_HALL
+        );
         put(
             channel::SECTOR,
             if six_step {
@@ -744,11 +806,59 @@ impl Engine {
             ));
             self.omega_ref_cur = handoff * dir;
             self.sl_preload = i_start * dir;
+        } else if mode == mode::HALL_FOC {
+            // Same feedforward FOC and speed loop as sensorless, with the
+            // amplitude of the command as the i_q authority (under
+            // iq_limit) and the reference ramping from rest.
+            self.foc = Some(Foc::with_feedforward(
+                gains,
+                Decoupling {
+                    ld: ls,
+                    lq: ls,
+                    flux: p(param::FLUX),
+                },
+            ));
+            let authority = f32::from_bits(sh.cmd_amp.load(Ordering::Relaxed))
+                .abs()
+                .clamp(0.05, p(param::IQ_LIMIT));
+            self.speed = Some(SpeedLoop::new(
+                PiGains {
+                    kp: p(param::SPEED_KP),
+                    ki: p(param::SPEED_KI),
+                },
+                authority,
+            ));
+            self.seq = None;
+            self.omega_ref_cur = 0.0;
+            self.sl_preload = 0.0;
         } else {
             self.foc = Some(Foc::new(gains));
             self.seq = None;
             self.speed = None;
             self.sl_preload = 0.0;
+        }
+        if mode == mode::HALL_FOC || mode == mode::SS_HALL {
+            self.hall_angle = Some(HallAngle::new(HallMap {
+                offset: p(param::HALL_OFFSET),
+                dir: if p(param::HALL_DIR) < 0.0 { -1.0 } else { 1.0 },
+            }));
+            self.hall_bad = 0;
+        }
+        if mode == mode::SS_HALL {
+            // Duty per rad/s el, preloaded with the duty that drives the
+            // current ceiling through two windings at standstill (the
+            // breakaway duty), so the loop does not integrate up to it.
+            let mut pi = Pi::new(
+                PiGains {
+                    kp: p(param::SS_KP),
+                    ki: p(param::SS_KI),
+                },
+                spec.max_duty,
+            );
+            let ff = p(param::IQ_LIMIT) * 2.0 * p(param::R) / self.vbus_filt.max(1.0);
+            pi.preload(ff.clamp(0.0, spec.max_duty));
+            self.ss_speed = Some(pi);
+            self.ss_target = 0.0;
         }
         // Dead-time compensation applies to every FOC-modulated mode, not just
         // sensorless: the bridge takes its cut from an I-f current vector
@@ -760,6 +870,49 @@ impl Engine {
                 i_thresh: p(param::I_THRESH),
             });
         }
+    }
+
+    /// Hall six-step: the sector from the hall angle, a duty→speed loop on
+    /// the hall speed. Both directions: reverse torque at the same rotor
+    /// angle is the same pair with the current flipped, i.e. the sector
+    /// three steps on.
+    fn sixstep_hall<const N: usize>(
+        &mut self,
+        sh: &Shared<N>,
+        b: &mut impl MotorBoard,
+        omega_target: f32,
+        amp_target: f32,
+    ) -> [f32; 3] {
+        let spec = &sh.cfg.spec;
+        let dt = sh.cfg.dt();
+        let p = |id| sh.param(id);
+        let dir = if omega_target < 0.0 { -1.0 } else { 1.0 };
+        let mut sector = sixstep::sector_of(self.theta);
+        if dir < 0.0 {
+            sector = (sector + 3) % sixstep::SECTORS;
+        }
+        self.ss_sector = sector;
+        // Slew the target so a retarget does not step the duty.
+        let accel = p(param::OMEGA_ACCEL);
+        let want = omega_target.abs();
+        self.ss_target += (want - self.ss_target).clamp(-accel * dt, accel * dt);
+        let measured = self.omega * dir;
+        let ceiling = amp_target.clamp(0.0, spec.max_duty);
+        let pi = self.ss_speed.as_mut().unwrap();
+        let raw = pi.update(self.ss_target - measured, dt);
+        let duty = raw.max(0.0).min(ceiling);
+        if raw != duty {
+            // Back-calculation: no braking quadrant, so it saturates low on
+            // every deceleration and would otherwise wind up.
+            pi.preload(duty);
+        }
+        let (hi, lo, fl) = sixstep::TABLE[sector];
+        let mut duties = [0.0; 3];
+        duties[hi as usize] = duty;
+        duties[lo as usize] = 0.0;
+        b.set_phase_enables(!(1u8 << fl) & 0b111);
+        sh.sixstep_sector.store(sector as u8, Ordering::Relaxed);
+        duties
     }
 
     /// Sensorless six-step: one tick of commutation + the duty→speed loop.

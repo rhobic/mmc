@@ -16,7 +16,10 @@ const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
 /// v2 (2026-08-08): added `v_dead`/`i_thresh`, 13 → 15 params. **A device
 /// flashed across this boundary loads compiled-in defaults and needs its
 /// profile re-applied and re-persisted.**
-const VERSION: u32 = 2;
+///
+/// v3 (2026-10-01): added `hall_offset`/`hall_dir`, 15 → 17 params. Same
+/// consequence: re-apply and re-persist after flashing across it.
+const VERSION: u32 = 3;
 const HDR: usize = 2; // magic + version
 const CRC_IDX: usize = HDR + param::COUNT;
 const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, round up to even

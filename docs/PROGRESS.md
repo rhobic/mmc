@@ -187,10 +187,71 @@ resid 1.1 mV; model-free saturated-line check 623.4 mV; ladder R 1.345 Ω vs
 probe 1.418 (−5%); up/down legs agree (no heating). At 30 V and 20 kHz that
 is ~1 µs of effective dead time — the L6230's internal value.
 
-**Pole pairs are still unknown** — nothing electrical measures them; they
-only scale the mechanical (kt, J) values the profiler reports, not the
-electrical-domain gains. Needs one hand-turned revolution counting hall
-cycles.
+**Dead-time-compensated re-sweep:** with v_dead applied, **ψ = 6.645 ±
+0.038 mWb** (3/5 points; the two low-speed points hunt and are rejected) —
+against 8.13 ± 1.23 uncompensated. The bridge error had been read as
+back-EMF: +22% bias, now ±0.6%.
+
+### Motor 3 identified — maxon EC-i 40 (operator added UM2653)
+
+The motor is the one from ST's EVALKIT-ROBOT-1 (`hw/um2653…pdf`, motor
+table p.12): 36 V, 7 pole pairs, 44 g·cm², halls **and** a 1024-line
+encoder (J4, not wired to this shield). Profiler vs datasheet:
+
+| | datasheet | profiler | Δ |
+|---|---|---|---|
+| R (phase-to-phase) | 0.853 Ω | 0.835 Ω (drive-path 1.418 − 1.0 est. bridge, ×2) | −2% |
+| L (phase-to-phase) | 0.675 mH | 0.712 mH | +5% |
+| ψ (from no-load 4550 rpm @ 36 V, block-commutated ≈) | ≈ 6.5 mWb | 6.645 mWb | ≈ +2% |
+| pole pairs | 7 | not measurable electrically | — |
+
+The R match leans on the datasheet-typical 1.0 Ω bridge path, so it is
+"consistent", not proof of that number. **Correction to chunk 5:** the
+60 ms coast-down is not a heavy load — with 44 g·cm² it is ~3 mN·m of drag.
+The low inertia is also why I-f hunts: a light rotor on a stiff current
+spring, lightly damped. Hall FOC below confirms the load is small (i_q
+0.11 A at 300 rad/s el ≈ 7.7 mN·m).
+
+### Chunk 6 — hall-sensored FOC and six-step
+
+**Why:** sensorless FOC on motor 3 got through the I-f ramp and tripped
+overcurrent in the blend. The halls show why: at the 150 rad/s handoff the
+rotor was hunting 74 ↔ 388 rad/s with the hang angle at pull-out; when the
+observer took over the rotor surged. I-f is a weak start for a light,
+cogging rotor — and this motor has halls.
+
+- `mmc_core::hall::HallAngle`: on an edge, the edge's angle (trailing
+  boundary in the direction of travel); between edges, interpolated with
+  the edge-timed speed, clamped to the sector; **with no speed estimate,
+  the sector centre**. The first version held the entry-edge angle at rest
+  and stalled six-step in the sim: the energised pair parked the rotor on
+  the far hall edge, 60° from the held estimate, and nothing ever
+  commutated.
+- Drive modes `HallFoc { amps, omega_e }` (speed loop → i_q on the hall
+  angle, from standstill, both directions, `amps` = authority) and
+  `SixStepHall { duty, omega_e }` (sector from the hall angle, sector + 3
+  for reverse, duty→speed loop on `ss_kp`/`ss_ki`), wire codes 7 and 8.
+- Params `hall_offset`/`hall_dir` (17 params → **nvparam v3: re-apply and
+  re-persist after flashing**). `hall_cal.py --json` writes them under
+  their param names, so `apply --profile hall_map.json` installs a
+  calibration. `BoardSpec::has_halls`: a board without them NAKs the
+  modes. `ST_FAULT_HALL` (10): 3 ms of invalid states trips the drive.
+- Sim board: ideal halls, a floating-phase approximation for six-step, and
+  tests for both modes both ways at 10 and 20 kHz, the dead-sensor trip and
+  the no-halls NAK (11 sim-board tests).
+
+**On motor 3** (profile + hall map applied, speed gains from datasheet J at
+60 rad/s bandwidth: kp 5.4e-4, ki 8.1e-3; `testresults/motor3-modes/`):
+
+| run | result |
+|---|---|
+| hall FOC 300 → 600 rad/s el, 1.0 A authority | from rest, no trips; 299.7 ± 20 at 300; shadow observer speed within 1% of the halls |
+| hall six-step 300 → 600, duty ≤ 0.5, default ss gains | runs, but 275 at 300 (loop too slow for this motor) |
+| same, ss_kp 3e-4 / ss_ki 5e-3 | **299.1 at 300, 599.2 at 600** |
+
+**Open:** the shadow observer's angle leads the hall angle by 0.11 rad at
+230 rad/s and 0.22 at 560 — a ~0.4 ms relative delay or a small hall
+offset error; worth resolving before trusting either as the reference.
 
 ## 2026-08-08 — session 29: bench blocked — the ST-LINK VCP transmits but does not receive
 

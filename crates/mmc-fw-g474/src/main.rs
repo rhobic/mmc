@@ -114,6 +114,9 @@ const SPEC: BoardSpec = BoardSpec {
     r_path: 0.85,
     // Sample point inside a 50% duty on-window, so it tracks the PWM period.
     terminal_offset_max: (PWM_ARR / 2) as f32,
+    // The shield has a hall connector, but no motor on this bench has used
+    // it; the inputs are not wired up in this firmware.
+    has_halls: false,
 };
 
 /// Parameter defaults: motor 1, measured on this bench (Stage F0 rotating
@@ -140,6 +143,8 @@ const DEFAULTS: [f32; param::COUNT] = [
     5.0e-4,                     // SS_KI
     0.0,                        // V_DEAD
     0.5,                        // I_THRESH (FOC ripple amplitude, 30 µH at 40 kHz)
+    0.0,                        // HALL_OFFSET (unused: no halls)
+    1.0,                        // HALL_DIR
 ];
 
 /// f32 capacity of the probe burst buffer: the saliency sweep's full
@@ -151,7 +156,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardG474,
-        fw_version: 16,
+        fw_version: 17,
         name: "mmc-g474",
         defaults: DEFAULTS,
     },

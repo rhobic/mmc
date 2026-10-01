@@ -101,7 +101,13 @@ pub mod param {
     /// reverses sign underneath it. Measure before enabling.
     pub const V_DEAD: u8 = 13;
     pub const I_THRESH: u8 = 14;
-    pub const COUNT: usize = 15;
+    /// Hall calibration (`mmc_core::hall::HallMap`): electrical angle [rad]
+    /// of the center of the first state in the Gray-code sequence, and the
+    /// direction (+1 / −1) that sequence runs in. `tools/hall_cal.py` fits
+    /// both from two slow open-loop runs; the hall drive modes need them.
+    pub const HALL_OFFSET: u8 = 15;
+    pub const HALL_DIR: u8 = 16;
+    pub const COUNT: usize = 17;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -118,6 +124,8 @@ pub mod param {
         "ss_ki",
         "v_dead",
         "i_thresh",
+        "hall_offset",
+        "hall_dir",
     ];
 }
 
@@ -181,6 +189,16 @@ pub enum DriveMode {
     /// commutation timed from measured back-EMF zero-crossings on the idle
     /// phase. `duty` is the high-side PWM duty throughout. Wire code 6.
     SixStepSensorless { duty: f32, omega_handoff: f32 },
+    /// Hall-sensored FOC: the rotor angle comes from the calibrated halls
+    /// (`hall_offset`/`hall_dir`), so the speed loop closes from standstill
+    /// with no I-f ramp. `amps` is the speed loop's i_q authority (clamped to
+    /// `iq_limit`), `omega_e` the speed target (sign = direction,
+    /// retargetable). NAKed by a board without halls. Wire code 7.
+    HallFoc { amps: f32, omega_e: f32 },
+    /// Hall-sensored six-step: commutation from the hall angle, both
+    /// directions, a duty→speed loop (`ss_kp`/`ss_ki`) toward `omega_e`.
+    /// `duty` is the duty ceiling. Wire code 8.
+    SixStepHall { duty: f32, omega_e: f32 },
 }
 
 impl DriveMode {
@@ -195,6 +213,8 @@ impl DriveMode {
                 duty,
                 omega_handoff,
             } => (6, duty, omega_handoff),
+            DriveMode::HallFoc { amps, omega_e } => (7, amps, omega_e),
+            DriveMode::SixStepHall { duty, omega_e } => (8, duty, omega_e),
         }
     }
 
@@ -212,6 +232,8 @@ impl DriveMode {
                 duty: amp,
                 omega_handoff: omega_e,
             }),
+            7 => Ok(DriveMode::HallFoc { amps: amp, omega_e }),
+            8 => Ok(DriveMode::SixStepHall { duty: amp, omega_e }),
             _ => Err(FrameError::Malformed),
         }
     }
@@ -791,6 +813,14 @@ mod tests {
         round_trip(Message::SetDrive(DriveMode::Sensorless {
             amps: 0.5,
             omega_e: 600.0,
+        }));
+        round_trip(Message::SetDrive(DriveMode::HallFoc {
+            amps: 1.0,
+            omega_e: -300.0,
+        }));
+        round_trip(Message::SetDrive(DriveMode::SixStepHall {
+            duty: 0.3,
+            omega_e: 250.0,
         }));
         round_trip(Message::RunTest {
             kind: test::RL_STEP,

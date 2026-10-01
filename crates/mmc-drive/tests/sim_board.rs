@@ -24,6 +24,8 @@ struct SimBoard {
     duties: [f32; 3],
     enables: u8,
     dt_plant: f32,
+    /// Hall sensors unplugged: every read is the invalid all-high state.
+    halls_dead: bool,
 }
 
 impl SimBoard {
@@ -33,20 +35,34 @@ impl SimBoard {
             duties: [0.0; 3],
             enables: 0,
             dt_plant: 1.0 / (ctrl_hz as f32 * SUBSTEPS as f32),
+            halls_dead: false,
         }
     }
 
     /// Advance the plant one control period under the latched duties. A
-    /// stage that is off applies no voltage (freewheel diodes ignored).
+    /// stage that is off applies no voltage (freewheel diodes ignored). With
+    /// one phase floating (six-step) the dq plant has no open terminal, so
+    /// the floating phase is held at the driven pair's midpoint — close to
+    /// the zero-current voltage it would float to.
     fn advance(&mut self) {
-        let v_ab = if self.enables == 0b111 {
-            clarke(Abc {
-                a: self.duties[0] * VBUS,
-                b: self.duties[1] * VBUS,
-                c: self.duties[2] * VBUS,
-            })
-        } else {
-            Default::default()
+        let mut d = self.duties;
+        let v_ab = match self.enables {
+            0b111 => clarke(Abc {
+                a: d[0] * VBUS,
+                b: d[1] * VBUS,
+                c: d[2] * VBUS,
+            }),
+            0b110 | 0b101 | 0b011 => {
+                let fl = (!self.enables & 0b111).trailing_zeros() as usize;
+                let (x, y) = ((fl + 1) % 3, (fl + 2) % 3);
+                d[fl] = 0.5 * (d[x] + d[y]);
+                clarke(Abc {
+                    a: d[0] * VBUS,
+                    b: d[1] * VBUS,
+                    c: d[2] * VBUS,
+                })
+            }
+            _ => Default::default(),
         };
         for _ in 0..SUBSTEPS {
             self.motor.step(v_ab, 0.0, self.dt_plant);
@@ -75,7 +91,11 @@ impl MotorBoard for SimBoard {
         false
     }
     fn hall_state(&mut self) -> Option<u8> {
-        // Ideal 120° halls, for completeness of the trait surface.
+        if self.halls_dead {
+            return Some(0b111);
+        }
+        // Ideal 120° halls: state 0b001 is centered on θ = 0 and the
+        // sequence runs forward, i.e. HallMap { offset: 0, dir: +1 }.
         let sc = sin_cos(self.motor.theta_e());
         let i = inverse_clarke(inverse_park(
             mmc_core::transforms::Dq { d: 1.0, q: 0.0 },
@@ -122,6 +142,8 @@ fn config(ctrl_hz: u32, motor: &PmsmParams) -> DriveConfig {
     defaults[param::SS_KP as usize] = 2e-4;
     defaults[param::SS_KI as usize] = 5e-4;
     defaults[param::I_THRESH as usize] = 0.5;
+    defaults[param::HALL_OFFSET as usize] = 0.0;
+    defaults[param::HALL_DIR as usize] = 1.0;
     DriveConfig {
         spec: BoardSpec {
             ctrl_hz,
@@ -132,6 +154,7 @@ fn config(ctrl_hz: u32, motor: &PmsmParams) -> DriveConfig {
             max_duty: 0.95,
             r_path: 0.0,
             terminal_offset_max: 0.0,
+            has_halls: true,
         },
         kind: DeviceKind::Sim,
         fw_version: 1,
@@ -358,6 +381,83 @@ fn a_small_burst_buffer_refuses_the_saliency_sweep() {
             a: 0.3,
             b: 0.9,
         },
+        &mut store,
+    );
+    assert!(matches!(reply, Message::Nak { err: 1, .. }), "{reply:?}");
+}
+
+#[test]
+fn hall_foc_closes_the_speed_loop_from_rest_both_ways() {
+    for hz in RATES {
+        for target in [300.0f32, -300.0] {
+            let mut rig = Rig::new(hz);
+            let ack = rig.send(&Message::SetDrive(DriveMode::HallFoc {
+                amps: 1.0,
+                omega_e: target,
+            }));
+            assert!(matches!(ack, Message::Ack { .. }), "{ack:?}");
+            rig.run(2.0);
+            assert_eq!(rig.sh.state(), ST_RUN, "{hz} Hz {target}: running");
+            let w = rig.board.motor.omega_e();
+            assert!(
+                (w - target).abs() < 15.0,
+                "{hz} Hz: rotor at {w}, target {target}"
+            );
+            // The shadow observer agrees with the halls once spinning.
+            let err = rig.telem(channel::THETA_ERR).abs();
+            assert!(err < 0.35, "{hz} Hz {target}: observer vs halls {err} rad");
+        }
+    }
+}
+
+#[test]
+fn hall_six_step_spins_both_ways() {
+    for hz in RATES {
+        for target in [250.0f32, -250.0] {
+            let mut rig = Rig::new(hz);
+            rig.send(&Message::SetDrive(DriveMode::SixStepHall {
+                duty: 0.6,
+                omega_e: target,
+            }));
+            // The duty loop runs on the conservative default ss gains.
+            rig.run(4.0);
+            assert_eq!(rig.sh.state(), ST_RUN, "{hz} Hz {target}: running");
+            let w = rig.board.motor.omega_e();
+            assert!(
+                (w - target).abs() < 0.15 * target.abs(),
+                "{hz} Hz: rotor at {w}, target {target}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_dead_hall_sensor_trips_the_hall_drive() {
+    let mut rig = Rig::new(10_000);
+    rig.send(&Message::SetDrive(DriveMode::HallFoc {
+        amps: 1.0,
+        omega_e: 200.0,
+    }));
+    rig.run(0.5);
+    rig.board.halls_dead = true;
+    rig.run(0.05);
+    assert_eq!(rig.sh.state(), mmc_drive::ST_FAULT_HALL);
+    assert_eq!(rig.board.enables, 0, "stage off");
+}
+
+#[test]
+fn a_board_without_halls_refuses_the_hall_modes() {
+    let motor = PmsmParams::small_bldc();
+    let mut cfg = config(10_000, &motor);
+    cfg.spec.has_halls = false;
+    let burst: &'static BurstBuffer<2048> = Box::leak(Box::default());
+    let sh = Box::new(Shared::new(cfg, burst));
+    let mut store = RamStore([0xFF; nvparam::BYTES]);
+    let reply = sh.handle(
+        &Message::SetDrive(DriveMode::HallFoc {
+            amps: 1.0,
+            omega_e: 100.0,
+        }),
         &mut store,
     );
     assert!(matches!(reply, Message::Nak { err: 1, .. }), "{reply:?}");

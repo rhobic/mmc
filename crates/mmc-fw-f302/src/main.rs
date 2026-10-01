@@ -106,11 +106,13 @@ const SPEC: BoardSpec = BoardSpec {
     // closed against a known motor.
     r_path: 1.0,
     terminal_offset_max: (PWM_ARR / 2) as f32,
+    has_halls: true,
 };
 
-/// Parameter defaults for an *unknown* motor: deliberately gentle, so the
-/// first drives and the profiler's own probes are safe before anything is
-/// measured. The profiler replaces R/L/flux/pole pairs/speed gains.
+/// Parameter defaults: gentle placeholders for an unknown motor, except
+/// where motor 3 (maxon EC-i 40) has been measured on this bench — pole
+/// pairs from its datasheet, the hall map from `tools/hall_cal.py`
+/// (session 30). The profiler replaces R/L/flux/speed gains via `apply`.
 const DEFAULTS: [f32; param::COUNT] = [
     1.0,                        // R
     0.5e-3,                     // L
@@ -118,7 +120,7 @@ const DEFAULTS: [f32; param::COUNT] = [
     1000.0,                     // CUR_BW
     1.0e-4,                     // SPEED_KP
     1.0e-3,                     // SPEED_KI
-    4.0,                        // POLE_PAIRS
+    7.0,                        // POLE_PAIRS (maxon EC-i 40 datasheet)
     150.0,                      // SL_HANDOFF
     300.0,                      // OMEGA_ACCEL
     0.8,                        // IQ_LIMIT
@@ -127,6 +129,8 @@ const DEFAULTS: [f32; param::COUNT] = [
     5.0e-4,                     // SS_KI
     0.0,                        // V_DEAD
     0.3,                        // I_THRESH
+    -1.0775,                    // HALL_OFFSET (motor 3, hall_cal.py)
+    1.0,                        // HALL_DIR
 ];
 
 /// Probe burst capacity [f32s]: 8 KB of the 16 KB RAM. Enough for the R/L
@@ -139,7 +143,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardF302,
-        fw_version: 1,
+        fw_version: 2,
         name: "mmc-f302",
         defaults: DEFAULTS,
     },

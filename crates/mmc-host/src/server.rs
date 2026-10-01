@@ -588,6 +588,9 @@ fn default_params(cfg: &ServeCfg) -> [f32; param::COUNT] {
         // Compensation off until the rig is measured; see param::V_DEAD.
         0.0,
         0.5,
+        // Hall map: stored for round-trips; the TCP sim has no halls.
+        0.0,
+        1.0,
     ]
 }
 
@@ -710,7 +713,9 @@ fn handle(
             )
         }
         Message::SetDrive(DriveMode::SixStepForced { .. })
-        | Message::SetDrive(DriveMode::SixStepSensorless { .. }) => {
+        | Message::SetDrive(DriveMode::SixStepSensorless { .. })
+        | Message::SetDrive(DriveMode::HallFoc { .. })
+        | Message::SetDrive(DriveMode::SixStepHall { .. }) => {
             // The virtual motor is a dq average-value model: it has no
             // floating terminal and no trapezoidal EMF, so it cannot honestly
             // run six-step. NAK until the phase-domain model lands, rather
@@ -729,7 +734,10 @@ fn handle(
                 DriveMode::OpenLoopVoltage { volts, omega_e } => (1, volts, omega_e),
                 DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
                 DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
-                DriveMode::SixStepForced { .. } | DriveMode::SixStepSensorless { .. } => {
+                DriveMode::SixStepForced { .. }
+                | DriveMode::SixStepSensorless { .. }
+                | DriveMode::HallFoc { .. }
+                | DriveMode::SixStepHall { .. } => {
                     unreachable!("handled above")
                 }
             };
@@ -881,6 +889,8 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
         param::SS_KI => (0.0, 0.1),
         param::V_DEAD => (0.0, 2.0),
         param::I_THRESH => (0.01, 5.0),
+        param::HALL_OFFSET => (-core::f32::consts::PI, core::f32::consts::PI),
+        param::HALL_DIR => (-1.0, 1.0),
         _ => return None,
     })
 }

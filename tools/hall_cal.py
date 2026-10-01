@@ -119,7 +119,9 @@ def main():
         mean_lag = np.degrees(np.mean([e["lag"] for e in good]))
         print(f"mean open-loop lag {mean_lag:.1f} deg (rotor behind the forced angle)")
         if a.json:
-            json.dump(dict(offset=offset, dir=seq_dir, edges=[
+            # `hall_offset`/`hall_dir` are device param names, so
+            # `mmc-host apply --profile` writes this file straight back.
+            json.dump(dict(hall_offset=offset, hall_dir=seq_dir, edges=[
                 dict(a=e["a"], b=e["b"], angle=e["angle"], lag=e["lag"]) for e in good],
                 spacing_deg=spacing, resid_deg=list(resid)), open(a.json, "w"), indent=2)
             print(f"wrote {a.json}")

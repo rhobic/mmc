@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial COM9 --baud 1000000 --divider 10 --duration 6",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 4867 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 10,
+    "drive": "Sensorless { amps: 1.0, omega_e: 299.70795 }",
+    "drive_step": null,
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "F302 sensorless FOC, 1.0 A start, 300 rad/s el",
+  "unix_time": 1790897158
+}

@@ -57,6 +57,9 @@ pub const ST_STALL: u8 = 8;
 /// confident — it is coasting on the timeout fallback, so the speed it reports
 /// is a guess and the drive is one missed crossing from losing sync.
 pub const ST_SS_UNLOCKED: u8 = 9;
+/// Hall fault: a hall-sensored drive saw an invalid state (0b000/0b111 — a
+/// lost sensor supply or a broken wire) for longer than a glitch.
+pub const ST_FAULT_HALL: u8 = 10;
 
 /// Drive-mode codes on `CMD_MODE` (mode 4 is the probe sequencer).
 pub(crate) mod mode {
@@ -67,6 +70,8 @@ pub(crate) mod mode {
     pub const PROBE: u8 = 4;
     pub const SS_FORCED: u8 = 5;
     pub const SS_SENSORLESS: u8 = 6;
+    pub const HALL_FOC: u8 = 7;
+    pub const SS_HALL: u8 = 8;
 }
 
 /// Open-loop voltage ceiling [V] (also the R/L probe's clamp).
@@ -131,6 +136,9 @@ impl DriveConfig {
             // Below ~10 mA the correction is a step at every zero crossing,
             // which is the chatter the band exists to avoid.
             param::I_THRESH => (0.01, 5.0),
+            param::HALL_OFFSET => (-core::f32::consts::PI, core::f32::consts::PI),
+            // Only the sign is used; a calibration writes ±1.
+            param::HALL_DIR => (-1.0, 1.0),
             _ => return None,
         })
     }
@@ -335,7 +343,7 @@ impl<const N: usize> Shared<N> {
     fn amp_limit(&self, m: u8) -> f32 {
         match m {
             // six-step commands a PWM duty, not volts or amps
-            mode::SS_FORCED | mode::SS_SENSORLESS => self.cfg.spec.max_duty,
+            mode::SS_FORCED | mode::SS_SENSORLESS | mode::SS_HALL => self.cfg.spec.max_duty,
             mode::VOLT => V_AMP_MAX,
             _ => self.param(param::IQ_LIMIT),
         }
@@ -373,7 +381,12 @@ impl<const N: usize> Shared<N> {
                         duty,
                         omega_handoff,
                     } => (mode::SS_SENSORLESS, duty, omega_handoff),
+                    DriveMode::HallFoc { amps, omega_e } => (mode::HALL_FOC, amps, omega_e),
+                    DriveMode::SixStepHall { duty, omega_e } => (mode::SS_HALL, duty, omega_e),
                 };
+                if matches!(m, mode::HALL_FOC | mode::SS_HALL) && !self.cfg.spec.has_halls {
+                    return nak(1); // this board has no hall inputs
+                }
                 if m != mode::OFF {
                     if state == ST_CAL {
                         return nak(3); // still calibrating

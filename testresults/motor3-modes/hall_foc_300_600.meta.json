@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial COM9 --baud 1000000 --divider 10 --duration 6",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 4579 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 10,
+    "drive": "HallFoc { amps: 1.0, omega_e: 299.70795 }",
+    "drive_step": "HallFoc { amps: 1.0, omega_e: 600.0442 }",
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "Motor 3 hall FOC: 300 -> 600 rad/s el",
+  "unix_time": 1790897683
+}
