@@ -253,6 +253,25 @@ cogging rotor — and this motor has halls.
 230 rad/s and 0.22 at 560 — a ~0.4 ms relative delay or a small hall
 offset error; worth resolving before trusting either as the reference.
 
+### Where the session left the modes on this bench
+
+| mode | motor 3 on F302 + L6230 @ 30 V |
+|---|---|
+| open-loop voltage / I-f | run; I-f hunts (light rotor) |
+| **hall FOC** | runs from rest, 300/600 rad/s el, both directions in sim |
+| **hall six-step** | runs, tracks 300/600 after the ss-gain retune |
+| sensorless FOC | **trips OC in the I-f→observer blend** — reproducibly, at 1.0 and 0.5 A I-f, accel 300 and 1000, handoff 150 and 200, with the correct ψ and dead-time comp applied. Telemetry (770 Hz) never shows > 0.8 A, so the spike is between frames, during an observer-vs-forced error swinging 0.8 ↔ 2.0 rad. Next: a full-rate burst of the blend, or hand over from hall FOC instead of I-f. Captures in `testresults/motor3-modes/sl_*`. |
+| sensorless six-step | not attempted — at 30 V this motor runs at ~0.04-0.08 duty, under the ~0.11 the on-time BEMF sample needs, and the driven-high terminal saturates the divider (> 18 V). Run it at ~12 V, or make the reference saturation-aware (use V_bus for a railed v_hi). |
+
+Device state at the end: drive off, F302 fw 2 flashed, motor 3 profile +
+hall map applied **in RAM only** (nothing persisted; `apply --persist
+--profile testresults/motor3-profile-comp/motor3_apply.json` to keep it).
+
+**Follow-ups for the modularity work:** the G474 crate still has its own
+register-level timer/ADC init and its own copy of the link loops — port it
+onto `timer::low_level` + `mmc_drive::link` next time that board is on the
+bench (and its flash param blob is invalid since nvparam v3).
+
 ## 2026-08-08 — session 29: bench blocked — the ST-LINK VCP transmits but does not receive
 
 **The locked-rotor `vdead` run could not happen: the host→device half of the
