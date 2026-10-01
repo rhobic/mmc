@@ -13,6 +13,7 @@
 // Always available: the arithmetic and building blocks both control
 // methodologies are made of.
 pub mod angle;
+pub mod hall;
 pub mod math;
 pub mod pi;
 pub mod transforms;

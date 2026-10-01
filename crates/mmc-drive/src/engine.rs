@@ -5,6 +5,7 @@ use core::sync::atomic::Ordering;
 
 use mmc_core::angle::AngleEstimator;
 use mmc_core::foc::{Decoupling, Foc};
+use mmc_core::hall::HallSpeed;
 use mmc_core::inverter::DeadtimeModel;
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
@@ -82,6 +83,8 @@ pub struct Engine {
     /// Consecutive low-observer-flux ticks in closed-loop sensorless.
     stall_strikes: u32,
     vbus_filt: f32,
+    /// Hall edge timing, fed every tick whether or not anything uses it.
+    hall: HallSpeed,
 }
 
 impl Default for Engine {
@@ -117,6 +120,7 @@ impl Engine {
             oc_strikes: 0,
             stall_strikes: 0,
             vbus_filt: 0.0,
+            hall: HallSpeed::new(),
         }
     }
 
@@ -180,6 +184,10 @@ impl Engine {
             c: (self.offset_v[2] - volts[2]) / k,
         };
         let vt = b.terminal_volts();
+        let hall_state = b.hall_state();
+        if let Some(h) = hall_state {
+            self.hall.update(h, dt);
+        }
 
         // --- pick up new host commands.
         let epoch = sh.cmd_epoch.load(Ordering::Acquire);
@@ -533,6 +541,8 @@ impl Engine {
                 0.0
             },
         );
+        put(channel::HALL, hall_state.unwrap_or(0) as f32);
+        put(channel::OMEGA_HALL, self.hall.omega());
         sh.telem_seq.store(seq.wrapping_add(2), Ordering::Release);
 
         let dur = b.cycles().wrapping_sub(t0);

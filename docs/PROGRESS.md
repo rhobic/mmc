@@ -121,6 +121,43 @@ motor after all.
 **Scope** (`tools/scope.py`, DS1054Z on one phase): `arm` / `read`. Trap: on
 the DS1000Z `:TRIG:SWE SING` sets the mode but does not arm — send `:SING`.
 
+### Chunk 4 — halls on the wire, and the first calibration
+
+`mmc_core::hall` (portable, unit-tested): the Gray-code `SEQUENCE`,
+`HallSpeed` (direction + speed from edge intervals, skip/invalid counters,
+decays to 0 on a stopped rotor), and `HallMap` (offset + direction → sector
+angle). The engine feeds it from `MotorBoard::hall_state()` every tick; two
+new telemetry channels, `hall` (raw state) and `omega_hall`, fill the
+protocol's 24. The sim board has ideal halls, and the I-f test now checks
+`omega_hall` against the rotor.
+
+**Telemetry at 24 channels is link-limited:** frames arrive every ~1.3 ms
+at divider 10 (770 Hz, not 1 kHz) — 1 Mbaud carries ~100 kB/s.
+
+**I-f is a poor hall reference:** at 0.5 A / 100 rad/s el the rotor hunts —
+sector dwell 10.5 ± 7.5 ms, edge-vs-forced-angle scatter ±27°.
+
+**Calibration** (`tools/hall_cal.py`): open-loop voltage (d-axis current, so
+the rotor flux follows the forced angle), 1.6 V at ±20 rad/s el; the same
+physical edge seen forward and reverse is averaged, which cancels lag and
+telemetry latency. Motor 3 (`testresults/motor3-halls/`):
+
+| | |
+|---|---|
+| direction | `SEQUENCE` order = **positive** electrical rotation; no invalid states |
+| HallMap | **offset −61.7°**, dir +1 |
+| edge spacing | 53.3 / 57.7 / 71.2 / 50.5 / 56.7 / 70.5° — rms 4.7°, max 7.4° off an ideal comb |
+| per sensor | each sensor's two edges 179-182° apart (symmetric), but **H2 ≈ +6° late, H3 ≈ −5° early**, H1 ≈ −1.5° — the two ~71° gaps both border H3 |
+| open-loop lag | 17.7° at 20 rad/s, 0.56 A; per-edge jitter ±17° (the rotor cogs) |
+
+So a sensored drive should use the six measured edge angles, not an ideal
+comb: the comb is off by up to 7° electrical.
+
+**Pole pairs are still unknown** — nothing electrical measures them; they
+only scale the mechanical (kt, J) values the profiler reports, not the
+electrical-domain gains. Needs one hand-turned revolution counting hall
+cycles.
+
 ## 2026-08-08 — session 29: bench blocked — the ST-LINK VCP transmits but does not receive
 
 **The locked-rotor `vdead` run could not happen: the host→device half of the

@@ -41,8 +41,15 @@ pub const VB_W: u8 = 20;
 /// Tells the host which phase is floating, so a BEMF trace can be split into
 /// driven and sensed segments without re-deriving it from the angle.
 pub const SECTOR: u8 = 21;
+/// Raw hall-sensor state, bit 0 = H1 … bit 2 = H3 (0 when the board has no
+/// halls). Six valid values; 0 or 7 means a sensor supply/wiring fault.
+pub const HALL: u8 = 22;
+/// Electrical speed from hall edge timing [rad/s], in the hall Gray-code
+/// direction — independent of the drive's own angle, so it shows whether a
+/// forced or sensorless drive actually has the rotor with it.
+pub const OMEGA_HALL: u8 = 23;
 
-pub const COUNT: usize = 22;
+pub const COUNT: usize = 24;
 
 /// Wire names, indexed by channel id; used as CSV headers by the host.
 pub const NAMES: [&str; COUNT] = [
@@ -68,6 +75,8 @@ pub const NAMES: [&str; COUNT] = [
     "vb_v",
     "vb_w",
     "sector",
+    "hall",
+    "omega_hall",
 ];
 
 /// Selection mask with every defined channel enabled.

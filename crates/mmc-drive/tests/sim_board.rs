@@ -235,6 +235,9 @@ fn if_drive_tracks_current_and_spins() {
         assert!((i - 0.5).abs() < 0.05, "{hz} Hz: |i| = {i}");
         let w = rig.board.motor.omega_e();
         assert!((w - 100.0).abs() < 10.0, "{hz} Hz: rotor at {w} rad/s el");
+        // The sim's ideal halls run in SEQUENCE order for positive rotation.
+        let wh = rig.telem(channel::OMEGA_HALL);
+        assert!((wh - w).abs() < 10.0, "{hz} Hz: halls say {wh}, rotor {w}");
     }
 }
 
