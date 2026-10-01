@@ -755,7 +755,7 @@ fn handle(msg: &Message) -> Message {
     };
     match *msg {
         Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 14, "mmc-g474")),
+        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 15, "mmc-g474")),
         Message::SetTelemetry { divider, mask } => {
             DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
             MASK.store(mask & channel::ALL, Ordering::Relaxed);
@@ -1070,7 +1070,17 @@ unsafe extern "C" fn ADC1_2() {
                 burst_abort();
                 STATE.store(ST_FAULT_VBUS, Ordering::Relaxed);
             } else {
-                if s.mode == 0 {
+                // A new mode starts clean, whether from Off or straight from
+                // another running mode; only a repeat of the same mode is a
+                // live retarget. Each mode unwraps its own control blocks, so
+                // switching without rebuilding them panics the ISR with the
+                // bridge still live (same rule as the sim's `set_drive`).
+                if mode != s.mode {
+                    if s.mode == 4 {
+                        // Leaving a probe mid-recording: hand back the
+                        // partial buffer rather than leave it owned by the ISR.
+                        burst_abort();
+                    }
                     // clean start — control blocks built from the runtime
                     // parameter table (profiler-writable).
                     s.theta = 0.0;
@@ -1146,8 +1156,8 @@ unsafe extern "C" fn ADC1_2() {
                         }));
                         s.speed = Some(SpeedLoop::new(
                             PiGains {
-                                kp: param_get(param::SS_KP),
-                                ki: param_get(param::SS_KI),
+                                kp: param_get(param::SPEED_KP),
+                                ki: param_get(param::SPEED_KI),
                             },
                             iq_lim,
                         ));
