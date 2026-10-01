@@ -44,7 +44,6 @@ use core::cell::UnsafeCell;
 use core::mem::MaybeUninit;
 
 use embassy_executor::Spawner;
-use embassy_futures::select::{select, Either};
 use embassy_stm32::flash::{Blocking, Flash};
 use embassy_stm32::gpio::{Input, Level, Output, OutputType, Pull, Speed};
 use embassy_stm32::mode::Async;
@@ -54,16 +53,13 @@ use embassy_stm32::time::Hertz;
 use embassy_stm32::timer::low_level::{CountingMode, OutputCompareMode, Timer};
 use embassy_stm32::timer::simple_pwm::PwmPin;
 use embassy_stm32::timer::{Ch1, Ch2, Ch3, Channel as TimCh};
-use embassy_stm32::usart::{self, Uart, UartRx, UartTx};
+use embassy_stm32::usart::{self, RingBufferedUartRx, Uart, UartTx};
 use embassy_stm32::{bind_interrupts, peripherals};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
-use embassy_time::{Duration, Ticker};
 use panic_halt as _;
 
-use mmc_drive::{nvparam, BurstBuffer, DriveConfig, Engine, ParamStore, Shared};
+use mmc_drive::{link, nvparam, BurstBuffer, DriveConfig, Engine, ParamStore, Shared};
 use mmc_hal::{BoardSpec, MotorBoard, Sample};
-use mmc_proto::{encode, param, Deframer, DeviceKind, Message};
+use mmc_proto::{param, DeviceKind};
 
 bind_interrupts!(struct Irqs {
     USART2 => usart::InterruptHandler<peripherals::USART2>;
@@ -258,7 +254,7 @@ struct IsrCell(UnsafeCell<MaybeUninit<(Engine, F302Board, u32)>>);
 unsafe impl Sync for IsrCell {}
 static ISR: IsrCell = IsrCell(UnsafeCell::new(MaybeUninit::uninit()));
 
-static RESPONSES: Channel<CriticalSectionRawMutex, Message, 8> = Channel::new();
+static REPLIES: link::Replies = link::Replies::new();
 
 // ------------------------------------------------------------------- tasks
 
@@ -302,6 +298,8 @@ async fn main(spawner: Spawner) {
     let uart = Uart::new(p.USART2, p.PA3, p.PA2, p.DMA1_CH7, p.DMA1_CH6, Irqs, cfg)
         .expect("USART2 config");
     let (tx, rx) = uart.split();
+    let rx_ring = cortex_m::singleton!(: [u8; 256] = [0; 256]).unwrap();
+    let rx = rx.into_ring_buffered(rx_ring);
 
     // --- power stage: everything off before the timer starts.
     let en = [
@@ -480,52 +478,17 @@ fn init_adc() {
     });
 }
 
-/// Deframe + handle host commands; replies go through the TX task. Owns the
-/// parameter flash so persistence requests can erase/program it.
+/// The host link: `mmc_drive::link`'s loops on this board's USART halves.
+/// The receive side is ring-buffered (circular DMA) so no byte is lost while
+/// a frame is being handled.
 #[embassy_executor::task]
-async fn rx_task(mut rx: UartRx<'static, Async>, mut store: FlashStore) {
-    let mut deframer = Deframer::new();
-    let mut buf = [0u8; 64];
-    loop {
-        let Ok(n) = rx.read_until_idle(&mut buf).await else {
-            continue;
-        };
-        SHARED.host_activity();
-        for &b in &buf[..n] {
-            if let Some(Ok(msg)) = deframer.push(b) {
-                let _ = RESPONSES.try_send(SHARED.handle(&msg, &mut store));
-            }
-        }
-    }
+async fn rx_task(rx: RingBufferedUartRx<'static>, mut store: FlashStore) {
+    link::rx_loop(&SHARED, &REPLIES, rx, &mut store).await
 }
 
-/// Responses + decimated telemetry snapshots.
 #[embassy_executor::task]
-async fn tx_task(mut tx: UartTx<'static, Async>) {
-    let mut period = SHARED.telemetry_period_us();
-    let mut ticker = Ticker::every(Duration::from_micros(period));
-    loop {
-        match select(RESPONSES.receive(), ticker.next()).await {
-            Either::First(reply) => send(&mut tx, &reply).await,
-            Either::Second(()) => {
-                let p = SHARED.telemetry_period_us();
-                if p != period {
-                    period = p;
-                    ticker = Ticker::every(Duration::from_micros(period));
-                }
-                if let Some(frame) = SHARED.telemetry() {
-                    send(&mut tx, &frame).await;
-                }
-            }
-        }
-    }
-}
-
-async fn send(tx: &mut UartTx<'static, Async>, msg: &Message) {
-    let mut buf = [0u8; mmc_proto::MAX_FRAME];
-    if let Some(n) = encode(msg, &mut buf) {
-        let _ = tx.write(&buf[..n]).await;
-    }
+async fn tx_task(tx: UartTx<'static, Async>) {
+    link::tx_loop(&SHARED, &REPLIES, tx).await
 }
 
 // ------------------------------------------------------------- control ISR

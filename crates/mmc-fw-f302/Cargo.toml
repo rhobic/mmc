@@ -11,16 +11,14 @@ description = "STM32F302R8 + L6230 three-shunt shield: the MotorBoard under the 
 
 [dependencies]
 mmc-core = { path = "../mmc-core" }
-mmc-drive = { path = "../mmc-drive" }
+mmc-drive = { path = "../mmc-drive", features = ["link"] }
 mmc-hal = { path = "../mmc-hal" }
 mmc-proto = { path = "../mmc-proto" }
 
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
-embassy-futures = "0.1.2"
 # No `memory-x`: memory.x here reserves the last flash page for parameters.
 # TIM15 keeps the time driver off TIM1 (PWM) and TIM2 (the hall timer).
 embassy-stm32 = { version = "0.6.0", features = ["stm32f302r8", "rt", "time-driver-tim15", "unstable-pac"] }
-embassy-sync = "0.8.0"
 embassy-time = { version = "0.5.1", features = ["tick-hz-1_000_000"] }
 
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }

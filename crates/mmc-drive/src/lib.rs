@@ -21,6 +21,8 @@
 #![no_std]
 
 mod engine;
+#[cfg(feature = "link")]
+pub mod link;
 pub mod nvparam;
 
 use core::cell::UnsafeCell;

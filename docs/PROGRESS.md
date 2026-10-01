@@ -153,6 +153,40 @@ telemetry latency. Motor 3 (`testresults/motor3-halls/`):
 So a sensored drive should use the six measured edge angles, not an ideal
 comb: the comb is off by up to 7° electrical.
 
+### Chunk 5 — the host link moves into the drive too; profiling motor 3
+
+**A dropped ping, and the second piece of duplicated glue.** The first
+flux sweep died at point 4 with "no response to 0x01" while the firmware
+was fine (ISR ticking, worst case 2936 cycles = 41 µs of the 100 µs tick).
+The board's rx task used `read_until_idle` into a plain buffer: the DMA is
+re-armed per call, so bytes arriving while a frame is handled are lost. The
+host doesn't retry; it shouldn't have to. Both boards also carried identical
+copies of the rx/tx loops. Now `mmc_drive::link` (feature `link`) holds
+`rx_loop`/`tx_loop`, generic over `embedded-io-async` `Read`/`Write`; the
+F302 feeds it a `RingBufferedUartRx` (256 B circular DMA) and its tasks are
+one line each. The re-run sweep completed all five points. (The G474 still
+has its own copy of the old loops — same follow-up as its peripheral init.)
+
+**Sweep:** ψ = 8.13 ± 1.23 mWb (4/5 points) — usable, but 15% is loose,
+because ~0.8 V of uncompensated bridge error sits on ~2 V vectors.
+
+**Coast-down (independent flux check) — not possible on this motor:** cut
+from 290 rad/s el, **the rotor stops in ~60 ms** (hall speed 291 → 106 → 29
+→ 0). That is a heavily loaded shaft (gearhead / seal / fan?) — a property
+of motor 3 worth confirming by hand. `capture --step-kind off` now records
+spin-up and coast in one file; `scope.py arm --min-width` sets a
+pulse-width trigger (it fired on the drive start here, not the coast).
+
+**Dead time:** the ladder came back "none measurable" on a textbook-clean
+curve. 12 of 20 points sat inside the bridge's deadband — no conduction up
+to 0.63 V of command, current reading −5…+2 mA of sense offset — and the
+shape function, which must pass through the origin, could not fit them.
+`fit_vdead` now sets aside points under max(20 mA, 5·noise) and reports
+where conduction starts. Result: **v_dead = 623 mV, i_thresh = 21 mA**, rms
+resid 1.1 mV; model-free saturated-line check 623.4 mV; ladder R 1.345 Ω vs
+probe 1.418 (−5%); up/down legs agree (no heating). At 30 V and 20 kHz that
+is ~1 µs of effective dead time — the L6230's internal value.
+
 **Pole pairs are still unknown** — nothing electrical measures them; they
 only scale the mechanical (kt, J) values the profiler reports, not the
 electrical-domain gains. Needs one hand-turned revolution counting hall

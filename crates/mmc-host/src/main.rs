@@ -220,7 +220,9 @@ struct CaptureArgs {
     step_hz: Option<f32>,
     /// Drive kind for the 60% retarget when it differs from --drive: hands a
     /// running drive to another scheme live (e.g. `sl` spin-up to `six-cl`).
-    #[arg(long, value_parser = ["volt", "if", "sl", "six", "six-cl"], requires = "step_hz")]
+    /// `off` cuts the drive instead, leaving the rotor to coast with the
+    /// stage high-impedance — the back-EMF then shows on the BEMF channels.
+    #[arg(long, value_parser = ["volt", "if", "sl", "six", "six-cl", "off"], requires = "step_hz")]
     step_kind: Option<String>,
     /// Amplitude for the 60% retarget (defaults to --amp).
     #[arg(long, requires = "step_hz")]
@@ -453,6 +455,7 @@ fn main() -> std::io::Result<()> {
                         duty: amp,
                         omega_handoff: omega_e,
                     },
+                    "off" => mmc_proto::DriveMode::Off,
                     _ => mmc_proto::DriveMode::IfCurrent { amps: amp, omega_e },
                 }
             };

@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host profile",
+  "description": "Profiler flux-sweep input (hang-angle-aware fit).",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 2051 frames."
+  ],
+  "order": 5,
+  "params": {
+    "divider": 20,
+    "drive": "IfCurrent { amps: 0.8, omega_e: 300.0 }",
+    "drive_step": null,
+    "duration_s": 4.099999904632568,
+    "iq_A": null
+  },
+  "title": "Flux sweep: I-f 0.8 A @ 300 rad/s",
+  "unix_time": 1790896845
+}

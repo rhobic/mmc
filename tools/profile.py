@@ -162,10 +162,24 @@ def fit_vdead(points):
     the residual curve doubles as the confidence statement. (scipy is not a
     dependency of this repo; numpy is.)
     """
+    # Points inside the deadband carry no current — only the current sense's
+    # offset with the stage enabled (−5..+2 mA on the F302 bench) — yet the
+    # shape function must pass through the origin there, so a few of them
+    # wreck the fit: motor 3 at 30 V reads zero current up to 0.6 V of
+    # command, and its fit came out "unmeasurable" on a textbook-clean curve
+    # (session 30). They are set aside; the largest of their voltages is
+    # reported as where conduction starts.
+    floor = max(0.02, 5.0 * float(np.median([p.get("i_sd", 0.0) for p in points])))
+    dead = [p for p in points if abs(p["i"]) < floor]
+    points = [p for p in points if abs(p["i"]) >= floor]
+    deadband_v = max((p["v"] for p in dead), default=None)
     i = np.array([p["i"] for p in points])
     v = np.array([p["v"] for p in points])
     if len(i) < 6:
-        raise SystemExit(f"vdead: only {len(i)} points — need the full ladder")
+        raise SystemExit(
+            f"vdead: only {len(i)} points conduct above {floor * 1e3:.0f} mA "
+            f"({len(dead)} inside the deadband) — rerun with a higher ladder"
+        )
 
     # i_th below the smallest measured current is unidentifiable (every point
     # saturated); above the largest, the shape is a straight line and merges
@@ -234,6 +248,8 @@ def fit_vdead(points):
         "r_from_ladder": r,
         "points": len(i),
         "rms_resid": rms,
+        "deadband_points": len(dead),
+        "deadband_v": deadband_v,
         "i_range": [float(i.min()), float(i.max())],
         "line_check": line if measurable else None,
         "thermal": drift,
@@ -333,6 +349,9 @@ def main(dir_):
         vd = fit_vdead(vd_points)
         span = (f"{vd['points']} DC points over {vd['i_range'][0]:.2f}-"
                 f"{vd['i_range'][1]:.2f} A, rms resid {vd['rms_resid'] * 1e3:.1f} mV")
+        if vd["deadband_points"]:
+            span += (f"; {vd['deadband_points']} more inside the deadband - "
+                     f"no conduction up to {vd['deadband_v']:.2f} V")
         if vd["measurable"]:
             print(f"dead time: v_dead = {vd['v_dead'] * 1e3:.1f} mV, "
                   f"i_thresh = {vd['i_thresh']:.3f} A ({span})")

@@ -32,10 +32,19 @@ def arm(a):
     s.write(":CHAN1:COUP DC")
     s.write(f":TIM:MAIN:SCAL {a.tb}")
     s.write(f":TIM:MAIN:OFFS {a.delay}")
-    s.write(":TRIG:MODE EDGE")
-    s.write(":TRIG:EDG:SOUR CHAN1")
-    s.write(f":TRIG:EDG:SLOP {a.slope}")
-    s.write(f":TRIG:EDG:LEV {a.level}")
+    if a.min_width:
+        # Positive pulse wider than min_width: ignores PWM (< one period),
+        # catches the slow half-cycles of a coasting motor's back-EMF.
+        s.write(":TRIG:MODE PULS")
+        s.write(":TRIG:PULS:SOUR CHAN1")
+        s.write(":TRIG:PULS:WHEN PGR")
+        s.write(f":TRIG:PULS:WIDT {a.min_width}")
+        s.write(f":TRIG:PULS:LEV {a.level}")
+    else:
+        s.write(":TRIG:MODE EDGE")
+        s.write(":TRIG:EDG:SOUR CHAN1")
+        s.write(f":TRIG:EDG:SLOP {a.slope}")
+        s.write(f":TRIG:EDG:LEV {a.level}")
     s.write(":TRIG:SWE SING")
     s.write(":SING")  # the sweep mode alone does not arm the trigger
     import time
@@ -58,6 +67,8 @@ def read(a):
     t = xor + np.arange(len(v)) * xinc
     if a.out:
         np.savetxt(a.out, np.c_[t, v], delimiter=",", header="t,v", comments="")
+    if len(v) == 0:
+        sys.exit("no waveform (scope never triggered?)")
     med = np.median(v)
     hi, lo = v[v > med], v[v <= med]
     print(
@@ -79,6 +90,7 @@ def main():
     p.add_argument("--delay", type=float, default=0.0)
     p.add_argument("--level", type=float, default=12.0)
     p.add_argument("--slope", default="POS")
+    p.add_argument("--min-width", type=float, help="pulse-width trigger: positive pulse > this [s]")
     p.add_argument("--scale", type=float, default=10.0, help="V/div")
     p.add_argument("--offset", type=float, default=-20.0)
     p = sub.add_parser("read")

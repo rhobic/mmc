@@ -5,10 +5,19 @@ edition.workspace = true
 license.workspace = true
 description = "Board-agnostic motor-drive application: drive state machine, protocol handling, probes and telemetry, run on any mmc-hal MotorBoard"
 
+[features]
+# The serial host link as async loops over embedded-io-async, shared by
+# every board crate, so the firmware glue is two lines per task.
+link = ["dep:embedded-io-async", "dep:embassy-sync", "dep:embassy-time", "dep:embassy-futures"]
+
 [dependencies]
 mmc-core.workspace = true
 mmc-hal.workspace = true
 mmc-proto.workspace = true
+embedded-io-async = { version = "0.7", optional = true }
+embassy-sync = { version = "0.8", optional = true }
+embassy-time = { version = "0.5.1", optional = true }
+embassy-futures = { version = "0.1.2", optional = true }
 
 [dev-dependencies]
 mmc-sim.workspace = true

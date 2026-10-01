@@ -643,6 +643,10 @@ dependencies = [
 name = "mmc-drive"
 version = "0.1.0"
 dependencies = [
+ "embassy-futures",
+ "embassy-sync",
+ "embassy-time",
+ "embedded-io-async 0.7.0",
  "mmc-core",
  "mmc-hal",
  "mmc-proto",
@@ -655,9 +659,7 @@ dependencies = [
  "cortex-m",
  "cortex-m-rt",
  "embassy-executor",
- "embassy-futures",
  "embassy-stm32",
- "embassy-sync",
  "embassy-time",
  "mmc-core",
  "mmc-drive",

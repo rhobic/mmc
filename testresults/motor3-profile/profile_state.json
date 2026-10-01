@@ -9,11 +9,11 @@
       "flux": 0.004999999888241291,
       "i_thresh": 0.30000001192092896,
       "iq_limit": 0.800000011920929,
-      "l": 0.0005000000237487257,
+      "l": 0.00035592258791439235,
       "omega_accel": 300.0,
       "ontime_ccr5": 100.0,
       "pole_pairs": 4.0,
-      "r": 1.0,
+      "r": 1.4177000522613525,
       "sl_handoff": 150.0,
       "speed_ki": 0.0010000000474974513,
       "speed_kp": 0.00009999999747378752,
@@ -28,6 +28,16 @@
       "note": "1024 pairs",
       "ok": true,
       "unix_time": 1790896276
+    },
+    "sweep": {
+      "note": "5 operating points",
+      "ok": true,
+      "unix_time": 1790896845
+    },
+    "vdead": {
+      "note": "20 DC points to 1.489 V (up+down)",
+      "ok": true,
+      "unix_time": 1790897014
     }
   },
   "version": 1
