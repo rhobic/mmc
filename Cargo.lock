@@ -215,6 +215,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmc-drive"
+version = "0.1.0"
+dependencies = [
+ "mmc-core",
+ "mmc-hal",
+ "mmc-proto",
+ "mmc-sim",
+]
+
+[[package]]
 name = "mmc-hal"
 version = "0.1.0"
 

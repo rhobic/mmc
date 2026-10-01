@@ -30,6 +30,58 @@ firmware that predates it still decodes (legacy defaults: 20 kHz, per-kind
 R path). New `DeviceKind::BoardF302`. The fitters were already clean —
 `tools/profile.py` takes `dt` from the CSV.
 
+### Chunk 2 — the drive moves out of the G474 crate
+
+**Before:** the only portable code was `mmc-core` (math and control
+blocks). Everything a firmware *does* — the 6-mode drive state machine,
+probes, trips, deadman, params + flash blob, host-command handling,
+telemetry — lived in the G474's 1763-line `main.rs`, interleaved with
+register writes. A second MCU meant a second copy.
+
+**After:**
+
+- `mmc-hal::MotorBoard` — the board as the drive sees it: `sample()`,
+  `terminal_volts()`, `set_duties()`, `set_phase_enables()`,
+  `driver_fault()`, `hall_state()`, `cycles()`; plus `BoardSpec` (control
+  rate, current-sense slope, trips, max duty, drive-path R).
+- `mmc-drive` (new, `no_std`, no MCU dependency) — `Shared<N>` (the
+  lock-free state the ISR and link tasks exchange, with `handle()` and
+  `telemetry()`), `Engine` (the ISR's state and `tick()`), `nvparam` (blob
+  codec; the board supplies a `ParamStore`). Burst capacity `N` is a
+  firmware choice — RAM is what varies most between MCUs.
+- `mmc-fw-g474` is now the board: clocks, peripheral init, the trait impl,
+  `ADC1_2 → engine.tick()`, serial and flash glue. 1763 → ~560 lines.
+
+**20 kHz assumptions removed** (all now derived from `ctrl_hz`): deadman
+(`2*20_000` ticks), stall (2000 ticks), probe align (6000 ticks),
+telemetry period (`divider × 50 µs` — the protocol defines the divider in
+control periods, so this was only right at 20 kHz) and the telemetry
+timestamp (`ticks × 50`).
+
+**The G474's peripheral setup is still register-level — deliberately.** It
+moved verbatim into its board crate: no G474 is on the bench to re-validate
+a rewrite onto embassy's timer/ADC drivers, so this commit is a pure
+structural move. That rewrite is a follow-up for the next session with that
+board connected. The new board (chunk 3) is built on the HAL from the start.
+
+**Verified without the G474:** `mmc-drive/tests/sim_board.rs` runs the real
+`Engine::tick` + `Shared::handle` against a simulated `MotorBoard` — boot
+calibration, I-f tracking, sensorless FOC closing the loop on the observer,
+the deadman, the R/L probe, flash persistence, and the burst-capacity NAK —
+**each at 10 kHz and 20 kHz**. This is the first time the firmware's drive
+logic (not a re-implementation of it in the host sim) runs in CI.
+
+**Trap found on the way:** `Shared` carries non-zero param defaults, so as
+one struct with the burst buffer it went to `.data` — 33 KB of zeros stored
+in flash and copied out at boot. The buffer is now its own zero-initialised
+`static BurstBuffer` (`.bss`). G474: text 35.8 → 38.7 KB, data 0.4 → 0.7 KB.
+
+**Noted for the profiling chunk:** the R/L probe's plateau half-period is a
+fixed 32 ticks. The fitter assumes settled plateaus, so any motor with
+τ = L/R beyond ~0.5 ms at 10 kHz gets a biased R — likely on an unknown
+motor. The first sim-board test failed on exactly this (τ = 1.2 ms → R read
+5× high) before it was pointed at a short-τ motor.
+
 ## 2026-08-08 — session 29: bench blocked — the ST-LINK VCP transmits but does not receive
 
 **The locked-rotor `vdead` run could not happen: the host→device half of the

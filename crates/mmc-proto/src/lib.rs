@@ -34,8 +34,7 @@ mod msg;
 pub use deframe::Deframer;
 pub use msg::{
     encode, param, test, BoardTraits, BurstChunk, DeviceInfo, DeviceKind, DriveMode, FrameError,
-    Message,
-    TelemetryFrame, BURST_CHUNK,
+    Message, TelemetryFrame, BURST_CHUNK,
 };
 
 /// Protocol version reported in [`DeviceInfo`]; bump on breaking wire changes.

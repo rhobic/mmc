@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/mmc-core",
     "crates/mmc-hal",
+    "crates/mmc-drive",
     "crates/mmc-proto",
     "crates/mmc-sim",
     "crates/mmc-host",
@@ -20,6 +21,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 mmc-core = { path = "crates/mmc-core" }
 mmc-hal = { path = "crates/mmc-hal" }
+mmc-drive = { path = "crates/mmc-drive" }
 mmc-proto = { path = "crates/mmc-proto" }
 mmc-sim = { path = "crates/mmc-sim" }
 libm = "0.2"

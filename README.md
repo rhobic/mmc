@@ -15,12 +15,13 @@ for the running log.
 | Crate | Purpose |
 |---|---|
 | `mmc-core` | `no_std` control library: transforms, SVPWM, PI loops, FOC step, angle estimation |
-| `mmc-hal` | Hardware abstraction traits sized to motor control (PWM, current sense, …) |
+| `mmc-hal` | Hardware abstraction sized to motor control: the `MotorBoard` trait + `BoardSpec` every board implements, plus the sim-side traits |
+| `mmc-drive` | The board-agnostic drive application (modes, probes, trips, params, telemetry, protocol handling) — runs on any `MotorBoard`, including a simulated one in CI |
 | `mmc-proto` | Telemetry/command wire protocol: COBS+CRC frames shared byte-for-byte by TCP (sim) and UART (firmware) |
 | `mmc-sim` | Virtual PMSM + inverter + sensors, implementing the `mmc-hal` traits |
 | `mmc-host` | Host CLI: sim scenarios, TCP sim server, telemetry capture (TCP/serial), dashboard |
 | `mmc-fw-g0b1` | Protocol firmware for a Cortex-M0+ dev board (embassy) — outside the host workspace |
-| `mmc-fw-g474` | Motor firmware for a Cortex-M4F dev board + three-phase inverter shield: timer PWM, injected-ADC shunt sensing, open-loop/I-f drive, protection trips |
+| `mmc-fw-g474` | Board crate: 170 MHz Cortex-M4F dev board + STSPIN830 shield — clocks, PWM/ADC setup, serial and flash glue under `mmc-drive` |
 
 ## Quickstart
 

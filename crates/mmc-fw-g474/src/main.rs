@@ -1,26 +1,32 @@
-//! Motor bring-up firmware: STM32G474RE driving a three-phase inverter shield.
+//! Motor firmware for the STM32G474RE dev board + STSPIN830 inverter shield.
 //! Bench hardware and schematics: hw/README.md.
 //!
-//! MS5 hardware layer: center-aligned TIM1 PWM, PWM-synchronized
-//! injected-ADC shunt current sensing, zero-current calibration, software
-//! protection trips, and open-loop / I-f / **closed-loop sensorless** drive
-//! modes — all instrumented over `mmc-proto` on the debug USB serial port so
-//! every test is a dashboard capture. Sensorless (Stage F) runs MS4's stack in
-//! the control ISR: I-f startup, blend handoff to the flux observer, then
-//! the speed loop commands i_q on the estimated angle.
+//! This crate is the *board*: clocks, the center-aligned TIM1 PWM, the
+//! PWM-synchronized injected-ADC shunt sensing, the BEMF ADC, GPIO, the
+//! serial link and the parameter flash page — wired up as an
+//! [`mmc_hal::MotorBoard`]. Everything the drive *does* (modes, probes,
+//! trips, telemetry, protocol) is the board-agnostic `mmc-drive` crate, run
+//! from the ADC interrupt.
+//!
+//! The peripheral setup is still register-level: it is the hardware-proven
+//! configuration from MS5–MS8, moved here unchanged when the drive was split
+//! out (session 30) because no G474 was on the bench to re-validate a
+//! rewrite. Moving it onto embassy's timer/ADC drivers is a follow-up for the
+//! next session that has this board connected.
 //!
 //! ## Pin map (from the shield + dev-board schematics; see hw/README.md)
 //!
 //! | Function            | Pin  | Notes                                     |
 //! |---------------------|------|-------------------------------------------|
 //! | VCP UART            | PA2/PA3 | LPUART1 (SB17/SB23), 1 Mbaud           |
-//! | PWM U/V/W (driver IN)| PA8/PA9/PA10 | TIM1 CH1/2/3, AF6, 20 kHz center |
+//! | PWM U/V/W (driver IN)| PA8/PA9/PA10 | TIM1 CH1/2/3, AF6, 40 kHz center |
 //! | Phase enables (EN)  | PB13/PB14/PB15 | GPIO; low = phase Hi-Z          |
 //! | Gate-driver STBY    | PB5  | high = run                                |
 //! | EN_FAULT (in)       | PA11 + PB12 | open-drain, low = fault. The shield routes it to PB12 (R37) by default and to PA11 (R35) on other board variants — the vendor's example config uses PA11. Both are read with internal pull-ups, so whichever is unconnected floats high and stays silent. (TIM1_BKIN2 hardware break on PA11 is a follow-up.) |
 //! | Current ref (VREF)  | PB4  | GPIO high → VREF ≈ 0.50 V (max via 22k/3.9k divider). This is the *weakest* hardware current limit (≈1.5 A on 0.33 Ω); floating PB4 would pull VREF toward 0 V and trip continuously (the driver disables outputs for tOFF whenever VSNS > VREF) |
 //! | i_U / i_V / i_W     | PA1/PB1/PB0 | ADC1 IN2/IN12/IN15, ×2 shunt amp  |
 //! | VBUS                | PA0  | ADC1 IN1, 180k/12k divider (×16)          |
+//! | BEMF U / W / V      | PC0/PC1/PC3 | ADC2 IN6/IN7/IN9, 10k/2.2k, enabled by PC9 low |
 //!
 //! ## Current-sense scaling
 //!
@@ -33,7 +39,6 @@
 #![no_main]
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 
 use embassy_executor::Spawner;
 use embassy_futures::select::{select, Either};
@@ -47,21 +52,9 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Ticker};
 use panic_halt as _;
 
-use mmc_core::angle::AngleEstimator;
-use mmc_core::foc::{Decoupling, Foc};
-use mmc_core::inverter::DeadtimeModel;
-use mmc_core::math::{sin_cos, wrap_angle};
-use mmc_core::observer::{FluxObserver, FluxObserverCfg};
-use mmc_core::pi::{Pi, PiGains};
-use mmc_core::probe;
-use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
-use mmc_core::sixstep::{self, Ramp, RampCfg, ZcCfg, ZcEvent, ZeroCross};
-use mmc_core::svpwm::svpwm;
-use mmc_core::transforms::{clarke, inverse_park, park, Abc, AlphaBeta, Dq};
-use mmc_core::tuning::current_pi_gains;
-use mmc_proto::{
-    channel, encode, param, test, BurstChunk, Deframer, DeviceInfo, DeviceKind, DriveMode, Message,
-};
+use mmc_drive::{nvparam, BurstBuffer, DriveConfig, Engine, ParamStore, Shared};
+use mmc_hal::{BoardSpec, MotorBoard, Sample};
+use mmc_proto::{encode, param, Deframer, DeviceKind, Message};
 
 bind_interrupts!(struct Irqs {
     LPUART1 => usart::InterruptHandler<peripherals::LPUART1>;
@@ -69,11 +62,9 @@ bind_interrupts!(struct Irqs {
     DMA1_CHANNEL2 => embassy_stm32::dma::InterruptHandler<peripherals::DMA1_CH2>;
 });
 
-// ---------------------------------------------------------------- constants
+// ---------------------------------------------------------------- the board
 
 const CTRL_FREQ_HZ: u32 = 20_000;
-const CTRL_FREQ: f32 = CTRL_FREQ_HZ as f32;
-const CTRL_DT: f32 = 1.0 / CTRL_FREQ;
 /// PWM periods per control tick. The bridge switches faster than the loop
 /// runs because ripple current is `V_bus·d·(1−d)/(2L·f_sw)`, and on a
 /// low-inductance motor (30 µH here) 20 kHz put the six-step *peak* past the
@@ -88,25 +79,11 @@ const PWM_DIV: u32 = 2;
 const PWM_ARR: u16 = (170_000_000 / (2 * CTRL_FREQ_HZ * PWM_DIV)) as u16;
 
 const ADC_VOLTS_PER_LSB: f32 = 3.3 / 4096.0;
-const CUR_VOLTS_PER_AMP: f32 = 1.528 * 0.33; // amp gain × shunt
 const VBUS_GAIN: f32 = 16.0; // 180k/12k divider
 /// BEMF divider: OUTx → 10K → 2.2K → IO_BEMF (PC9 low), ratio 2.2/12.2.
 const BEMF_GAIN: f32 = 12.2 / 2.2;
-
-const I_TRIP_A: f32 = 1.5; // software overcurrent, 2 consecutive samples
-const VBUS_MAX: f32 = 30.0;
-const VBUS_MIN_RUN: f32 = 5.0;
 const MAX_DUTY: f32 = 0.85; // keeps the low-side sampling window open
-const V_AMP_MAX: f32 = 3.0;
-const OMEGA_E_MAX: f32 = 2000.0; // rad/s electrical
-const OMEGA_SLEW: f32 = 500.0; // rad/s²
-const V_SLEW: f32 = 5.0; // V/s
-const I_SLEW: f32 = 2.0; // A/s
-/// Assumed pole pairs for the mechanical-speed telemetry channel only.
-const POLE_PAIRS: f32 = 7.0;
-/// Drive shuts off if the host goes silent this long (capture keep-alive pings).
-const DEADMAN_TICKS: u32 = 2 * 20_000;
-const CAL_TICKS: u32 = 8192;
+
 /// TIM1 CCR5, in counts before the counter valley, where OC5REF rises and
 /// triggers ADC2. The valley is the middle of the high-side on-time (PWM mode
 /// 1, centre-aligned), so this samples the terminals while the bridge is
@@ -122,358 +99,149 @@ const CAL_TICKS: u32 = 8192;
 /// the idle phase reads nothing useful. At 20 kHz the same default cleared it
 /// from duty 0.07.
 const ONTIME_CCR5_DEFAULT: u16 = 100;
-/// Six-step duty→speed loop defaults. Crossover well under the commutation
-/// rate; the integral corner an order below the crossover, per the simulator.
-const SS_KP_DEFAULT: f32 = 2.0e-4;
-const SS_KI_DEFAULT: f32 = 5.0e-4;
 
-/// Dead-time compensation, off until measured — see `param::V_DEAD`. An
-/// over-compensated bridge is worse than an uncompensated one, so this stays
-/// 0 until `profile --only vdead` has run on the connected rig.
-const V_DEAD_DEFAULT: f32 = 0.0;
-/// Zero-current band; only meaningful once `v_dead` is non-zero. The bench
-/// estimate is the FOC ripple amplitude, ~0.5 A on 30 µH at 40 kHz.
-const I_THRESH_DEFAULT: f32 = 0.5;
+const SPEC: BoardSpec = BoardSpec {
+    ctrl_hz: CTRL_FREQ_HZ,
+    // 0.33 Ω shunt → 680R/2.2k bias → ×1.528 amplifier (see module docs).
+    cur_volts_per_amp: 1.528 * 0.33,
+    i_trip: 1.5,
+    vbus_max: 30.0,
+    vbus_min_run: 5.0,
+    max_duty: MAX_DUTY,
+    // STSPIN830 R_DSon HS+LS ≈ 1 Ω typ → 0.5 Ω conducting, plus the 0.33 Ω
+    // shunt duty-weighted ≈ 0.32 Ω (testresults/motor2-4pole/
+    // datasheet-comparison.md).
+    r_path: 0.85,
+    // Sample point inside a 50% duty on-window, so it tracks the PWM period.
+    terminal_offset_max: (PWM_ARR / 2) as f32,
+};
 
-// Motor parameters measured on this bench (Stage F0 rotating I-f sweep,
-// `tools/fit_params.py`): flux 0.894 ± 0.04 mWb, apparent R 0.97 Ω
-// (locked-rotor R = 1.0), friction ≈ 0.8 mN·m, J ≈ 0.31 µN·m·s² (rough).
-// L was ill-conditioned in that test (0.05 ± 0.10 mH; hang angle near π/2
-// hides it) — 0.1 mH is a robust design center, and it only sets the
-// current-PI zero and a small observer flux correction.
-const CUR_BANDWIDTH: f32 = 1000.0;
-const MOTOR_RS: f32 = 1.0;
-const MOTOR_LS: f32 = 0.1e-3;
-const MOTOR_FLUX: f32 = 0.894e-3;
-// Speed loop at ~40 rad/s (electrical) from the fitted J and kt; J is the
-// least-trusted number, so these are deliberately conservative.
-const SPEED_KP: f32 = 2.0e-4;
-const SPEED_KI: f32 = 2.0e-3;
-/// Speed-loop i_q authority [A].
-const SL_IQ_LIMIT: f32 = 0.8;
-/// I-f speed at which sensorless startup hands off to the observer
-/// [rad/s electrical] — comfortably above the observer's ~4·leak floor.
-const SL_OMEGA_HANDOFF: f32 = 150.0;
-
-// Locked-rotor R/L probe (RunTest RL_STEP): rotor-align time at the first
-// voltage level, then square-wave excitation between the two levels — τ=L/R
-// sits near the 50 µs sample period, so a single edge has ~2 usable samples;
-// folding ~60 edges recovers it. Half-period 32 ticks = 1.6 ms ≫ τ, so the
-// plateaus settle and R comes out differentially (dead-time cancels).
-const PROBE_ALIGN_TICKS: u32 = 6000; // 300 ms
-const PROBE_HALF_TICKS: u32 = 32;
-const PROBE_PRE_PAIRS: usize = 256;
-const BURST_PAIRS: usize = 4096;
-
-// drive state values (channel::STATE)
-const ST_OFF: u8 = 0;
-const ST_RUN: u8 = 1;
-const ST_FAULT_OC: u8 = 2;
-const ST_FAULT_DRV: u8 = 3;
-const ST_FAULT_VBUS: u8 = 4;
-const ST_CAL: u8 = 5;
-// Sensorless startup phases on the telemetry STATE channel (same codes the
-// host sim scenario writes, so dashboards read identically): Closed = ST_RUN.
-const ST_SL_RAMP: u8 = 6;
-const ST_SL_BLEND: u8 = 7;
-/// Stall fault: the observer's flux magnitude collapsed to the L·i artifact
-/// while nominally closed-loop — the rotor is not actually following.
-/// ≥ ST_FAULT_OC, so the fault gating and Off-to-re-arm flow apply.
-const ST_STALL: u8 = 8;
-/// Six-step commutating on measured crossings but with the detector not
-/// confident — it is coasting on the timeout fallback, so the speed it reports
-/// is a guess and the drive is one missed crossing from losing sync.
-const ST_SS_UNLOCKED: u8 = 9;
-/// Consecutive low-flux ticks before the stall fault trips (100 ms).
-const STALL_TICKS: u32 = 2000;
-
-// ------------------------------------------------------------ shared state
-
-// Host command → control ISR.
-static CMD_MODE: AtomicU8 = AtomicU8::new(0); // 0 off, 1 volt, 2 i-f, 3 sensorless, 4 rl-probe
-static CMD_AMP: AtomicU32 = AtomicU32::new(0);
-static CMD_OMEGA: AtomicU32 = AtomicU32::new(0);
-static CMD_EPOCH: AtomicU32 = AtomicU32::new(0);
-/// Active six-step sector, for the telemetry channel.
-static SIXSTEP_SECTOR: AtomicU8 = AtomicU8::new(0);
-/// CONTROL_TICKS value at the last host message (deadman).
-static LAST_RX_TICK: AtomicU32 = AtomicU32::new(0);
-
-// Control ISR → tasks.
-static CONTROL_TICKS: AtomicU32 = AtomicU32::new(0);
-/// Max ISR duration in cycles since boot — not on the wire, but readable live
-/// via the debug probe (`probe-rs read b32 <addr> 1`); this is how the libm
-/// f64-soft-float stall was found.
-static ISR_MAX_CYCLES: AtomicU32 = AtomicU32::new(0);
-static STATE: AtomicU8 = AtomicU8::new(ST_CAL);
-static TELEM_SEQ: AtomicU32 = AtomicU32::new(0);
-static TELEM: [AtomicU32; channel::COUNT] = [const { AtomicU32::new(0) }; channel::COUNT];
-
-// Telemetry config (rx task → tx task).
-static MASK: AtomicU32 = AtomicU32::new(channel::ALL);
-static DIVIDER: AtomicU32 = AtomicU32::new(20); // ×50 µs = 1 kHz default
-static STREAMING: AtomicBool = AtomicBool::new(false);
-
-static RESPONSES: Channel<CriticalSectionRawMutex, Message, 8> = Channel::new();
-
-// Runtime parameters (mmc_proto::param ids), profiler-writable over the
-// protocol. Defaults are the Stage F0 bench fits; a new value applies at the
-// next clean drive start. RAM only — flash persistence is future work.
-const fn p32(v: f32) -> AtomicU32 {
-    AtomicU32::new(v.to_bits())
-}
-static PARAMS: [AtomicU32; param::COUNT] = [
-    p32(MOTOR_RS),
-    p32(MOTOR_LS),
-    p32(MOTOR_FLUX),
-    p32(CUR_BANDWIDTH),
-    p32(SPEED_KP),
-    p32(SPEED_KI),
-    p32(POLE_PAIRS),
-    p32(SL_OMEGA_HANDOFF),
-    p32(OMEGA_SLEW),
-    p32(SL_IQ_LIMIT),
-    p32(ONTIME_CCR5_DEFAULT as f32),
-    p32(SS_KP_DEFAULT),
-    p32(SS_KI_DEFAULT),
-    p32(V_DEAD_DEFAULT),
-    p32(I_THRESH_DEFAULT),
+/// Parameter defaults: motor 1, measured on this bench (Stage F0 rotating
+/// I-f sweep, `tools/fit_params.py`): flux 0.894 ± 0.04 mWb, apparent R
+/// 0.97 Ω (locked-rotor R = 1.0), friction ≈ 0.8 mN·m. L was ill-conditioned
+/// in that test — 0.1 mH is a robust design center, and it only sets the
+/// current-PI zero and a small observer flux correction. Speed gains are
+/// conservative (~40 rad/s el from the fitted J and kt). Dead-time
+/// compensation stays 0 until `profile --only vdead` has run on the rig: an
+/// over-compensated bridge is worse than an uncompensated one.
+const DEFAULTS: [f32; param::COUNT] = [
+    1.0,                        // R
+    0.1e-3,                     // L
+    0.894e-3,                   // FLUX
+    1000.0,                     // CUR_BW
+    2.0e-4,                     // SPEED_KP
+    2.0e-3,                     // SPEED_KI
+    7.0,                        // POLE_PAIRS
+    150.0,                      // SL_HANDOFF
+    500.0,                      // OMEGA_ACCEL
+    0.8,                        // IQ_LIMIT
+    ONTIME_CCR5_DEFAULT as f32, // ONTIME_CCR5
+    2.0e-4,                     // SS_KP
+    5.0e-4,                     // SS_KI
+    0.0,                        // V_DEAD
+    0.5,                        // I_THRESH (FOC ripple amplitude, 30 µH at 40 kHz)
 ];
 
-fn param_get(id: u8) -> f32 {
-    f32::from_bits(PARAMS[id as usize].load(Ordering::Relaxed))
-}
+/// f32 capacity of the probe burst buffer: the saliency sweep's full
+/// schedule (the R/L probe uses the same buffer).
+const BURST: usize = mmc_core::probe::SAL_HDR + mmc_core::probe::SAL_TICKS * 2;
 
-/// Sanity window per parameter — a NAK beats bricking the control loop.
-fn param_range(id: u8) -> Option<(f32, f32)> {
-    Some(match id {
-        param::R => (0.05, 20.0),
-        param::L => (5e-6, 0.05),
-        param::FLUX => (1e-5, 0.5),
-        param::CUR_BW => (100.0, 4000.0),
-        param::SPEED_KP => (0.0, 0.1),
-        param::SPEED_KI => (0.0, 10.0),
-        param::POLE_PAIRS => (1.0, 50.0),
-        // Handoff floor sits above the observer's ~4·leak trust floor at the
-        // low end only nominally — going below ~80 is an experiment, allowed
-        // but on the operator's head.
-        param::SL_HANDOFF => (30.0, 1000.0),
-        param::OMEGA_ACCEL => (20.0, 5000.0),
-        // Current ceiling: 1.2 A leaves 20% margin to the 1.5 A trips.
-        param::IQ_LIMIT => (0.05, 1.2),
-        // Sample point, timer counts before the valley. 20 counts = 0.12 us;
-        // the upper bound keeps it inside a 50% duty on-window, so it tracks
-        // the PWM period rather than being a fixed count.
-        param::ONTIME_CCR5 => (20.0, (PWM_ARR / 2) as f32),
-        // Duty per rad/s electrical: 1e-3 already commands full duty from a
-        // 900 rad/s error, so the useful range is small.
-        param::SS_KP => (0.0, 0.01),
-        param::SS_KI => (0.0, 0.1),
-        // 0 disables. The ceiling is generous — a slow driver on a high bus
-        // can genuinely lose a volt — but it is still a ceiling: a fitted
-        // value near it means the fit found something other than dead time.
-        param::V_DEAD => (0.0, 2.0),
-        // Below ~10 mA the correction is a step at every zero crossing, which
-        // is the chatter the band exists to avoid.
-        param::I_THRESH => (0.01, 5.0),
-        _ => return None,
-    })
-}
+static BURST_BUF: BurstBuffer<BURST> = BurstBuffer::new();
+static SHARED: Shared<BURST> = Shared::new(
+    DriveConfig {
+        spec: SPEC,
+        kind: DeviceKind::BoardG474,
+        fw_version: 16,
+        name: "mmc-g474",
+        defaults: DEFAULTS,
+    },
+    &BURST_BUF,
+);
 
-/// Flash-persisted parameter table. Stored in the last 2 KB page of bank 2
-/// (0x0807_F800). Code executes from bank 1, so erasing/programming this page
-/// is read-while-write — the control ISR keeps running from bank 1 untouched.
-/// Layout (little-endian u32 words): magic, version, [f32; param::COUNT],
-/// crc32(preceding), padded to a write-granularity multiple.
-mod nvparam {
-    use super::{param, Flash};
-    use embassy_stm32::flash::Blocking;
+/// The power stage and sensing, as the drive sees them. Zero-sized: every
+/// method addresses the (already configured) peripherals directly.
+struct G474Board;
 
-    const NV_OFFSET: u32 = 0x7_F800; // last bank-2 page, from FLASH_BASE
-    const NV_ADDR: usize = 0x0807_F800;
-    const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
-    /// Bumped whenever `param::COUNT` changes, because the blob is a flat
-    /// `[f32; COUNT]` and a longer table shifts the CRC word. The CRC alone
-    /// would reject a stale blob anyway; the version makes that a deliberate
-    /// rejection rather than a lucky one.
-    ///
-    /// v2 (2026-08-08): added `v_dead`/`i_thresh`, 13 → 15 params. **A device
-    /// flashed across this boundary loads compiled-in defaults and needs its
-    /// profile re-applied and re-persisted.**
-    const VERSION: u32 = 2;
-    const HDR: usize = 2; // magic + version
-    const CRC_IDX: usize = HDR + param::COUNT;
-    const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, then round up to even (8-byte write)
+impl MotorBoard for G474Board {
+    fn sample(&mut self) -> Sample {
+        let v = |i| ADC1.jdr(i).read().jdata() as f32 * ADC_VOLTS_PER_LSB;
+        Sample {
+            phase_volts: [v(0), v(1), v(2)],
+            vbus: v(3) * VBUS_GAIN,
+        }
+    }
 
-    fn crc32(words: &[u32]) -> u32 {
-        let mut crc = 0xFFFF_FFFFu32;
-        for &word in words {
-            crc ^= word;
-            for _ in 0..32 {
-                crc = if crc & 1 != 0 {
-                    (crc >> 1) ^ 0xEDB8_8320
+    /// Mapping confirmed on hardware 2026-07-20: BEMF1=U on PC0/jdr0, BEMF3=W
+    /// on PC1/jdr1, BEMF2=V on PC3/jdr3 (PC2/jdr2 is the SPEED pot — railed).
+    fn terminal_volts(&mut self) -> [f32; 3] {
+        let v = |i| ADC2.jdr(i).read().jdata() as f32 * ADC_VOLTS_PER_LSB * BEMF_GAIN;
+        [v(0), v(3), v(1)]
+    }
+
+    fn set_terminal_sample_offset(&mut self, offset: f32) {
+        TIM1.ccr5().modify(|w| w.set_ccr(offset as u16));
+    }
+
+    fn set_duties(&mut self, d: [f32; 3]) {
+        for (ch, duty) in d.iter().enumerate() {
+            let duty = duty.clamp(0.0, MAX_DUTY);
+            TIM1.ccr(ch)
+                .write(|w| w.set_ccr((duty * PWM_ARR as f32) as u16));
+        }
+    }
+
+    /// Phase enables on PB13/PB14/PB15. A disabled phase is Hi-Z — both its
+    /// switches open.
+    fn set_phase_enables(&mut self, mask: u8) {
+        GPIOB.bsrr().write(|w| {
+            for (bit, pin) in [(0, 13), (1, 14), (2, 15)] {
+                if mask & (1 << bit) != 0 {
+                    w.set_bs(pin, true);
                 } else {
-                    crc >> 1
-                };
+                    w.set_br(pin, true);
+                }
             }
-        }
-        !crc
+        });
     }
 
-    /// Read + validate the stored table (a plain memory read — flash is
-    /// mapped). `None` when blank, wrong version, or CRC-mismatched.
-    pub fn load() -> Option<[f32; param::COUNT]> {
-        let base = NV_ADDR as *const u32;
-        let read = |i: usize| unsafe { core::ptr::read_volatile(base.add(i)) };
-        if read(0) != MAGIC || read(1) != VERSION {
-            return None;
-        }
-        let mut words = [0u32; CRC_IDX];
-        for (i, w) in words.iter_mut().enumerate() {
-            *w = read(i);
-        }
-        if crc32(&words) != read(CRC_IDX) {
-            return None;
-        }
-        let mut params = [0f32; param::COUNT];
-        for (i, p) in params.iter_mut().enumerate() {
-            *p = f32::from_bits(words[HDR + i]);
-        }
-        Some(params)
+    fn driver_fault(&mut self) -> bool {
+        GPIOA.idr().read().idr(11) == pac::gpio::vals::Idr::LOW
+            || GPIOB.idr().read().idr(12) == pac::gpio::vals::Idr::LOW
     }
 
-    /// Erase the page, then program the current parameter table. ~22 ms
-    /// (erase-dominated); caller gates on a quiet stage.
-    pub fn save(flash: &mut Flash<'static, Blocking>, params: &[f32; param::COUNT]) -> bool {
-        let mut words = [0u32; WORDS];
-        words[0] = MAGIC;
-        words[1] = VERSION;
-        for (i, v) in params.iter().enumerate() {
-            words[HDR + i] = v.to_bits();
-        }
-        words[CRC_IDX] = crc32(&words[..CRC_IDX]);
-        let mut bytes = [0u8; WORDS * 4];
-        for (i, w) in words.iter().enumerate() {
-            bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
-        }
-        flash.blocking_erase(NV_OFFSET, NV_OFFSET + 2048).is_ok()
-            && flash.blocking_write(NV_OFFSET, &bytes).is_ok()
-    }
-
-    /// Erase the page so the device boots on firmware defaults.
-    pub fn erase(flash: &mut Flash<'static, Blocking>) -> bool {
-        flash.blocking_erase(NV_OFFSET, NV_OFFSET + 2048).is_ok()
+    fn cycles(&self) -> u32 {
+        cortex_m::peripheral::DWT::cycle_count()
     }
 }
 
-// Burst buffer: per-tick sample pairs recorded by the probes at the full
-// 20 kHz — resolution the telemetry stream can't deliver at 1 Mbaud. Layout
-// is kind-keyed: RL_STEP records legacy (i_d, v_d) pairs from index 0;
-// L_THETA writes a `probe::SAL_HDR` self-describing header first, then
-// (i_d, i_q) pairs in the excitation frame (hence the +SAL_HDR size).
-const BURST_F32S: usize = BURST_PAIRS * 2 + probe::SAL_HDR;
-struct BurstCell(UnsafeCell<[f32; BURST_F32S]>);
-// Safety: written only by the ISR while BURST_STATE == 1, read by the rx
-// task only while BURST_STATE == 2.
-unsafe impl Sync for BurstCell {}
-static BURST: BurstCell = BurstCell(UnsafeCell::new([0.0; BURST_F32S]));
-/// 0 idle, 1 recording (ISR owns), 2 done (host may read).
-static BURST_STATE: AtomicU8 = AtomicU8::new(0);
-/// f32s recorded so far.
-static BURST_LEN: AtomicU32 = AtomicU32::new(0);
-static PROBE_V_ALIGN: AtomicU32 = AtomicU32::new(0);
-static PROBE_V_STEP: AtomicU32 = AtomicU32::new(0);
-/// Which test sequence mode 4 is running (`mmc_proto::test` kind).
-static PROBE_KIND: AtomicU8 = AtomicU8::new(0);
-/// Saliency-sweep half-period [ticks], picked from the live R/L params at
-/// probe start (τ-adaptive; see `mmc_core::probe::sal_half_ticks`).
-static PROBE_HALF: AtomicU32 = AtomicU32::new(8);
+/// Parameter blob in the last 2 KB page of bank 2 (0x0807_F800). Code
+/// executes from bank 1, so erasing/programming this page is
+/// read-while-write — the control ISR keeps running from bank 1 untouched.
+struct FlashStore(Flash<'static, Blocking>);
 
-/// A drive abort with a probe in flight still hands the (partial) buffer to
-/// the host — a short read beats a hung poll loop.
-fn burst_abort() {
-    if BURST_STATE.load(Ordering::Relaxed) == 1 {
-        BURST_STATE.store(2, Ordering::Release);
+const NV_OFFSET: u32 = 0x7_F800; // from FLASH_BASE
+const NV_ADDR: usize = 0x0807_F800;
+
+impl ParamStore for FlashStore {
+    fn read(&mut self) -> &[u8] {
+        // Safety: flash is memory-mapped and this page is only written by us.
+        unsafe { core::slice::from_raw_parts(NV_ADDR as *const u8, nvparam::BYTES) }
+    }
+    fn write(&mut self, blob: &[u8; nvparam::BYTES]) -> bool {
+        self.erase() && self.0.blocking_write(NV_OFFSET, blob).is_ok()
+    }
+    fn erase(&mut self) -> bool {
+        self.0.blocking_erase(NV_OFFSET, NV_OFFSET + 2048).is_ok()
     }
 }
 
-// ---------------------------------------------------------------- ISR state
-
-struct IsrState {
-    /// Which PWM period of the current control tick this interrupt is; see
-    /// [`PWM_DIV`]. Counts up and wraps, gating the loop down to CTRL_FREQ.
-    pwm_phase: u32,
-    // calibration
-    cal_count: u32,
-    cal_sum: [u32; 3],
-    offset_v: [f32; 3], // amp output at zero current
-    // drive
-    epoch_seen: u32,
-    mode: u8,
-    theta: f32,
-    omega: f32,
-    amp: f32,
-    foc: Option<Foc>,
-    /// Flux observer: shadow-instrumented during the forced-angle drives,
-    /// the angle source in sensorless mode.
-    obs: Option<FluxObserver>,
-    // Sensorless mode (MS4 stack): startup sequencer + speed loop.
-    seq: Option<Sequencer>,
-    speed: Option<SpeedLoop>,
-    /// Slewed speed-loop reference [rad/s electrical].
-    omega_ref_cur: f32,
-    /// Signed startup current, consumed as the speed-PI preload on the
-    /// first closed-loop tick (0.0 = already consumed).
-    sl_preload: f32,
-    /// Six-step: commutation sector, zero-cross detector and startup ramp.
-    ss_sector: usize,
-    ss_zc: Option<ZeroCross>,
-    ss_ramp: Option<Ramp>,
-    /// True once commutation is timed from measured crossings, not the ramp.
-    ss_sensing: bool,
-    /// Duty→speed loop for six-step, closed on the crossing interval.
-    ss_speed: Option<Pi>,
-    /// Speed target while sensing [rad/s electrical].
-    ss_target: f32,
-    /// R/L probe tick counter (mode 4).
-    probe_ticks: u32,
-    oc_strikes: u8,
-    /// Consecutive low-observer-flux ticks in closed-loop sensorless.
-    stall_strikes: u32,
-    vbus_filt: f32,
-}
-
-struct IsrCell(UnsafeCell<IsrState>);
-// Safety: written only from the ADC1_2 ISR after init.
+struct IsrCell(UnsafeCell<(Engine, u32)>);
+// Safety: only the ADC1_2 interrupt touches it after init.
 unsafe impl Sync for IsrCell {}
+/// The drive engine plus the PWM-period phase counter (see [`PWM_DIV`]).
+static ISR: IsrCell = IsrCell(UnsafeCell::new((Engine::new(), 0)));
 
-static ISR_STATE: IsrCell = IsrCell(UnsafeCell::new(IsrState {
-    pwm_phase: 0,
-    cal_count: 0,
-    cal_sum: [0; 3],
-    offset_v: [1.558; 3],
-    epoch_seen: 0,
-    mode: 0,
-    ss_sector: 0,
-    ss_zc: None,
-    ss_ramp: None,
-    ss_sensing: false,
-    ss_speed: None,
-    ss_target: 0.0,
-    theta: 0.0,
-    omega: 0.0,
-    amp: 0.0,
-    foc: None,
-    obs: None,
-    seq: None,
-    speed: None,
-    omega_ref_cur: 0.0,
-    sl_preload: 0.0,
-    probe_ticks: 0,
-    oc_strikes: 0,
-    stall_strikes: 0,
-    vbus_filt: 0.0,
-}));
+static RESPONSES: Channel<CriticalSectionRawMutex, Message, 8> = Channel::new();
 
 // ------------------------------------------------------------------- tasks
 
@@ -496,21 +264,11 @@ async fn main(spawner: Spawner) {
     }
     let p = embassy_stm32::init(config);
 
-    // Restore persisted parameters before anything reads them (a plain flash
-    // read; no peripheral needed). Range-check each so a stale blob from an
-    // older firmware can't push a value the control loop would choke on.
-    if let Some(params) = nvparam::load() {
-        for (id, &v) in params.iter().enumerate() {
-            if let Some((lo, hi)) = param_range(id as u8) {
-                if (lo..=hi).contains(&v) {
-                    PARAMS[id].store(v.to_bits(), Ordering::Relaxed);
-                }
-            }
-        }
-    }
-    let flash = Flash::new_blocking(p.FLASH);
+    // Restore persisted parameters before the control loop reads them.
+    let mut store = FlashStore(Flash::new_blocking(p.FLASH));
+    SHARED.restore(&mut store);
 
-    // Cycle counter feeds the ISR_MAX_CYCLES diagnostic.
+    // Cycle counter feeds the isr_max_cycles diagnostic.
     unsafe {
         let mut cp = cortex_m::Peripherals::steal();
         cp.DCB.enable_trace();
@@ -519,17 +277,18 @@ async fn main(spawner: Spawner) {
 
     let mut cfg = usart::Config::default();
     cfg.baudrate = 1_000_000;
+    // DMA arguments are tx first: the RX channel is DMA1 CH2 (session 29).
     let uart = Uart::new(p.LPUART1, p.PA3, p.PA2, p.DMA1_CH1, p.DMA1_CH2, Irqs, cfg)
         .expect("LPUART1 config");
     let (tx, rx) = uart.split();
 
     init_motor_peripherals();
 
-    spawner.spawn(rx_task(rx, flash).unwrap());
+    spawner.spawn(rx_task(rx, store).unwrap());
     spawner.spawn(tx_task(tx).unwrap());
 }
 
-/// GPIO + TIM1 + ADC1 register-level setup, then the control interrupt.
+/// GPIO + TIM1 + ADC1/ADC2 register-level setup, then the control interrupt.
 fn init_motor_peripherals() {
     use pac::gpio::vals::Moder;
 
@@ -743,247 +502,40 @@ fn init_motor_peripherals() {
 }
 
 /// Deframe + handle host commands; replies go through the TX task. Owns the
-/// flash so the persist commands can erase/program without a global.
+/// parameter flash so persistence requests can erase/program it.
 #[embassy_executor::task]
-async fn rx_task(mut rx: UartRx<'static, Async>, mut flash: Flash<'static, Blocking>) {
+async fn rx_task(mut rx: UartRx<'static, Async>, mut store: FlashStore) {
     let mut deframer = Deframer::new();
     let mut buf = [0u8; 128];
     loop {
         let Ok(n) = rx.read_until_idle(&mut buf).await else {
             continue;
         };
-        LAST_RX_TICK.store(CONTROL_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+        SHARED.host_activity();
         for &b in &buf[..n] {
-            let Some(Ok(msg)) = deframer.push(b) else {
-                continue;
-            };
-            // Flash writes stall ~22 ms and need the drive quiet; keep them in
-            // the rx task (which owns the flash) rather than the pure `handle`.
-            let reply = match msg {
-                Message::SaveParams | Message::EraseParams => persist(&mut flash, &msg),
-                other => handle(&other),
-            };
-            let _ = RESPONSES.try_send(reply);
-        }
-    }
-}
-
-/// Persist / erase the parameter table, gated on a quiet stage (drive off, no
-/// probe recording) so the ~22 ms flash stall never hits a live control loop.
-fn persist(flash: &mut Flash<'static, Blocking>, msg: &Message) -> Message {
-    let of = msg.wire_type();
-    let state = STATE.load(Ordering::Relaxed);
-    if state == ST_CAL {
-        return Message::Nak { of, err: 3 };
-    }
-    if state == ST_RUN
-        || CMD_MODE.load(Ordering::Relaxed) != 0
-        || BURST_STATE.load(Ordering::Relaxed) == 1
-    {
-        return Message::Nak { of, err: 2 };
-    }
-    let ok = if matches!(msg, Message::EraseParams) {
-        nvparam::erase(flash)
-    } else {
-        let mut params = [0.0f32; param::COUNT];
-        for (id, p) in params.iter_mut().enumerate() {
-            *p = param_get(id as u8);
-        }
-        nvparam::save(flash, &params)
-    };
-    if ok {
-        Message::Ack { of }
-    } else {
-        Message::Nak { of, err: 5 } // flash program error
-    }
-}
-
-fn handle(msg: &Message) -> Message {
-    let ack = Message::Ack {
-        of: msg.wire_type(),
-    };
-    let nak = |err| Message::Nak {
-        of: msg.wire_type(),
-        err,
-    };
-    match *msg {
-        Message::Ping { nonce } => Message::Pong { nonce },
-        Message::GetInfo => Message::Info(DeviceInfo::new(DeviceKind::BoardG474, 15, "mmc-g474")),
-        Message::SetTelemetry { divider, mask } => {
-            DIVIDER.store(divider.max(1) as u32, Ordering::Relaxed);
-            MASK.store(mask & channel::ALL, Ordering::Relaxed);
-            ack
-        }
-        Message::Stream { enable } => {
-            STREAMING.store(enable, Ordering::Relaxed);
-            ack
-        }
-        Message::SetDrive(mode) => {
-            let state = STATE.load(Ordering::Relaxed);
-            let (m, amp, omega) = match mode {
-                DriveMode::Off => (0u8, 0.0f32, 0.0f32),
-                DriveMode::OpenLoopVoltage { volts, omega_e } => (1, volts, omega_e),
-                DriveMode::IfCurrent { amps, omega_e } => (2, amps, omega_e),
-                DriveMode::Sensorless { amps, omega_e } => (3, amps, omega_e),
-                DriveMode::SixStepForced { duty, omega_e } => (5, duty, omega_e),
-                DriveMode::SixStepSensorless {
-                    duty,
-                    omega_handoff,
-                } => (6, duty, omega_handoff),
-            };
-            if m != 0 {
-                if state == ST_CAL {
-                    return nak(3); // still calibrating
-                }
-                if state >= ST_FAULT_OC {
-                    return nak(2); // faulted: requires Off first
-                }
-            }
-            CMD_AMP.store(
-                amp.clamp(-amp_limit(m), amp_limit(m)).to_bits(),
-                Ordering::Relaxed,
-            );
-            CMD_OMEGA.store(
-                omega.clamp(-OMEGA_E_MAX, OMEGA_E_MAX).to_bits(),
-                Ordering::Relaxed,
-            );
-            CMD_MODE.store(m, Ordering::Relaxed);
-            CMD_EPOCH.fetch_add(1, Ordering::Release);
-            ack
-        }
-        Message::RunTest { kind, a, b } => {
-            if kind != test::RL_STEP && kind != test::L_THETA {
-                return nak(1);
-            }
-            let state = STATE.load(Ordering::Relaxed);
-            if state == ST_CAL {
-                return nak(3);
-            }
-            if state >= ST_FAULT_OC {
-                return nak(2);
-            }
-            // Only from a quiet stage, and not while a probe is recording.
-            if CMD_MODE.load(Ordering::Relaxed) != 0
-                || state == ST_RUN
-                || BURST_STATE.load(Ordering::Relaxed) == 1
-            {
-                return nak(2);
-            }
-            // The saliency sweep bounds its steady-state plateau below the
-            // software trip using the live R estimate, and picks its square-
-            // wave half-period from the live τ = L/R so the plateaus settle
-            // (profile + apply R/L before running it). RL_STEP keeps its
-            // hardware-validated V_AMP_MAX clamp unchanged.
-            let v_max = if kind == test::L_THETA {
-                let tau_ticks = param_get(param::L) / param_get(param::R) * CTRL_FREQ;
-                PROBE_HALF.store(probe::sal_half_ticks(tau_ticks) as u32, Ordering::Relaxed);
-                (0.75 * I_TRIP_A * param_get(param::R)).min(V_AMP_MAX)
-            } else {
-                V_AMP_MAX
-            };
-            PROBE_V_ALIGN.store(a.clamp(0.05, v_max).to_bits(), Ordering::Relaxed);
-            PROBE_V_STEP.store(b.clamp(0.05, v_max).to_bits(), Ordering::Relaxed);
-            PROBE_KIND.store(kind, Ordering::Relaxed);
-            BURST_LEN.store(0, Ordering::Relaxed);
-            BURST_STATE.store(1, Ordering::Relaxed);
-            CMD_MODE.store(4, Ordering::Relaxed);
-            CMD_EPOCH.fetch_add(1, Ordering::Release);
-            ack
-        }
-        Message::ReadBurst { offset } => {
-            if BURST_STATE.load(Ordering::Acquire) != 2 {
-                return nak(4); // no finished recording to read
-            }
-            let len = BURST_LEN.load(Ordering::Relaxed) as usize;
-            let off = (offset as usize).min(len);
-            // Safety: ISR only writes while BURST_STATE == 1.
-            let buf = unsafe { &*BURST.0.get() };
-            let n = (len - off).min(mmc_proto::BURST_CHUNK);
-            match BurstChunk::new(off as u16, len as u16, &buf[off..off + n]) {
-                Some(chunk) => Message::BurstData(chunk),
-                None => nak(1),
+            if let Some(Ok(msg)) = deframer.push(b) {
+                let _ = RESPONSES.try_send(SHARED.handle(&msg, &mut store));
             }
         }
-        Message::SetParam { id, value } => match param_range(id) {
-            Some((lo, hi)) if (lo..=hi).contains(&value) => {
-                PARAMS[id as usize].store(value.to_bits(), Ordering::Relaxed);
-                ack
-            }
-            _ => nak(1),
-        },
-        Message::GetParam { id } => {
-            if (id as usize) < param::COUNT {
-                Message::ParamValue {
-                    id,
-                    value: param_get(id),
-                }
-            } else {
-                nak(1)
-            }
-        }
-        // Adjust the I-f current target on the fly; otherwise ignored.
-        Message::SetIqRef { iq } => {
-            if CMD_MODE.load(Ordering::Relaxed) == 2 {
-                let lim = param_get(param::IQ_LIMIT);
-                CMD_AMP.store(iq.clamp(-lim, lim).to_bits(), Ordering::Relaxed);
-                CMD_EPOCH.fetch_add(1, Ordering::Release);
-            }
-            ack
-        }
-        _ => nak(1),
-    }
-}
-
-fn amp_limit(mode: u8) -> f32 {
-    if mode == 5 || mode == 6 {
-        MAX_DUTY // six-step commands a PWM duty, not volts or amps
-    } else if mode >= 2 {
-        param_get(param::IQ_LIMIT)
-    } else {
-        V_AMP_MAX
     }
 }
 
 /// Responses + decimated telemetry snapshots.
 #[embassy_executor::task]
 async fn tx_task(mut tx: UartTx<'static, Async>) {
-    let mut divider = DIVIDER.load(Ordering::Relaxed);
-    let mut ticker = Ticker::every(Duration::from_micros(50 * divider as u64));
+    let mut period = SHARED.telemetry_period_us();
+    let mut ticker = Ticker::every(Duration::from_micros(period));
     loop {
         match select(RESPONSES.receive(), ticker.next()).await {
             Either::First(reply) => send(&mut tx, &reply).await,
             Either::Second(()) => {
-                let d = DIVIDER.load(Ordering::Relaxed);
-                if d != divider {
-                    divider = d;
-                    ticker = Ticker::every(Duration::from_micros(50 * divider as u64));
+                let p = SHARED.telemetry_period_us();
+                if p != period {
+                    period = p;
+                    ticker = Ticker::every(Duration::from_micros(period));
                 }
-                if !STREAMING.load(Ordering::Relaxed) {
-                    continue;
-                }
-                let mask = MASK.load(Ordering::Relaxed);
-                let mut values = [0f32; channel::COUNT];
-                // Seqlock read: retry while the ISR is mid-update.
-                let (t_us, n) = loop {
-                    let seq = TELEM_SEQ.load(Ordering::Acquire);
-                    if seq & 1 != 0 {
-                        continue;
-                    }
-                    let ticks = CONTROL_TICKS.load(Ordering::Relaxed);
-                    let mut n = 0;
-                    for id in 0..channel::COUNT as u8 {
-                        if mask & (1 << id) == 0 {
-                            continue;
-                        }
-                        values[n] = f32::from_bits(TELEM[id as usize].load(Ordering::Relaxed));
-                        n += 1;
-                    }
-                    if TELEM_SEQ.load(Ordering::Acquire) == seq {
-                        break (ticks.wrapping_mul(50), n);
-                    }
-                };
-                if let Some(frame) = mmc_proto::TelemetryFrame::new(t_us, mask, &values[..n]) {
-                    send(&mut tx, &Message::Telemetry(frame)).await;
+                if let Some(frame) = SHARED.telemetry() {
+                    send(&mut tx, &frame).await;
                 }
             }
         }
@@ -999,63 +551,9 @@ async fn send(tx: &mut UartTx<'static, Async>, msg: &Message) {
 
 // ------------------------------------------------------------- control ISR
 
-/// Terminal voltage of phase `k` (U=0, V=1, W=2) from the BEMF dividers.
-/// Mapping confirmed on hardware: U on jdr0, W on jdr1, V on jdr3.
-fn vb_phase(k: usize) -> f32 {
-    let idx = match k {
-        0 => 0usize,
-        1 => 3,
-        _ => 1,
-    };
-    ADC2.jdr(idx).read().jdata() as f32 * ADC_VOLTS_PER_LSB * BEMF_GAIN
-}
-
-fn stage_off() {
-    GPIOB.bsrr().write(|w| {
-        w.set_br(13, true);
-        w.set_br(14, true);
-        w.set_br(15, true);
-    });
-    for ch in 0..3 {
-        TIM1.ccr(ch).write(|w| w.set_ccr(0));
-    }
-}
-
-fn stage_on() {
-    GPIOB.bsrr().write(|w| {
-        w.set_bs(13, true);
-        w.set_bs(14, true);
-        w.set_bs(15, true);
-    });
-}
-
-/// Enable phases selectively: bit 0 = U (PB13), 1 = V (PB14), 2 = W (PB15).
-/// A disabled phase is Hi-Z — both its switches open — which is what six-step
-/// needs so the idle phase can be read as a back-EMF sense node.
-fn stage_phases(mask: u8) {
-    GPIOB.bsrr().write(|w| {
-        for (bit, pin) in [(0, 13), (1, 14), (2, 15)] {
-            if mask & (1 << bit) != 0 {
-                w.set_bs(pin, true);
-            } else {
-                w.set_br(pin, true);
-            }
-        }
-    });
-}
-
-
-fn set_duties(d: [f32; 3]) {
-    for (ch, duty) in d.iter().enumerate() {
-        let duty = duty.clamp(0.0, MAX_DUTY);
-        TIM1.ccr(ch)
-            .write(|w| w.set_ccr((duty * PWM_ARR as f32) as u16));
-    }
-}
-
-/// The 20 kHz control loop, clocked by the injected-conversion ADC interrupt
-/// (which TIM1 CH4 fires at the counter peak — mid low-side conduction).
-/// The interrupt itself arrives at the PWM rate; see [`PWM_DIV`].
+/// The control loop, clocked by the injected-conversion ADC interrupt (which
+/// TIM1 CH4 fires at the counter peak — mid low-side conduction). The
+/// interrupt arrives at the PWM rate; every [`PWM_DIV`]-th one runs a tick.
 #[no_mangle]
 unsafe extern "C" fn ADC1_2() {
     if !ADC1.isr().read().jeos() {
@@ -1063,701 +561,15 @@ unsafe extern "C" fn ADC1_2() {
     }
     ADC1.isr().write(|w| w.set_jeos(true));
 
-    let s = &mut *ISR_STATE.0.get();
+    let (engine, pwm_phase) = &mut *ISR.0.get();
     // Drop the conversions that fall between control ticks. Sampling still
     // happens every PWM period — the discarded ones cost only this test — but
-    // the loop runs at CTRL_FREQ, so every gain, slew rate and tick counter
+    // the loop runs at CTRL_FREQ_HZ, so every gain, slew rate and tick counter
     // downstream keeps the timebase it was tuned for.
-    s.pwm_phase += 1;
-    if s.pwm_phase < PWM_DIV {
+    *pwm_phase += 1;
+    if *pwm_phase < PWM_DIV {
         return;
     }
-    s.pwm_phase = 0;
-
-    let isr_t0 = cortex_m::peripheral::DWT::cycle_count();
-    let ticks = CONTROL_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-
-    let raw = [
-        ADC1.jdr(0).read().jdata(),
-        ADC1.jdr(1).read().jdata(),
-        ADC1.jdr(2).read().jdata(),
-        ADC1.jdr(3).read().jdata(),
-    ];
-    let volts = raw.map(|r| r as f32 * ADC_VOLTS_PER_LSB);
-    let vbus = volts[3] * VBUS_GAIN;
-    s.vbus_filt += 0.05 * (vbus - s.vbus_filt);
-
-    // --- zero-current calibration (stage is off; measure amp offsets).
-    if s.cal_count < CAL_TICKS {
-        for (sum, &r) in s.cal_sum.iter_mut().zip(&raw[..3]) {
-            *sum += r as u32;
-        }
-        s.cal_count += 1;
-        if s.cal_count == CAL_TICKS {
-            for (offset, &sum) in s.offset_v.iter_mut().zip(&s.cal_sum) {
-                *offset = sum as f32 / CAL_TICKS as f32 * ADC_VOLTS_PER_LSB;
-            }
-            STATE.store(ST_OFF, Ordering::Relaxed);
-        }
-        return;
-    }
-
-    // Positive phase current (into the motor) pulls the amp output below its
-    // zero-current offset.
-    let i_abc = Abc {
-        a: (s.offset_v[0] - volts[0]) / CUR_VOLTS_PER_AMP,
-        b: (s.offset_v[1] - volts[1]) / CUR_VOLTS_PER_AMP,
-        c: (s.offset_v[2] - volts[2]) / CUR_VOLTS_PER_AMP,
-    };
-
-    // --- pick up new host commands.
-    let epoch = CMD_EPOCH.load(Ordering::Acquire);
-    if epoch != s.epoch_seen {
-        s.epoch_seen = epoch;
-        let mode = CMD_MODE.load(Ordering::Relaxed);
-        let state = STATE.load(Ordering::Relaxed);
-        if mode == 0 {
-            s.mode = 0;
-            s.omega = 0.0;
-            s.amp = 0.0;
-            stage_off();
-            burst_abort();
-            if state >= ST_FAULT_OC {
-                STATE.store(ST_OFF, Ordering::Relaxed); // fault re-arm
-            } else if state == ST_RUN {
-                STATE.store(ST_OFF, Ordering::Relaxed);
-            }
-        } else if state == ST_OFF || state == ST_RUN {
-            if s.vbus_filt < VBUS_MIN_RUN || s.vbus_filt > VBUS_MAX {
-                s.mode = 0;
-                stage_off();
-                burst_abort();
-                STATE.store(ST_FAULT_VBUS, Ordering::Relaxed);
-            } else if s.mode == 3
-                && mode == 6
-                && matches!(s.seq.as_ref().map(|q| q.phase()), Some(Phase::Closed))
-                && s.omega > 40.0
-            {
-                // Live handover: closed-loop sensorless FOC has the rotor at a
-                // verified speed, and six-step takes over commutation from the
-                // observer's angle. Open-loop six-step ramps on this rig lose
-                // the rotor (pull-out) well below any speed worth handing off
-                // at — carrying it up under current control is both the robust
-                // startup and the only way to put a *synchronized* rotor under
-                // the back-EMF detector at speed. Forward spin only: the
-                // sector table runs one direction.
-                let w = s.omega;
-                // The FOC angle and the six-step table share one convention
-                // (inverse_park and the sixstep shape both give
-                // e_u = -psi*omega*sin(theta)), so the observer angle seeds the
-                // sector directly. Verified on the bench by contradiction: a
-                // deliberate +pi seed drew the ~1.9 A an antipodal pair
-                // predicts within two control ticks, while this seed starts at
-                // the ~0.3 A an aligned one does.
-                s.ss_sector = sixstep::sector_of(s.theta);
-                // Blanking here is NOT the ramp path's 250 us: it only has to
-                // clear the freewheel demag (L*I/V ~ 2.5 us on this motor) and
-                // the divider settle. At speed the window is ~1 ms and a late
-                // commutation pushes the next crossing toward window entry —
-                // a long blank then swallows it, the timeout fires, and one
-                // missed window is desync (measured: tracked 5 sectors at
-                // 898 rad/s, then lost exactly the window whose crossing
-                // arrived early).
-                let mut zc = ZeroCross::new(ZcCfg {
-                    blank: 30e-6,
-                    ..Default::default()
-                });
-                zc.seed(w);
-                s.ss_zc = Some(zc);
-                let mut pi = Pi::new(
-                    PiGains {
-                        kp: param_get(param::SS_KP),
-                        ki: param_get(param::SS_KI),
-                    },
-                    MAX_DUTY,
-                );
-                // Seed the duty loop at this speed's feedforward so the
-                // modulation change is bumpless.
-                let ff = (param_get(param::FLUX) * w
-                    + param_get(param::IQ_LIMIT) * 2.0 * param_get(param::R))
-                    / s.vbus_filt.max(1.0);
-                pi.preload(ff.clamp(0.01, MAX_DUTY));
-                s.ss_speed = Some(pi);
-                s.ss_ramp = None;
-                s.ss_sensing = true;
-                s.ss_target = w;
-                // `amp` becomes the duty ceiling now; slewing down from the
-                // FOC current amplitude would cap harder than commanded.
-                s.amp = f32::from_bits(CMD_AMP.load(Ordering::Relaxed)).clamp(0.0, MAX_DUTY);
-                s.mode = 6;
-            } else if s.mode != 0 && mode != s.mode {
-                // Any other cross-mode switch while running is unsupported:
-                // the new mode's control state was never built, and running it
-                // would dereference None — a panic halts the firmware. Keep
-                // the current drive; the host goes through Off.
-            } else {
-                if s.mode == 0 {
-                    // clean start — control blocks built from the runtime
-                    // parameter table (profiler-writable).
-                    s.theta = 0.0;
-                    s.omega = 0.0;
-                    s.amp = 0.0;
-                    s.oc_strikes = 0;
-                    s.stall_strikes = 0;
-                    s.probe_ticks = 0;
-                    let (rs, ls) = (param_get(param::R), param_get(param::L));
-                    let gains = current_pi_gains(rs, ls, param_get(param::CUR_BW));
-                    s.obs = Some(FluxObserver::new(FluxObserverCfg::new(rs, ls)));
-                    s.ss_sector = 0;
-                    s.ss_sensing = false;
-                    s.ss_zc = None;
-                    s.ss_ramp = None;
-                    s.ss_speed = None;
-                    s.ss_target = 0.0;
-                    if mode == 6 {
-                        // Blanking has to clear the freewheel of the phase
-                        // that just opened; at 20 kHz that is a handful of
-                        // ticks. Handoff speed comes from the command.
-                        s.ss_zc = Some(ZeroCross::new(ZcCfg {
-                            blank: 250e-6,
-                            ..Default::default()
-                        }));
-                        // Duty per rad/s electrical. The plant from duty to
-                        // electrical acceleration is p·(2ψ)·V_bus/(2R·J); the
-                        // integral corner must stay well under the crossover
-                        // or the loop hunts, the lesson the simulator taught.
-                        s.ss_speed = Some(Pi::new(
-                            PiGains {
-                                kp: param_get(param::SS_KP),
-                                ki: param_get(param::SS_KI),
-                            },
-                            MAX_DUTY,
-                        ));
-                        s.ss_ramp = Some(Ramp::new(RampCfg {
-                            omega_start: 20.0,
-                            omega_handoff: f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed))
-                                .abs()
-                                .max(40.0),
-                            accel: param_get(param::OMEGA_ACCEL),
-                            duty: 0.0, // duty comes from CMD_AMP
-                        }));
-                    }
-                    if mode == 3 {
-                        // Sensorless: feedforward FOC (flux is measured now),
-                        // I-f sequencer toward the commanded direction, speed
-                        // loop preloaded with the (blend-tapered) startup
-                        // current at handoff. Handoff speed, ramp accel, and
-                        // the current ceiling are runtime params so a new
-                        // motor tunes without a reflash.
-                        s.foc = Some(Foc::with_feedforward(
-                            gains,
-                            Decoupling {
-                                ld: ls,
-                                lq: ls,
-                                flux: param_get(param::FLUX),
-                            },
-                        ));
-                        let omega_t = f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed));
-                        let dir = if omega_t < 0.0 { -1.0 } else { 1.0 };
-                        let iq_lim = param_get(param::IQ_LIMIT);
-                        let handoff = param_get(param::SL_HANDOFF);
-                        let i_start = f32::from_bits(CMD_AMP.load(Ordering::Relaxed))
-                            .abs()
-                            .clamp(0.1, iq_lim);
-                        s.seq = Some(Sequencer::new(SequencerCfg {
-                            i_start,
-                            accel: param_get(param::OMEGA_ACCEL),
-                            omega_handoff: handoff * dir,
-                            ..SequencerCfg::default()
-                        }));
-                        // SPEED_KP/SPEED_KI, in amps per rad/s el — the FOC
-                        // speed loop's own gains, which `tools/profile.py`
-                        // fits from J and kt and `mmc-host apply` writes.
-                        // NOT ss_kp/ss_ki: those are six-step's duty→speed
-                        // loop, a different plant in different units.
-                        // `0882ae7` bled them into this block while adding
-                        // the six-step loop, which made MS6's speed-gain
-                        // autotune a no-op and left this loop under-gained by
-                        // 6× (kp) / 23× (ki) on motor 1 and ~45× on motor 2.
-                        s.speed = Some(SpeedLoop::new(
-                            PiGains {
-                                kp: param_get(param::SPEED_KP),
-                                ki: param_get(param::SPEED_KI),
-                            },
-                            iq_lim,
-                        ));
-                        s.omega_ref_cur = handoff * dir;
-                        s.sl_preload = i_start * dir;
-                    } else {
-                        s.foc = Some(Foc::new(gains));
-                        s.seq = None;
-                        s.speed = None;
-                        s.sl_preload = 0.0;
-                    }
-                    // Dead-time compensation applies to every FOC-modulated
-                    // mode, not just sensorless: the bridge takes its cut
-                    // from an I-f current vector exactly the same way.
-                    // `v_dead = 0` (the default until the rig is measured)
-                    // leaves the modulator untouched.
-                    if let Some(foc) = s.foc.as_mut() {
-                        foc.deadtime = Some(DeadtimeModel {
-                            v_dead: param_get(param::V_DEAD),
-                            i_thresh: param_get(param::I_THRESH),
-                        });
-                    }
-                    stage_on();
-                }
-                s.mode = mode;
-                STATE.store(ST_RUN, Ordering::Relaxed);
-            }
-        }
-    }
-
-    // --- protection trips (only meaningful once running).
-    if s.mode != 0 {
-        let drv_fault = GPIOA.idr().read().idr(11) == pac::gpio::vals::Idr::LOW
-            || GPIOB.idr().read().idr(12) == pac::gpio::vals::Idr::LOW;
-        let fault = if drv_fault {
-            Some(ST_FAULT_DRV)
-        } else if s.vbus_filt > VBUS_MAX {
-            Some(ST_FAULT_VBUS)
-        } else {
-            let oc =
-                i_abc.a.abs() > I_TRIP_A || i_abc.b.abs() > I_TRIP_A || i_abc.c.abs() > I_TRIP_A;
-            s.oc_strikes = if oc { s.oc_strikes + 1 } else { 0 };
-            (s.oc_strikes >= 2).then_some(ST_FAULT_OC)
-        };
-        if let Some(f) = fault {
-            s.mode = 0;
-            s.omega = 0.0;
-            s.amp = 0.0;
-            stage_off();
-            burst_abort();
-            STATE.store(f, Ordering::Relaxed);
-            CMD_MODE.store(0, Ordering::Relaxed);
-        }
-        // Deadman: host silent too long with the stage live.
-        let last = LAST_RX_TICK.load(Ordering::Relaxed);
-        if ticks.wrapping_sub(last) > DEADMAN_TICKS {
-            s.mode = 0;
-            s.omega = 0.0;
-            s.amp = 0.0;
-            stage_off();
-            burst_abort();
-            STATE.store(ST_OFF, Ordering::Relaxed);
-            CMD_MODE.store(0, Ordering::Relaxed);
-        }
-    }
-
-    // --- drive.
-    let mut duties = [0.0f32; 3];
-    let mut v_dq = Dq::default();
-    let mut i_dq = Dq::default();
-    let mut iq_ref = 0.0f32;
-    let mut theta_est = 0.0f32;
-    let mut omega_est = 0.0f32;
-    let mut theta_err = 0.0f32;
-
-    if s.mode != 0 {
-        // Sample point is a runtime param so it can be swept over the wire.
-        TIM1.ccr5()
-            .modify(|w| w.set_ccr(param_get(param::ONTIME_CCR5) as u16));
-        // Six-step drives the enables itself; everything else wants all three
-        // phases live (a previous six-step run may have left one Hi-Z).
-        if s.mode != 5 && s.mode != 6 {
-            stage_on();
-        }
-        let omega_target = f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed));
-        let amp_target = f32::from_bits(CMD_AMP.load(Ordering::Relaxed));
-        let i_ab = clarke(i_abc);
-
-        let v_ab = if s.mode == 4 && PROBE_KIND.load(Ordering::Relaxed) == test::L_THETA {
-            // Saliency sweep: align at v_low on θ = 0 (parks a free rotor;
-            // a clamped one just stays put and the fit recovers its angle),
-            // then run the shared `mmc_core::probe` schedule — square-wave
-            // v_d along ±paired electrical angles, recording (i_d, i_q) in
-            // the excitation frame behind a self-describing header.
-            s.probe_ticks += 1;
-            let n = BURST_LEN.load(Ordering::Relaxed) as usize;
-            if n >= probe::SAL_HDR + probe::SAL_TICKS * 2 {
-                // Recording complete: stage off, hand the buffer to the host.
-                s.mode = 0;
-                stage_off();
-                STATE.store(ST_OFF, Ordering::Relaxed);
-                CMD_MODE.store(0, Ordering::Relaxed);
-                BURST_STATE.store(2, Ordering::Release);
-                AlphaBeta::default()
-            } else {
-                let v_low = f32::from_bits(PROBE_V_ALIGN.load(Ordering::Relaxed));
-                let v_high = f32::from_bits(PROBE_V_STEP.load(Ordering::Relaxed));
-                let half = PROBE_HALF.load(Ordering::Relaxed) as usize;
-                let (theta_x, v) = if s.probe_ticks <= PROBE_ALIGN_TICKS {
-                    (0.0, v_low)
-                } else {
-                    let t = (s.probe_ticks - PROBE_ALIGN_TICKS - 1) as usize;
-                    // Safety: rx task only reads while BURST_STATE == 2.
-                    let buf = unsafe { &mut *BURST.0.get() };
-                    if t == 0 {
-                        let hdr = probe::sal_header(test::L_THETA, half, v_low, v_high, CTRL_FREQ);
-                        buf[..probe::SAL_HDR].copy_from_slice(&hdr);
-                    }
-                    (
-                        probe::sal_angle(t, half),
-                        if probe::sal_level_is_high(t, half) {
-                            v_high
-                        } else {
-                            v_low
-                        },
-                    )
-                };
-                let sc = sin_cos(theta_x);
-                i_dq = park(i_ab, sc);
-                if s.probe_ticks > PROBE_ALIGN_TICKS {
-                    let t = (s.probe_ticks - PROBE_ALIGN_TICKS - 1) as usize;
-                    let idx = probe::SAL_HDR + 2 * t;
-                    // Safety: rx task only reads while BURST_STATE == 2.
-                    let buf = unsafe { &mut *BURST.0.get() };
-                    buf[idx] = i_dq.d;
-                    buf[idx + 1] = i_dq.q;
-                    BURST_LEN.store((idx + 2) as u32, Ordering::Relaxed);
-                }
-                v_dq = Dq { d: v, q: 0.0 };
-                let v_ab = inverse_park(v_dq, sc);
-                duties = svpwm(v_ab, s.vbus_filt.max(1.0));
-                v_ab
-            }
-        } else if s.mode == 4 {
-            // Locked-rotor R/L probe: θ held at 0 (rotor aligned during the
-            // first phase), then unslewed square-wave v_d between the two
-            // levels, recording (i_d, v_d) per tick into the burst buffer at
-            // the full 20 kHz.
-            s.probe_ticks += 1;
-            let n = BURST_LEN.load(Ordering::Relaxed) as usize;
-            if n >= BURST_PAIRS * 2 {
-                // Recording complete: stage off, hand the buffer to the host.
-                s.mode = 0;
-                stage_off();
-                STATE.store(ST_OFF, Ordering::Relaxed);
-                CMD_MODE.store(0, Ordering::Relaxed);
-                BURST_STATE.store(2, Ordering::Release);
-                AlphaBeta::default()
-            } else {
-                let v = f32::from_bits(if s.probe_ticks <= PROBE_ALIGN_TICKS {
-                    PROBE_V_ALIGN.load(Ordering::Relaxed)
-                } else {
-                    let half = (s.probe_ticks - PROBE_ALIGN_TICKS - 1) / PROBE_HALF_TICKS;
-                    if half.is_multiple_of(2) {
-                        PROBE_V_STEP.load(Ordering::Relaxed)
-                    } else {
-                        PROBE_V_ALIGN.load(Ordering::Relaxed)
-                    }
-                });
-                let sc = sin_cos(0.0);
-                i_dq = park(i_ab, sc);
-                if s.probe_ticks + PROBE_PRE_PAIRS as u32 > PROBE_ALIGN_TICKS {
-                    // Safety: rx task only reads while BURST_STATE == 2.
-                    let buf = unsafe { &mut *BURST.0.get() };
-                    buf[n] = i_dq.d;
-                    buf[n + 1] = v;
-                    BURST_LEN.store((n + 2) as u32, Ordering::Relaxed);
-                }
-                v_dq = Dq { d: v, q: 0.0 };
-                let v_ab = inverse_park(v_dq, sc);
-                duties = svpwm(v_ab, s.vbus_filt.max(1.0));
-                v_ab
-            }
-        } else if s.mode == 3 {
-            // Sensorless: the sequencer owns the angle (I-f ramp → blend →
-            // observer), the speed loop owns i_q once closed. The observer
-            // state is one tick old here; it is fed below, same as the rig.
-            let seq_out = s
-                .seq
-                .as_mut()
-                .unwrap()
-                .update(s.obs.as_ref().unwrap(), CTRL_DT);
-            iq_ref = match seq_out.iq_open {
-                Some(iq) => iq,
-                None => {
-                    let speed = s.speed.as_mut().unwrap();
-                    if s.sl_preload != 0.0 {
-                        // Bumpless takeover from the (blend-tapered) startup
-                        // current the sequencer actually ended on.
-                        let taper = s.seq.as_ref().map_or(1.0, |q| q.taper_end());
-                        speed.preload(s.sl_preload * taper);
-                        s.sl_preload = 0.0;
-                    }
-                    // Slew the reference from the handoff speed toward the
-                    // (live-retargetable) command.
-                    let accel = param_get(param::OMEGA_ACCEL);
-                    let d = (omega_target - s.omega_ref_cur)
-                        .clamp(-accel * CTRL_DT, accel * CTRL_DT);
-                    s.omega_ref_cur += d;
-                    speed.update(s.omega_ref_cur, seq_out.omega, CTRL_DT)
-                }
-            };
-            s.theta = seq_out.theta;
-            s.omega = seq_out.omega;
-            let out = s.foc.as_mut().unwrap().step(
-                i_abc,
-                s.theta,
-                s.omega,
-                Dq { d: 0.0, q: iq_ref },
-                s.vbus_filt.max(1.0),
-                CTRL_DT,
-            );
-            duties = out.duties;
-            v_dq = out.v_dq;
-            i_dq = out.i_dq;
-            out.v_ab
-        } else {
-            // Forced-frame modes: ramp the electrical frequency + amplitude.
-            let accel = param_get(param::OMEGA_ACCEL);
-            let d_omega = (omega_target - s.omega).clamp(-accel * CTRL_DT, accel * CTRL_DT);
-            s.omega += d_omega;
-            let slew = if s.mode == 2 { I_SLEW } else { V_SLEW };
-            let d_amp = (amp_target - s.amp).clamp(-slew * CTRL_DT, slew * CTRL_DT);
-            s.amp += d_amp;
-            s.theta = wrap_angle(s.theta + s.omega * CTRL_DT);
-
-            let sc = sin_cos(s.theta);
-            i_dq = park(i_ab, sc);
-
-            if s.mode == 1 {
-                // Open-loop rotating voltage vector.
-                v_dq = Dq { d: s.amp, q: 0.0 };
-                let v_ab = inverse_park(v_dq, sc);
-                duties = svpwm(v_ab, s.vbus_filt.max(1.0));
-                v_ab
-            } else if s.mode == 6 {
-                // Sensorless six-step. The idle phase is sampled during the
-                // PWM on-time (ADC2 on TIM1_TRGO2), where it swings about
-                // V_bus/2 — see docs/SIXSTEP.md for the identity.
-                // Reference is the MEASURED mid-point of the two driven
-                // terminals, not V_bus/2. The identity is
-                // v_f = (v_hi + v_lo)/2 + (back-EMF term), and on a real
-                // bridge v_lo is not 0 — the low-side switch and the shunt
-                // put it at i·(R_dson + R_shunt), 1.6 V at 1 A here. Using
-                // V_bus/2 leaves that as a reference error of ~0.7 V, which
-                // is half the back-EMF ramp at low speed and is what made
-                // one sector parity undetectable. Measuring both driven
-                // terminals cancels the drops exactly.
-                let (hi_i, lo_i, fl_i) = sixstep::TABLE[s.ss_sector];
-                let v_ref = 0.5 * (vb_phase(hi_i as usize) + vb_phase(lo_i as usize));
-                let v_float = vb_phase(fl_i as usize);
-                // `amp` is a duty ceiling in both phases: the ramp feeds forward
-                // the duty its commanded speed needs, and once sensing the speed
-                // loop sets it. Each branch below assigns it.
-                let duty;
-
-                if !s.ss_sensing {
-                    let want = s.ss_ramp.as_mut().unwrap().update(CTRL_DT);
-                    if want != s.ss_sector {
-                        s.ss_sector = want;
-                        s.ss_zc.as_mut().unwrap().commutated();
-                    }
-                    // Watch the detector during the ramp without obeying it.
-                    s.ss_zc
-                        .as_mut()
-                        .unwrap()
-                        .update(s.ss_sector, v_float, v_ref, CTRL_DT);
-                    let r = s.ss_ramp.as_ref().unwrap();
-                    // Feedforward the ramp duty instead of applying `amp` flat.
-                    // A fixed duty is worst at standstill, where there is no
-                    // back-EMF to oppose it and the whole voltage lands on the
-                    // winding: reaching a high handoff needs a duty that trips
-                    // overcurrent on the way there. Asking instead for the duty
-                    // that produces a chosen current — bus volts to cover the
-                    // back-EMF the ramp speed implies, plus i·R across the two
-                    // conducting phases — holds current roughly flat all the way
-                    // up, so `amp` becomes a ceiling the ramp rarely reaches
-                    // rather than the thing that trips.
-                    let i_ramp = param_get(param::IQ_LIMIT);
-                    let r_path = 2.0 * param_get(param::R);
-                    let ff = (param_get(param::FLUX) * r.omega_e().abs() + i_ramp * r_path)
-                        / s.vbus_filt.max(1.0);
-                    // max/min rather than clamp: `clamp` panics when min > max,
-                    // and the ceiling is below the 0.01 floor for one tick if a
-                    // mode arrives before its amplitude. A panic here halts the
-                    // firmware outright.
-                    duty = ff.max(0.01).min(s.amp.clamp(0.0, MAX_DUTY));
-                    if r.done() {
-                        let zc = s.ss_zc.as_mut().unwrap();
-                        if !zc.locked() {
-                            zc.seed(r.omega_e());
-                        }
-                        // Bumpless: start the duty loop from the duty the
-                        // ramp was already applying.
-                        s.ss_speed.as_mut().unwrap().preload(duty);
-                        s.ss_target = r.omega_e();
-                        s.ss_sensing = true;
-                    }
-                    s.omega = r.omega_e();
-                } else {
-                    let zc = s.ss_zc.as_mut().unwrap();
-                    if zc.update(s.ss_sector, v_float, v_ref, CTRL_DT) == ZcEvent::Commutate {
-                        s.ss_sector = (s.ss_sector + 1) % sixstep::SECTORS;
-                    }
-                    let measured = zc.omega_e();
-                    s.omega = measured;
-                    // Slew the target so a retarget does not step the duty.
-                    let want = f32::from_bits(CMD_OMEGA.load(Ordering::Relaxed)).abs();
-                    let accel = param_get(param::OMEGA_ACCEL);
-                    s.ss_target += (want - s.ss_target).clamp(-accel * CTRL_DT, accel * CTRL_DT);
-                    let pi = s.ss_speed.as_mut().unwrap();
-                    let raw = pi.update(s.ss_target - measured, CTRL_DT);
-                    duty = raw.max(0.01).min(s.amp.clamp(0.0, MAX_DUTY));
-                    if raw != duty {
-                        // Back-calculation: a six-step bridge has no braking
-                        // quadrant, so the loop saturates low on every
-                        // deceleration and would otherwise wind up.
-                        pi.preload(duty);
-                    }
-                }
-
-                duties = [0.0; 3];
-                duties[hi_i as usize] = duty;
-                duties[lo_i as usize] = 0.0;
-                stage_phases(!(1u8 << fl_i) & 0b111);
-                SIXSTEP_SECTOR.store(s.ss_sector as u8, Ordering::Relaxed);
-                AlphaBeta::default()
-            } else if s.mode == 5 {
-                // Forced six-step commutation: two phases conduct, the third
-                // is Hi-Z. `amp` is the high-side duty (0..1), not volts.
-                // Sector advances with the forced angle, so the rotor is
-                // dragged exactly as in open-loop voltage mode.
-                // Sector mapping and table are shared with the simulator via
-                // mmc_core::sixstep, so commutation order and alignment cannot
-                // drift apart between the two.
-                let sector = sixstep::sector_of(s.theta);
-                let (hi, lo, float) = sixstep::TABLE[sector];
-                let duty = s.amp.clamp(0.0, MAX_DUTY);
-                duties = [0.0; 3];
-                duties[hi as usize] = duty;
-                duties[lo as usize] = 0.0;
-                stage_phases(!(1u8 << float) & 0b111);
-                SIXSTEP_SECTOR.store(sector as u8, Ordering::Relaxed);
-                // The observer has no meaningful input here (one phase
-                // current is unmeasured by construction), so feed it zero and
-                // let the shadow estimate go stale rather than lie.
-                AlphaBeta::default()
-            } else {
-                // I-f: closed current loop on the forced angle.
-                iq_ref = s.amp;
-                let out = s.foc.as_mut().unwrap().step(
-                    i_abc,
-                    s.theta,
-                    s.omega,
-                    Dq { d: 0.0, q: iq_ref },
-                    s.vbus_filt.max(1.0),
-                    CTRL_DT,
-                );
-                duties = out.duties;
-                v_dq = out.v_dq;
-                i_dq = out.i_dq;
-                out.v_ab
-            }
-        };
-        set_duties(duties);
-
-        // Observer update from what was applied and measured. In the forced
-        // modes it runs in shadow and theta_err is the (wrong-frame) hang
-        // angle; in sensorless mode theta_err is the one-tick innovation.
-        //
-        // Six-step never feeds it: one phase current is unmeasured by
-        // construction and the applied vector is not a rotating one, so the
-        // estimate would be meaningless. Skipping it is also most of why
-        // six-step costs less per tick than FOC.
-        let observer_runs = s.mode != 5 && s.mode != 6;
-        if let Some(obs) = s.obs.as_mut().filter(|_| observer_runs) {
-            obs.update(i_ab, v_ab, CTRL_DT);
-            theta_est = obs.electrical_angle();
-            omega_est = obs.electrical_velocity();
-            theta_err = wrap_angle(theta_est - s.theta);
-
-            // Stall detector (closed-loop sensorless only): a stalled rotor
-            // makes no back-EMF, but the observer still "locks" onto the
-            // rotating L·i artifact and reports a confident, wrong speed —
-            // with flux magnitude ≈ L·|i| instead of ψ (an order of
-            // magnitude low; the MS4/MS5 fake-lock lesson). 100 ms below
-            // 0.35·ψ while nominally closed-loop trips a stall fault.
-            //
-            // `flux_mag()` is leak-compensated, so this threshold now means
-            // the same thing at every speed — it used to read 11% low at
-            // 40 rad/s el purely from the leaky integrator. A stall reads
-            // L·|i|/ψ ≈ 0.01·ψ here, so the margin to 0.35 is untouched.
-            if s.mode == 3 && s.seq.as_ref().is_some_and(|q| q.phase() == Phase::Closed) {
-                if obs.flux_mag() < 0.35 * param_get(param::FLUX) {
-                    s.stall_strikes += 1;
-                    if s.stall_strikes >= STALL_TICKS {
-                        s.mode = 0;
-                        s.omega = 0.0;
-                        s.amp = 0.0;
-                        stage_off();
-                        burst_abort();
-                        STATE.store(ST_STALL, Ordering::Relaxed);
-                        CMD_MODE.store(0, Ordering::Relaxed);
-                    }
-                } else {
-                    s.stall_strikes = 0;
-                }
-            } else {
-                s.stall_strikes = 0;
-            }
-        }
-    }
-
-    // --- telemetry snapshot (seqlock).
-    let seq = TELEM_SEQ.load(Ordering::Relaxed);
-    TELEM_SEQ.store(seq.wrapping_add(1), Ordering::Release);
-    let put = |id: u8, v: f32| TELEM[id as usize].store(v.to_bits(), Ordering::Relaxed);
-    put(channel::IQ_REF, iq_ref);
-    put(channel::I_D, i_dq.d);
-    put(channel::I_Q, i_dq.q);
-    put(channel::V_D, v_dq.d);
-    put(channel::V_Q, v_dq.q);
-    put(channel::DUTY_A, duties[0]);
-    put(channel::DUTY_B, duties[1]);
-    put(channel::DUTY_C, duties[2]);
-    put(channel::OMEGA_M, s.omega / param_get(param::POLE_PAIRS).max(1.0));
-    put(channel::THETA_E, s.theta);
-    put(channel::VBUS, s.vbus_filt);
-    put(channel::I_A, i_abc.a);
-    put(channel::I_B, i_abc.b);
-    put(channel::I_C, i_abc.c);
-    // While sensorless runs, the state channel reports the startup phase.
-    let state_telem = match (s.mode, s.seq.as_ref().map(|q| q.phase())) {
-        (3, Some(Phase::Ramp)) => ST_SL_RAMP,
-        (3, Some(Phase::Blend)) => ST_SL_BLEND,
-        // Six-step: distinguish the forced ramp, confident sensing, and
-        // commutating-but-unlocked, which otherwise all look like "running".
-        (6, _) if !s.ss_sensing => ST_SL_RAMP,
-        (6, _) if !s.ss_zc.as_ref().is_some_and(|z| z.locked()) => ST_SS_UNLOCKED,
-        _ => STATE.load(Ordering::Relaxed),
-    };
-    put(channel::STATE, state_telem as f32);
-    put(channel::THETA_EST, theta_est);
-    put(channel::OMEGA_EST, omega_est);
-    put(channel::THETA_ERR, theta_err);
-    // Terminal voltages via the BEMF dividers (ADC2, parallel). Mapping
-    // confirmed on hardware 2026-07-20: BEMF1=U on PC0/jdr0, BEMF3=W on
-    // PC1/jdr1, BEMF2=V on PC3/jdr3 (PC2/jdr2 is the SPEED pot — railed).
-    // The shield's clamp diodes rectify these, so they read 0..peak (a zero-cross /
-    // coast-down instrument, not a live terminal-voltage sense under PWM).
-    let vb = |i: usize| ADC2.jdr(i).read().jdata() as f32 * ADC_VOLTS_PER_LSB * BEMF_GAIN;
-    put(channel::VB_U, vb(0));
-    put(channel::VB_V, vb(3));
-    put(channel::VB_W, vb(1));
-    put(
-        channel::SECTOR,
-        if s.mode == 5 || s.mode == 6 {
-            SIXSTEP_SECTOR.load(Ordering::Relaxed) as f32
-        } else {
-            0.0
-        },
-    );
-    TELEM_SEQ.store(seq.wrapping_add(2), Ordering::Release);
-
-    let dur = cortex_m::peripheral::DWT::cycle_count().wrapping_sub(isr_t0);
-    let max = ISR_MAX_CYCLES.load(Ordering::Relaxed).max(dur);
-    ISR_MAX_CYCLES.store(max, Ordering::Relaxed);
+    *pwm_phase = 0;
+    engine.tick(&SHARED, &mut G474Board);
 }

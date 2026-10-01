@@ -643,6 +643,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mmc-drive"
+version = "0.1.0"
+dependencies = [
+ "mmc-core",
+ "mmc-hal",
+ "mmc-proto",
+]
+
+[[package]]
 name = "mmc-fw-g474"
 version = "0.1.0"
 dependencies = [
@@ -654,9 +663,15 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "mmc-core",
+ "mmc-drive",
+ "mmc-hal",
  "mmc-proto",
  "panic-halt",
 ]
+
+[[package]]
+name = "mmc-hal"
+version = "0.1.0"
 
 [[package]]
 name = "mmc-proto"

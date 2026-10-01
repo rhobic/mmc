@@ -3,7 +3,7 @@ name = "mmc-fw-g474"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "STM32G474RE motor bring-up firmware: FOC hardware layer + mmc-proto over the debug USB serial port"
+description = "STM32G474RE + STSPIN830 shield: the MotorBoard under the mmc-drive application"
 
 # Detached from the root workspace: always builds for thumbv7em-none-eabihf
 # (see .cargo/config.toml).
@@ -11,6 +11,8 @@ description = "STM32G474RE motor bring-up firmware: FOC hardware layer + mmc-pro
 
 [dependencies]
 mmc-core = { path = "../mmc-core" }
+mmc-drive = { path = "../mmc-drive" }
+mmc-hal = { path = "../mmc-hal" }
 mmc-proto = { path = "../mmc-proto" }
 
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }

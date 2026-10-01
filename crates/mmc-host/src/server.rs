@@ -19,8 +19,8 @@ use mmc_core::transforms::{clarke, inverse_clarke, inverse_park, park, Abc, Dq};
 use mmc_core::tuning::{current_pi_gains, speed_pi_gains};
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
 use mmc_proto::{
-    channel, encode, param, test, BoardTraits, BurstChunk, Deframer, DeviceInfo, DeviceKind, DriveMode, Message,
-    MAX_FRAME,
+    channel, encode, param, test, BoardTraits, BurstChunk, Deframer, DeviceInfo, DeviceKind,
+    DriveMode, Message, MAX_FRAME,
 };
 use mmc_sim::{PmsmParams, TruthAngle, VirtualMotor};
 

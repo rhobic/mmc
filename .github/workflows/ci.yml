@@ -29,7 +29,7 @@ jobs:
         with:
           targets: thumbv7em-none-eabihf,thumbv6m-none-eabi
       # G474 (M4F) and the M0+ scaling floor: both stay green from day one.
-      - run: cargo build --target thumbv7em-none-eabihf -p mmc-core -p mmc-hal -p mmc-proto
+      - run: cargo build --target thumbv7em-none-eabihf -p mmc-core -p mmc-hal -p mmc-proto -p mmc-drive
       - run: cargo build --target thumbv6m-none-eabi -p mmc-core -p mmc-hal -p mmc-proto
 
   # Each control methodology must build on its own: the low-resource scaling
