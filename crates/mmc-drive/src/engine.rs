@@ -704,14 +704,18 @@ impl Engine {
             self.mode = mode::SS_SENSORLESS;
             return;
         }
-        if self.mode != mode::OFF && mode != self.mode {
-            // Any other cross-mode switch while running is unsupported: the
-            // new mode's control state was never built, and running it would
-            // dereference None — a panic halts the firmware. Keep the current
-            // drive; the host goes through Off.
-            return;
-        }
-        if self.mode == mode::OFF {
+        // A new mode starts clean, whether from Off or straight from another
+        // running mode; only a repeat of the same mode is a live retarget.
+        // Each mode unwraps its own control blocks, so switching without
+        // rebuilding them would panic the ISR with the bridge live (merged
+        // from origin `40d502c`, which fixed the same rule in the pre-split
+        // G474 firmware).
+        if mode != self.mode {
+            if self.mode == mode::PROBE {
+                // Leaving a probe mid-recording: hand back the partial buffer
+                // rather than leave it owned by the ISR.
+                sh.burst_abort();
+            }
             self.clean_start(sh, mode);
         }
         self.mode = mode;

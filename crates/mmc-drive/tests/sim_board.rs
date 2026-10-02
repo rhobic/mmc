@@ -462,3 +462,41 @@ fn a_board_without_halls_refuses_the_hall_modes() {
     );
     assert!(matches!(reply, Message::Nak { err: 1, .. }), "{reply:?}");
 }
+
+#[test]
+fn switching_modes_while_running_rebuilds_the_drive() {
+    // Straight from one running mode to another, no Off in between: each
+    // mode's control blocks must be built for it (a stale set panicked the
+    // ISR before origin 40d502c / session 30b).
+    let mut rig = Rig::new(10_000);
+    let modes = [
+        DriveMode::OpenLoopVoltage {
+            volts: 1.0,
+            omega_e: 50.0,
+        },
+        DriveMode::Sensorless {
+            amps: 0.5,
+            omega_e: 300.0,
+        },
+        DriveMode::HallFoc {
+            amps: 1.0,
+            omega_e: 200.0,
+        },
+        DriveMode::SixStepHall {
+            duty: 0.5,
+            omega_e: 150.0,
+        },
+        DriveMode::IfCurrent {
+            amps: 0.5,
+            omega_e: 100.0,
+        },
+    ];
+    for m in modes {
+        assert!(matches!(
+            rig.send(&Message::SetDrive(m)),
+            Message::Ack { .. }
+        ));
+        rig.run(0.5);
+        assert_eq!(rig.sh.state(), ST_RUN, "after switching to {m:?}");
+    }
+}

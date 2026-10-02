@@ -406,7 +406,7 @@ fn parse_cmd(v: &serde_json::Value) -> Option<Cmd> {
                 let a = x.as_array()?;
                 Some((a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32))
             };
-            if let Some(rv) = v.get("rl_volts").and_then(&pair) {
+            if let Some(rv) = v.get("rl_volts").and_then(pair) {
                 tuning.rl_volts = rv;
             }
             if let Some(points) = v.get("sweep").and_then(|x| x.as_array()) {
@@ -415,7 +415,7 @@ fn parse_cmd(v: &serde_json::Value) -> Option<Cmd> {
                     tuning.sweep = parsed;
                 }
             }
-            if let Some(t) = v.get("accel").and_then(&pair) {
+            if let Some(t) = v.get("accel").and_then(pair) {
                 tuning.accel = t;
             }
             if let Some(a) = v.get("accel_amps").and_then(|x| x.as_f64()) {

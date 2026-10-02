@@ -537,7 +537,7 @@ fn stage_rl(
     let out = dir.join("rl_step.csv");
     let mut w = std::io::BufWriter::new(std::fs::File::create(&out)?);
     writeln!(w, "t,i_d,v_d")?;
-    for (k, p) in samples.chunks_exact(2).enumerate() {
+    for (k, p) in samples.as_chunks::<2>().0.iter().enumerate() {
         writeln!(w, "{},{},{}", k as f32 / ctrl_hz, p[0], p[1])?;
     }
     w.flush()?;
@@ -731,7 +731,7 @@ fn stage_saliency(
     let out = dir.join("saliency.csv");
     let mut w = std::io::BufWriter::new(std::fs::File::create(&out)?);
     writeln!(w, "t,delta_e,v,i_d,i_q")?;
-    for (k, p) in pairs.chunks_exact(2).enumerate() {
+    for (k, p) in pairs.as_chunks::<2>().0.iter().enumerate() {
         let v = if probe::sal_level_is_high(k, half) {
             hdr[6]
         } else {
