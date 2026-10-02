@@ -93,6 +93,9 @@ pub struct Sequencer {
     omega_f: f32,
     blend_elapsed: f32,
     taper_end: f32,
+    /// Observer angle minus forced angle, tracked *unwrapped* through the
+    /// blend (see `update`).
+    blend_diff: f32,
 }
 
 impl Sequencer {
@@ -104,6 +107,7 @@ impl Sequencer {
             omega_f: 0.0,
             blend_elapsed: 0.0,
             taper_end: 1.0,
+            blend_diff: 0.0,
         }
     }
 
@@ -138,6 +142,7 @@ impl Sequencer {
                     // angle γ (shadow observer vs forced angle) gives the
                     // load's share of i_start as cos γ (see the consts).
                     let gamma = wrap_angle(observer.electrical_angle() - self.theta_f);
+                    self.blend_diff = gamma;
                     let load_frac = crate::math::sin_cos(gamma).1.abs();
                     self.taper_end =
                         (load_frac * BLEND_TAPER_MARGIN + 0.1).clamp(BLEND_TAPER_MIN, 1.0);
@@ -154,9 +159,18 @@ impl Sequencer {
                 self.theta_f = wrap_angle(self.theta_f + self.omega_f * dt);
                 self.blend_elapsed += dt;
                 let alpha = (self.blend_elapsed / self.cfg.blend_time).min(1.0);
-                let theta = wrap_angle(
-                    self.theta_f + alpha * wrap_angle(observer.electrical_angle() - self.theta_f),
-                );
+                // The gap between observer and forced angle must be tracked
+                // continuously, not re-wrapped each tick: once the blend
+                // turns the startup current into torque a light rotor
+                // outruns the still-ramping forced frame, the gap grows past
+                // π, and a re-wrapped gap flips sign — jumping the drive
+                // angle by α·2π in one tick. On motor 3 that was a 3.5 rad
+                // jump 30 ms into the blend, i_q reversed, overcurrent
+                // (session 30b). Unwrapped, it is continuous and still ends
+                // on the observer angle (mod 2π) at α = 1.
+                let gap = wrap_angle(observer.electrical_angle() - self.theta_f);
+                self.blend_diff += wrap_angle(gap - self.blend_diff);
+                let theta = wrap_angle(self.theta_f + alpha * self.blend_diff);
                 let omega = self.omega_f + alpha * (observer.electrical_velocity() - self.omega_f);
                 if alpha >= 1.0 {
                     self.phase = Phase::Closed;
@@ -266,6 +280,50 @@ mod tests {
         let blend_at = reached_blend_at.expect("must reach blend");
         assert!((blend_at - 0.2).abs() < 0.01, "blend at {blend_at}");
         assert_eq!(seq.phase(), Phase::Closed);
+    }
+
+    #[test]
+    fn blend_stays_continuous_when_the_rotor_outruns_the_forced_angle() {
+        // Rotor already 1.5 rad ahead at the blend and accelerating away:
+        // the observer−forced gap passes π mid-blend.
+        let cfg = SequencerCfg {
+            i_start: 0.6,
+            accel: 1000.0,
+            omega_handoff: 350.0,
+            blend_time: 0.05,
+        };
+        let mut seq = Sequencer::new(cfg);
+        let dt = 1e-4;
+        let mut obs = Fixed {
+            theta: 0.0,
+            omega: 0.0,
+        };
+        let mut theta_f = 0.0f32;
+        let mut omega_f = 0.0f32;
+        let mut last: Option<f32> = None;
+        let mut worst = 0.0f32;
+        for _ in 0..8_000 {
+            // Stand-in rotor: tracks the ramp 1.5 rad ahead, then pulls away
+            // at 3000 rad/s² once the blend starts.
+            if seq.phase() == Phase::Ramp {
+                omega_f = (omega_f + cfg.accel * dt).min(cfg.omega_handoff);
+                theta_f = wrap_angle(theta_f + omega_f * dt);
+                obs.omega = omega_f;
+                obs.theta = wrap_angle(theta_f + 1.5);
+            } else {
+                obs.omega += 3000.0 * dt;
+                obs.theta = wrap_angle(obs.theta + obs.omega * dt);
+            }
+            let out = seq.update(&obs, dt);
+            if let Some(prev) = last {
+                // Expected per-tick motion is ω·dt < 0.1 rad; a wrap flip
+                // would show as a step of ~α·2π.
+                worst = worst.max(wrap_angle(out.theta - prev).abs());
+            }
+            last = Some(out.theta);
+        }
+        assert_eq!(seq.phase(), Phase::Closed);
+        assert!(worst < 0.2, "drive angle stepped {worst} rad in one tick");
     }
 
     #[test]
