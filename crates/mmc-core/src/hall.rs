@@ -231,6 +231,155 @@ impl HallAngle {
     }
 }
 
+/// Model-based rotor tracker for low speed on halls.
+///
+/// Between hall edges the sensors only say "somewhere in this 60° sector",
+/// and an edge-timed speed is stale or zero — no good for damping a position
+/// loop. This tracker predicts with the mechanical model instead — the
+/// commanded torque and the rotor inertia, plus a learned load term — and
+/// treats the halls as constraints:
+///
+/// - **on an edge** the rotor position is known exactly (the boundary, plus
+///   hysteresis in the direction of travel): snap to it, and fold the drift
+///   accumulated since the last edge into the speed and load estimates;
+/// - **between edges** the rotor is inside the sector: if the prediction
+///   leaves it, the rotor is slower than predicted — clamp to the boundary
+///   and drop the outward velocity.
+///
+/// The position is kept unwrapped (electrical radians since the first
+/// sample), for position control.
+#[derive(Clone, Debug)]
+pub struct HallTracker {
+    map: HallMap,
+    /// Electrical acceleration per amp of i_q [rad/s² per A]:
+    /// `1.5·p²·ψ / J`.
+    accel_per_amp: f32,
+    theta: f32,
+    omega: f32,
+    /// Learned load acceleration [rad/s², electrical] (friction, cogging
+    /// average, external load).
+    load: f32,
+    last_idx: Option<usize>,
+    since_edge: f32,
+    /// Direction of the last edge (+1/−1 electrical, 0 before one).
+    last_travel: f32,
+}
+
+impl HallTracker {
+    /// Load-estimate gain per edge (fraction of the implied acceleration).
+    const LOAD_GAIN: f32 = 0.2;
+    /// Shortest edge interval used to infer a speed correction [s] (guards
+    /// against a sensor bounce reading as a huge speed).
+    const MIN_INTERVAL: f32 = 10e-3;
+
+    pub fn new(map: HallMap, accel_per_amp: f32) -> Self {
+        Self {
+            map,
+            accel_per_amp,
+            theta: 0.0,
+            omega: 0.0,
+            load: 0.0,
+            last_idx: None,
+            since_edge: 0.0,
+            last_travel: 0.0,
+        }
+    }
+
+    /// Learned load acceleration [rad/s² electrical] (diagnostic).
+    pub fn load(&self) -> f32 {
+        self.load
+    }
+
+    /// Feed the raw hall state and the q-axis current applied over the last
+    /// period. Returns (unwrapped electrical position, electrical speed), or
+    /// `None` on an invalid state (sensor fault).
+    pub fn update(&mut self, state: u8, iq: f32, dt: f32) -> Option<(f32, f32)> {
+        let idx = index_of(state)?;
+        let center = self.map.angle(state)?;
+        let half = PI / 6.0;
+        let Some(last) = self.last_idx else {
+            self.theta = center;
+            self.last_idx = Some(idx);
+            return Some((self.theta, 0.0));
+        };
+        // Predict.
+        self.theta += self.omega * dt;
+        self.omega += (self.accel_per_amp * iq + self.load) * dt;
+        self.since_edge += dt;
+        // The sector centre nearest the (unwrapped) estimate.
+        let c = self.theta + wrap_angle(center - self.theta);
+        if idx != last {
+            let step = (idx + 6 - last) % 6;
+            let seq = match step {
+                1 => 1.0,
+                5 => -1.0,
+                _ => 0.0,
+            };
+            let travel = seq * self.map.dir;
+            if travel == 0.0 {
+                // Skipped a state: no direction, no exact edge.
+                self.theta = c;
+                self.omega = 0.0;
+            } else {
+                let edge = c - travel * half + travel * self.map.hyst;
+                let e = edge - self.theta;
+                self.theta = edge;
+                let t = self.since_edge.max(Self::MIN_INTERVAL);
+                if self.last_travel != 0.0 && travel != self.last_travel {
+                    // Back across the edge it just crossed: the rotor passed
+                    // through zero speed, and the time since that edge says
+                    // nothing about its speed. A rotor resting on a boundary
+                    // chatters like this (motor 3: H3 flipping every few ms),
+                    // and reading each flip as e/t put 70-170 rad/s kicks on
+                    // the position loop's D term.
+                    self.omega = 0.0;
+                    self.last_travel = travel;
+                    self.since_edge = 0.0;
+                    self.last_idx = Some(idx);
+                    return Some((self.theta, self.omega));
+                }
+                // The drift since the last edge says the speed was off by
+                // about e/t, and the acceleration by about e/t².
+                self.omega += e / t;
+                if travel == self.last_travel {
+                    // Two edges the same way: one sector in t is a direct
+                    // speed measurement; average it with the model.
+                    self.omega = 0.5 * self.omega + 0.5 * travel * (PI / 3.0) / t;
+                }
+                let lim = self.accel_per_amp;
+                self.load = (self.load + Self::LOAD_GAIN * e / (t * t)).clamp(-lim, lim);
+                self.last_travel = travel;
+            }
+            self.since_edge = 0.0;
+            self.last_idx = Some(idx);
+        } else {
+            let lim = half + self.map.hyst.abs();
+            let bound = if self.theta > c + lim {
+                Some(c + lim)
+            } else if self.theta < c - lim {
+                Some(c - lim)
+            } else {
+                None
+            };
+            if let Some(b) = bound {
+                // Out of the sector without an edge: the model ran ahead.
+                // No edge for `since_edge` caps the speed at one sector in
+                // that time; whatever the model held above that cap it
+                // over-predicted, so learn it into the load term.
+                self.theta = b;
+                let t = self.since_edge.max(Self::MIN_INTERVAL);
+                let cap = (PI / 3.0) / t;
+                let capped = self.omega.clamp(-cap, cap);
+                let excess = self.omega - capped;
+                self.omega = capped;
+                let lim_a = self.accel_per_amp;
+                self.load = (self.load - Self::LOAD_GAIN * excess / t).clamp(-lim_a, lim_a);
+            }
+        }
+        Some((self.theta, self.omega))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +515,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn tracker_follows_a_slow_rotor_between_edges() {
+        // A rotor creeping at 5 rad/s el (an edge every 0.2 s), driven by a
+        // known current against a known load: the tracker must hold the
+        // speed between edges, where an edge-timed estimate has nothing.
+        let map = HallMap {
+            offset: 0.0,
+            dir: 1.0,
+            hyst: 0.0,
+        };
+        let g = 1.0e5;
+        let mut tr = HallTracker::new(map, g);
+        let dt = 1e-4;
+        let (mut theta, mut omega) = (0.0f32, 5.0f32);
+        let load = -2000.0; // rad/s² el, friction-like
+        let iq = -load / g; // just balances it
+        let mut worst_w = 0.0f32;
+        let mut worst_th = 0.0f32;
+        for k in 0..60_000 {
+            omega += (g * iq + load) * dt;
+            theta += omega * dt;
+            let (th, w) = tr.update(ideal(theta), iq, dt).unwrap();
+            // After the load estimate has converged (a few seconds at an edge
+            // every 0.2 s).
+            if k > 40_000 {
+                worst_w = worst_w.max((w - omega).abs());
+                worst_th = worst_th.max(wrap_angle(th - theta).abs());
+            }
+        }
+        assert!(worst_w < 1.0, "speed error {worst_w} rad/s el");
+        assert!(worst_th < 0.1, "angle error {worst_th} rad el");
     }
 
     #[test]

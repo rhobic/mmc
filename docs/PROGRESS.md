@@ -3,6 +3,62 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-02 — session 30c: how slow on halls — a position mode, and stiction
+
+**Question:** how slowly can motor 3 be controlled with the halls, and is
+position control feasible? (Halls on 7 pole pairs: 42 states/rev, 8.6°
+mechanical each.)
+
+**Hall FOC speed loop** (`testresults/motor3-lowspeed/`): 100 rad/s el ok;
+50 and 20 stick-slip (hall speed ±60–70); 10 averages 7.3; **5 and below
+stall** at i_q 0.06–0.16 A. A speed loop on edge-timed speed has nothing to
+work with between edges 100+ ms apart.
+
+**New: `HallPosition { amps, theta_m }`** (wire code 9; params `pos_kp`,
+`pos_ki`, `pos_kd`, `pos_vmax`, `inertia`, `i_fric`, nvparam **v5**;
+telemetry `pos_m`/`pos_ref`, 26 channels). Trapezoidal reference
+(`mmc_core::position::TrapRef`) → PID on the unwrapped hall position → i_q →
+FOC. Slow constant speed = a far target at a slow `pos_vmax`.
+`capture --drive hall-pos --hz=<deg>`; `tools/pos_step.sh`, `tools/pos_slow.sh`.
+
+What it took, in order:
+
+1. Plain PID on the interpolated hall angle **limit-cycled ±10°** in the
+   sim: no velocity between edges → no damping.
+2. `mmc_core::hall::HallTracker`: predicts the rotor from commanded torque
+   and inertia (G = 1.5·p²·ψ/J, 1.1e5 rad/s²/A on motor 3) plus a learned
+   load; snaps to each edge (exact, hysteresis-corrected); a prediction that
+   leaves the sector without an edge caps the speed at one sector per
+   time-since-edge and learns the excess into the load. Sim hold at a hall
+   edge: 0.01°.
+3. Hardware: breakaway **~0.22 A** vs running **~0.11 A** — stick-slip.
+   Friction feedforward (`i_fric`·sign(v_ref)) and no integration within
+   half a sector of the reference (nothing measurable there).
+4. A rotor resting on a boundary chatters (H3 flipping every few ms); each
+   flip read as e/t kicked the D term by 70–170 rad/s. Reversal edges now
+   mean "through zero speed", not a speed measurement.
+5. Commutating on the tracker's angle could be 60° off at rest (it parks on
+   a sector bound) — half the torque. FOC now uses the hall angle (≤30° off);
+   the tracker only feeds the position loop.
+
+**Result, fw 13** (`testresults/motor3-position/hallcomm`): steps to 90, −360,
+45, −45, 30, −100° all settle and **hold within the ±4.3° hall resolution**
+(0.4–2.6 s); long moves clean (−100°: no overshoot), **short moves overshoot
+30–60°** — the rotor waits for breakaway, then jumps.
+
+**Slow moves** (`…/slow`): average speed tracks down to **~1 rad/s el
+(1.4 rpm, −5%)**, but as stick-slip — ~22 ± 21° mech lag, many backward
+edges, edge intervals ±250–870%; at 0.5 rad/s el it does not break loose in
+10 s. The limit is the motor's stiction seen through 8.6° hall resolution,
+not the loop.
+
+**Next, if this continues:** a breakaway boost (extra current until the
+first edge of a move), then the motor's **1024-line encoder** (4096
+counts/rev, not wired to this shield) — that, not more hall tuning, is the
+route to smooth sub-rpm motion and real position control. The sim has no
+stiction or cogging, so none of steps 3–5 showed there (see the
+sim-fidelity list proposed this session).
+
 ## 2026-10-02 — session 30b: sensorless cleaned up, with the halls as the reference
 
 Bench as session 30, but the **bus is now 18 V** (operator), which keeps the

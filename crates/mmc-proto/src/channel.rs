@@ -50,8 +50,14 @@ pub const HALL: u8 = 22;
 /// direction — independent of the drive's own angle, so it shows whether a
 /// forced or sensorless drive actually has the rotor with it.
 pub const OMEGA_HALL: u8 = 23;
+/// Rotor position [rad, mechanical], unwrapped, from the hall angle,
+/// relative to where the current drive started. 0 outside position mode.
+pub const POS_M: u8 = 24;
+/// Position-loop reference [rad, mechanical] (the trapezoidal profile, not
+/// the final target).
+pub const POS_REF: u8 = 25;
 
-pub const COUNT: usize = 24;
+pub const COUNT: usize = 26;
 
 /// Wire names, indexed by channel id; used as CSV headers by the host.
 pub const NAMES: [&str; COUNT] = [
@@ -79,6 +85,8 @@ pub const NAMES: [&str; COUNT] = [
     "sector",
     "hall",
     "omega_hall",
+    "pos_m",
+    "pos_ref",
 ];
 
 /// Selection mask with every defined channel enabled.

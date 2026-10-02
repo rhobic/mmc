@@ -206,12 +206,14 @@ struct CaptureArgs {
     /// `if` (I-f current), `sl` (closed-loop sensorless), `six` (forced
     /// six-step) or `six-cl` (six-step commutated from measured back-EMF
     /// crossings). Requires --amp and --hz; Off is sent at the end.
-    #[arg(long, value_parser = ["volt", "if", "sl", "six", "six-cl", "hall-foc", "six-hall"], conflicts_with = "iq")]
+    #[arg(long, value_parser = ["volt", "if", "sl", "six", "six-cl", "hall-foc", "six-hall", "hall-pos"], conflicts_with = "iq")]
     drive: Option<String>,
     /// Drive amplitude: volts (volt), amps (if / sl startup), duty 0..1 (six).
     #[arg(long, requires = "drive")]
     amp: Option<f32>,
-    /// Drive electrical frequency [Hz] (sl: speed target).
+    /// Drive electrical frequency [Hz] (sl: speed target). For `hall-pos`
+    /// it is the target position in mechanical degrees instead (and
+    /// `--step-hz` the retarget), relative to where the drive started.
     #[arg(long, requires = "drive")]
     hz: Option<f32>,
     /// Retarget the drive to this electrical frequency [Hz] at 60% of the
@@ -222,7 +224,7 @@ struct CaptureArgs {
     /// running drive to another scheme live (e.g. `sl` spin-up to `six-cl`).
     /// `off` cuts the drive instead, leaving the rotor to coast with the
     /// stage high-impedance — the back-EMF then shows on the BEMF channels.
-    #[arg(long, value_parser = ["volt", "if", "sl", "six", "six-cl", "hall-foc", "six-hall", "off"], requires = "step_hz")]
+    #[arg(long, value_parser = ["volt", "if", "sl", "six", "six-cl", "hall-foc", "six-hall", "hall-pos", "off"], requires = "step_hz")]
     step_kind: Option<String>,
     /// Amplitude for the 60% retarget (defaults to --amp).
     #[arg(long, requires = "step_hz")]
@@ -458,6 +460,10 @@ fn main() -> std::io::Result<()> {
                     "off" => mmc_proto::DriveMode::Off,
                     "hall-foc" => mmc_proto::DriveMode::HallFoc { amps: amp, omega_e },
                     "six-hall" => mmc_proto::DriveMode::SixStepHall { duty: amp, omega_e },
+                    "hall-pos" => mmc_proto::DriveMode::HallPosition {
+                        amps: amp,
+                        theta_m: hz.to_radians(),
+                    },
                     _ => mmc_proto::DriveMode::IfCurrent { amps: amp, omega_e },
                 }
             };

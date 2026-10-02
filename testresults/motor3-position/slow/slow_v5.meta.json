@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial COM9 --baud 1000000 --divider 2 --duration 10",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 20195 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 2,
+    "drive": "HallPosition { amps: 1.0, theta_m: 62.831852 }",
+    "drive_step": null,
+    "duration_s": 10.0,
+    "iq_A": null
+  },
+  "title": "Hall position slow move at 5 rad/s el",
+  "unix_time": 1790908293
+}

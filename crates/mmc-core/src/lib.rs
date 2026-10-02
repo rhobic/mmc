@@ -9,6 +9,8 @@
 //! amplitude-invariant Clarke transform.
 
 #![no_std]
+#[cfg(test)]
+extern crate std;
 
 // Always available: the arithmetic and building blocks both control
 // methodologies are made of.
@@ -16,6 +18,7 @@ pub mod angle;
 pub mod hall;
 pub mod math;
 pub mod pi;
+pub mod position;
 pub mod transforms;
 pub mod tuning;
 

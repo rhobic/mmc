@@ -152,6 +152,12 @@ const DEFAULTS: [f32; param::COUNT] = [
     0.0,                        // HALL_OFFSET (unused: no halls)
     1.0,                        // HALL_DIR
     0.0,                        // HALL_HYST
+    0.0,                        // POS_KP (no halls: position mode unavailable)
+    0.0,                        // POS_KI
+    0.0,                        // POS_KD
+    200.0,                      // POS_VMAX
+    1.75e-6,                    // INERTIA (motor 1 fit)
+    0.0,                        // I_FRIC
 ];
 
 /// f32 capacity of the probe burst buffer: the saliency sweep's full
@@ -163,7 +169,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardG474,
-        fw_version: 20,
+        fw_version: 22,
         name: "mmc-g474",
         defaults: DEFAULTS,
     },

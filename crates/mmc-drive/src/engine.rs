@@ -5,11 +5,12 @@ use core::sync::atomic::Ordering;
 
 use mmc_core::angle::AngleEstimator;
 use mmc_core::foc::{Decoupling, Foc};
-use mmc_core::hall::{HallAngle, HallMap, HallSpeed};
+use mmc_core::hall::{HallAngle, HallMap, HallSpeed, HallTracker};
 use mmc_core::inverter::DeadtimeModel;
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
 use mmc_core::pi::{Pi, PiGains};
+use mmc_core::position::TrapRef;
 use mmc_core::probe;
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
 use mmc_core::sixstep::{self, Ramp, RampCfg, ZcCfg, ZcEvent, ZeroCross};
@@ -100,6 +101,16 @@ pub struct Engine {
     /// The command before that (still on the winding for the first
     /// `pwm_latency` of the period).
     v_applied2: AlphaBeta,
+    // Hall position mode: measured position (electrical, unwrapped from the
+    // hall angle), the trapezoidal reference, and the PID integrator.
+    tracker: Option<HallTracker>,
+    pos_origin: Option<f32>,
+    pos_meas: f32,
+    pos_ref: TrapRef,
+    pos_int: f32,
+    /// Measured i_q of the previous tick: the torque the tracker's model
+    /// integrates.
+    iq_last: f32,
 }
 
 impl Default for Engine {
@@ -146,6 +157,12 @@ impl Engine {
                 alpha: 0.0,
                 beta: 0.0,
             },
+            tracker: None,
+            pos_origin: None,
+            pos_meas: 0.0,
+            pos_ref: TrapRef { pos: 0.0, vel: 0.0 },
+            pos_int: 0.0,
+            iq_last: 0.0,
         }
     }
 
@@ -371,7 +388,7 @@ impl Engine {
                     duties = svpwm(v_ab, vbus);
                     v_ab
                 }
-            } else if self.mode == mode::HALL_FOC || self.mode == mode::SS_HALL {
+            } else if matches!(self.mode, mode::HALL_FOC | mode::SS_HALL | mode::HALL_POS) {
                 // Hall-sensored: the calibrated halls own the angle. A short
                 // run of invalid states (a glitch) holds the last estimate;
                 // a longer one is a lost sensor and trips.
@@ -390,6 +407,74 @@ impl Engine {
                 }
                 if self.mode == mode::OFF {
                     AlphaBeta::default()
+                } else if self.mode == mode::HALL_POS {
+                    // Position loop on the hall tracker: every hall edge is
+                    // an exact position update, and between edges the
+                    // rotor is predicted from the commanded torque and the
+                    // inertia — so the D term has a velocity where the
+                    // edge-timed speed is stale or zero. Without it this
+                    // loop limit-cycled ±10° mechanical in the sim. The
+                    // target arrives in mechanical radians.
+                    let pp = p(param::POLE_PAIRS).max(1.0);
+                    if let Some((pos, w)) =
+                        hall_state.and_then(|h| self.tracker.as_mut()?.update(h, self.iq_last, dt))
+                    {
+                        // Positions are relative to where the drive started.
+                        if self.pos_origin.is_none() {
+                            self.pos_origin = Some(pos);
+                        }
+                        self.pos_meas = pos - self.pos_origin.unwrap_or(0.0);
+                        self.omega = w;
+                    }
+                    let measured = self.pos_meas;
+                    let target = omega_target * pp;
+                    self.pos_ref
+                        .update(target, p(param::POS_VMAX), p(param::OMEGA_ACCEL), dt);
+                    let err = self.pos_ref.pos - measured;
+                    let auth = amp_target.abs().clamp(0.05, p(param::IQ_LIMIT));
+                    let ki = p(param::POS_KI);
+                    // Integrate only outside half a hall sector of the
+                    // reference: inside it the position is not measurable,
+                    // and integrating there against stiction (motor 3 breaks
+                    // away at ~0.22 A but runs at ~0.11 A) is what made the
+                    // hold hunt ±27°. Frozen, not cleared: it keeps whatever
+                    // holding torque it built.
+                    //
+                    // And only while the reference holds still: during a move
+                    // P + D + the friction feedforward carry it, and
+                    // integrating the move's tracking lag wound up into ~20°
+                    // overshoots and, on a full turn, a stick-slip cycle
+                    // larger than a sector.
+                    let band = core::f32::consts::FRAC_PI_6 + p(param::HALL_HYST);
+                    if self.pos_ref.vel == 0.0 && err.abs() > band {
+                        self.pos_int += err * dt;
+                    }
+                    if ki > 0.0 {
+                        self.pos_int = self.pos_int.clamp(-auth / ki, auth / ki);
+                    }
+                    // Running friction fed forward while the reference moves.
+                    let fric = if self.pos_ref.vel.abs() > 1e-3 {
+                        p(param::I_FRIC) * self.pos_ref.vel.signum()
+                    } else {
+                        0.0
+                    };
+                    iq_ref = (p(param::POS_KP) * err
+                        + ki * self.pos_int
+                        + p(param::POS_KD) * (self.pos_ref.vel - self.omega)
+                        + fric)
+                        .clamp(-auth, auth);
+                    let out = self.foc.as_mut().unwrap().step(
+                        i_abc,
+                        self.theta,
+                        self.omega,
+                        Dq { d: 0.0, q: iq_ref },
+                        vbus,
+                        dt,
+                    );
+                    duties = out.duties;
+                    v_dq = out.v_dq;
+                    i_dq = out.i_dq;
+                    out.v_ab
                 } else if self.mode == mode::HALL_FOC {
                     // Speed loop on the hall speed, FOC on the hall angle:
                     // the closed-loop half of the sensorless stack, without
@@ -649,6 +734,17 @@ impl Engine {
                 0.0
             },
         );
+        let pp = p(param::POLE_PAIRS).max(1.0);
+        let in_pos = self.mode == mode::HALL_POS;
+        put(
+            channel::POS_M,
+            if in_pos { self.pos_meas / pp } else { 0.0 },
+        );
+        self.iq_last = i_dq.q;
+        put(
+            channel::POS_REF,
+            if in_pos { self.pos_ref.pos / pp } else { 0.0 },
+        );
         put(channel::HALL, hall_state.unwrap_or(0) as f32);
         put(channel::OMEGA_HALL, self.hall.omega());
         sh.telem_seq.store(seq.wrapping_add(2), Ordering::Release);
@@ -858,6 +954,34 @@ impl Engine {
             ));
             self.omega_ref_cur = handoff * dir;
             self.sl_preload = i_start * dir;
+        } else if mode == mode::HALL_POS {
+            self.foc = Some(Foc::with_feedforward(
+                gains,
+                Decoupling {
+                    ld: ls,
+                    lq: ls,
+                    flux: p(param::FLUX),
+                },
+            ));
+            self.seq = None;
+            self.speed = None;
+            self.sl_preload = 0.0;
+            // Electrical acceleration per amp: 1.5·p²·ψ / J.
+            let pp = p(param::POLE_PAIRS).max(1.0);
+            let g = 1.5 * pp * pp * p(param::FLUX) / p(param::INERTIA);
+            self.tracker = Some(HallTracker::new(
+                HallMap {
+                    offset: p(param::HALL_OFFSET),
+                    dir: if p(param::HALL_DIR) < 0.0 { -1.0 } else { 1.0 },
+                    hyst: p(param::HALL_HYST),
+                },
+                g,
+            ));
+            self.pos_origin = None;
+            self.pos_meas = 0.0;
+            self.pos_ref = TrapRef::new(0.0);
+            self.pos_int = 0.0;
+            self.iq_last = 0.0;
         } else if mode == mode::HALL_FOC {
             // Same feedforward FOC and speed loop as sensorless, with the
             // amplitude of the command as the i_q authority (under

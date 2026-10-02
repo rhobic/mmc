@@ -7,7 +7,7 @@ use crate::{cobs, crc::crc16};
 pub const MAX_PAYLOAD: usize = 8 + MAX_CHANNELS * 4;
 
 /// Cap on simultaneously streamed channels (mask bits 0..24).
-pub const MAX_CHANNELS: usize = 24;
+pub const MAX_CHANNELS: usize = 26;
 
 mod ty {
     pub const PING: u8 = 0x01;
@@ -111,7 +111,21 @@ pub mod param {
     /// midpoint each edge fires in the direction of travel. Measured against
     /// the flux observer at speed (`tools/hall_ref.py`); 0 until then.
     pub const HALL_HYST: u8 = 17;
-    pub const COUNT: usize = 18;
+    /// Hall position loop gains: i_q [A] per radian *electrical* of position
+    /// error, its integral, and per rad/s el of velocity error.
+    pub const POS_KP: u8 = 18;
+    pub const POS_KI: u8 = 19;
+    pub const POS_KD: u8 = 20;
+    /// Cruise speed of the position reference [rad/s electrical].
+    pub const POS_VMAX: u8 = 21;
+    /// Rotor inertia [kg·m²]: the position mode's hall tracker predicts
+    /// the rotor between hall edges from the commanded torque and this.
+    pub const INERTIA: u8 = 22;
+    /// Running (Coulomb) friction as q-axis current [A]: fed forward with
+    /// the sign of the position reference's velocity, so the position loop
+    /// does not have to wind up an integrator to keep the rotor moving.
+    pub const I_FRIC: u8 = 23;
+    pub const COUNT: usize = 24;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -131,6 +145,12 @@ pub mod param {
         "hall_offset",
         "hall_dir",
         "hall_hyst",
+        "pos_kp",
+        "pos_ki",
+        "pos_kd",
+        "pos_vmax",
+        "inertia",
+        "i_fric",
     ];
 }
 
@@ -204,6 +224,14 @@ pub enum DriveMode {
     /// directions, a duty→speed loop (`ss_kp`/`ss_ki`) toward `omega_e`.
     /// `duty` is the duty ceiling. Wire code 8.
     SixStepHall { duty: f32, omega_e: f32 },
+    /// Hall-sensored position control: move to `theta_m` [rad, mechanical,
+    /// relative to the rotor position when the mode started] on a
+    /// trapezoidal reference (`omega_accel`, `pos_vmax`), PID (`pos_kp`/
+    /// `pos_ki`/`pos_kd`) to i_q, FOC on the hall angle. `amps` is the i_q
+    /// authority. Retargetable live; a far target at a low `pos_vmax` is a
+    /// slow constant-speed move, which the speed loop cannot do on halls.
+    /// Wire code 9.
+    HallPosition { amps: f32, theta_m: f32 },
 }
 
 impl DriveMode {
@@ -220,6 +248,7 @@ impl DriveMode {
             } => (6, duty, omega_handoff),
             DriveMode::HallFoc { amps, omega_e } => (7, amps, omega_e),
             DriveMode::SixStepHall { duty, omega_e } => (8, duty, omega_e),
+            DriveMode::HallPosition { amps, theta_m } => (9, amps, theta_m),
         }
     }
 
@@ -239,6 +268,10 @@ impl DriveMode {
             }),
             7 => Ok(DriveMode::HallFoc { amps: amp, omega_e }),
             8 => Ok(DriveMode::SixStepHall { duty: amp, omega_e }),
+            9 => Ok(DriveMode::HallPosition {
+                amps: amp,
+                theta_m: omega_e,
+            }),
             _ => Err(FrameError::Malformed),
         }
     }
@@ -826,6 +859,10 @@ mod tests {
         round_trip(Message::SetDrive(DriveMode::SixStepHall {
             duty: 0.3,
             omega_e: 250.0,
+        }));
+        round_trip(Message::SetDrive(DriveMode::HallPosition {
+            amps: 1.0,
+            theta_m: -1.5,
         }));
         round_trip(Message::RunTest {
             kind: test::RL_STEP,

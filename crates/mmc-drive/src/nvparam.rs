@@ -21,7 +21,10 @@ const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
 /// consequence: re-apply and re-persist after flashing across it.
 ///
 /// v4 (2026-10-02): added `hall_hyst`, 17 → 18 params. Same again.
-const VERSION: u32 = 4;
+///
+/// v5 (2026-10-02): added the hall position loop (`pos_kp`, `pos_ki`,
+/// `pos_kd`, `pos_vmax`), `inertia` and `i_fric`, 18 → 24 params.
+const VERSION: u32 = 5;
 const HDR: usize = 2; // magic + version
 const CRC_IDX: usize = HDR + param::COUNT;
 const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, round up to even

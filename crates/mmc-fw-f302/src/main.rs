@@ -137,7 +137,15 @@ const DEFAULTS: [f32; param::COUNT] = [
     0.3,                        // I_THRESH
     -1.0775,                    // HALL_OFFSET (motor 3, hall_cal.py)
     1.0,                        // HALL_DIR
-    0.077,                      // HALL_HYST (motor 3, hall_ref.py vs observer)
+    0.06,                       // HALL_HYST (motor 3, hall_ref.py vs observer)
+    // Position loop for motor 3: p·kt/J ≈ 1.1e5 rad/s² per A (electrical),
+    // so ~50 rad/s bandwidth is kp = 50²/1.1e5 and kd = 2·0.9·50/1.1e5.
+    0.022,  // POS_KP [A/rad el]
+    0.2,    // POS_KI
+    8e-4,   // POS_KD [A/(rad/s el)]
+    200.0,  // POS_VMAX [rad/s el]
+    4.4e-6, // INERTIA [kg·m²] (maxon EC-i 40 datasheet)
+    0.11,   // I_FRIC [A] (motor 3: steady i_q in hall FOC)
 ];
 
 /// Probe burst capacity [f32s]: 8 KB of the 16 KB RAM. Enough for the R/L
@@ -150,7 +158,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardF302,
-        fw_version: 9,
+        fw_version: 13,
         name: "mmc-f302",
         defaults: DEFAULTS,
     },

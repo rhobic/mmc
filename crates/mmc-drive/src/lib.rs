@@ -72,6 +72,7 @@ pub(crate) mod mode {
     pub const SS_SENSORLESS: u8 = 6;
     pub const HALL_FOC: u8 = 7;
     pub const SS_HALL: u8 = 8;
+    pub const HALL_POS: u8 = 9;
 }
 
 /// Open-loop voltage ceiling [V] (also the R/L probe's clamp).
@@ -140,6 +141,12 @@ impl DriveConfig {
             // Only the sign is used; a calibration writes ±1.
             param::HALL_DIR => (-1.0, 1.0),
             param::HALL_HYST => (0.0, 0.3),
+            param::POS_KP => (0.0, 1.0),
+            param::POS_KI => (0.0, 20.0),
+            param::POS_KD => (0.0, 0.05),
+            param::POS_VMAX => (0.1, OMEGA_E_MAX),
+            param::INERTIA => (1e-8, 1e-2),
+            param::I_FRIC => (0.0, 0.5 * self.spec.i_trip),
             _ => return None,
         })
     }
@@ -384,8 +391,11 @@ impl<const N: usize> Shared<N> {
                     } => (mode::SS_SENSORLESS, duty, omega_handoff),
                     DriveMode::HallFoc { amps, omega_e } => (mode::HALL_FOC, amps, omega_e),
                     DriveMode::SixStepHall { duty, omega_e } => (mode::SS_HALL, duty, omega_e),
+                    DriveMode::HallPosition { amps, theta_m } => (mode::HALL_POS, amps, theta_m),
                 };
-                if matches!(m, mode::HALL_FOC | mode::SS_HALL) && !self.cfg.spec.has_halls {
+                if matches!(m, mode::HALL_FOC | mode::SS_HALL | mode::HALL_POS)
+                    && !self.cfg.spec.has_halls
+                {
                     return nak(1); // this board has no hall inputs
                 }
                 if m != mode::OFF {

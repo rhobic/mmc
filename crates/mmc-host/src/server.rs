@@ -596,9 +596,16 @@ fn default_params(cfg: &ServeCfg) -> [f32; param::COUNT] {
         // Compensation off until the rig is measured; see param::V_DEAD.
         0.0,
         0.5,
-        // Hall map: stored for round-trips; the TCP sim has no halls.
+        // Hall map and position loop: stored for round-trips; the TCP sim
+        // has no halls.
         0.0,
         1.0,
+        0.0,
+        0.02,
+        0.2,
+        9e-4,
+        200.0,
+        params.inertia,
         0.0,
     ]
 }
@@ -724,7 +731,8 @@ fn handle(
         Message::SetDrive(DriveMode::SixStepForced { .. })
         | Message::SetDrive(DriveMode::SixStepSensorless { .. })
         | Message::SetDrive(DriveMode::HallFoc { .. })
-        | Message::SetDrive(DriveMode::SixStepHall { .. }) => {
+        | Message::SetDrive(DriveMode::SixStepHall { .. })
+        | Message::SetDrive(DriveMode::HallPosition { .. }) => {
             // The virtual motor is a dq average-value model: it has no
             // floating terminal and no trapezoidal EMF, so it cannot honestly
             // run six-step. NAK until the phase-domain model lands, rather
@@ -746,7 +754,8 @@ fn handle(
                 DriveMode::SixStepForced { .. }
                 | DriveMode::SixStepSensorless { .. }
                 | DriveMode::HallFoc { .. }
-                | DriveMode::SixStepHall { .. } => {
+                | DriveMode::SixStepHall { .. }
+                | DriveMode::HallPosition { .. } => {
                     unreachable!("handled above")
                 }
             };
@@ -901,6 +910,12 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
         param::HALL_OFFSET => (-core::f32::consts::PI, core::f32::consts::PI),
         param::HALL_DIR => (-1.0, 1.0),
         param::HALL_HYST => (0.0, 0.3),
+        param::POS_KP => (0.0, 1.0),
+        param::POS_KI => (0.0, 20.0),
+        param::POS_KD => (0.0, 0.05),
+        param::POS_VMAX => (0.1, 2000.0),
+        param::INERTIA => (1e-8, 1e-2),
+        param::I_FRIC => (0.0, 1.0),
         _ => return None,
     })
 }

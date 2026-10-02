@@ -26,6 +26,8 @@ struct SimBoard {
     dt_plant: f32,
     /// Hall sensors unplugged: every read is the invalid all-high state.
     halls_dead: bool,
+    /// Mechanical angle [rad], unwrapped (the plant's own wraps at ±π).
+    theta_m_total: f32,
 }
 
 impl SimBoard {
@@ -36,6 +38,7 @@ impl SimBoard {
             enables: 0,
             dt_plant: 1.0 / (ctrl_hz as f32 * SUBSTEPS as f32),
             halls_dead: false,
+            theta_m_total: 0.0,
         }
     }
 
@@ -66,6 +69,7 @@ impl SimBoard {
         };
         for _ in 0..SUBSTEPS {
             self.motor.step(v_ab, 0.0, self.dt_plant);
+            self.theta_m_total += self.motor.omega_m * self.dt_plant;
         }
     }
 }
@@ -144,6 +148,12 @@ fn config(ctrl_hz: u32, motor: &PmsmParams) -> DriveConfig {
     defaults[param::I_THRESH as usize] = 0.5;
     defaults[param::HALL_OFFSET as usize] = 0.0;
     defaults[param::HALL_DIR as usize] = 1.0;
+    // small_bldc: p·kt/J = 7·0.084/1e-5 ≈ 5.9e4 rad/s² per A → ~35 rad/s.
+    defaults[param::POS_KP as usize] = 0.02;
+    defaults[param::POS_KI as usize] = 0.1;
+    defaults[param::POS_KD as usize] = 6e-4;
+    defaults[param::POS_VMAX as usize] = 200.0;
+    defaults[param::INERTIA as usize] = motor.inertia;
     DriveConfig {
         spec: BoardSpec {
             ctrl_hz,
@@ -502,4 +512,65 @@ fn switching_modes_while_running_rebuilds_the_drive() {
         rig.run(0.5);
         assert_eq!(rig.sh.state(), ST_RUN, "after switching to {m:?}");
     }
+}
+
+#[test]
+fn hall_position_moves_and_holds_both_ways() {
+    for hz in RATES {
+        for target_deg in [90.0f32, -360.0] {
+            let mut rig = Rig::new(hz);
+            let start = rig.board.theta_m_total;
+            let ack = rig.send(&Message::SetDrive(DriveMode::HallPosition {
+                amps: 1.0,
+                theta_m: target_deg.to_radians(),
+            }));
+            assert!(matches!(ack, Message::Ack { .. }), "{ack:?}");
+            rig.run(3.0);
+            assert_eq!(rig.sh.state(), ST_RUN);
+            let moved = (rig.board.theta_m_total - start).to_degrees();
+            // Hall resolution on 7 pole pairs is 360/42 = 8.6° mechanical.
+            assert!(
+                (moved - target_deg).abs() < 8.6,
+                "{hz} Hz: moved {moved}° for {target_deg}°"
+            );
+            let reported = rig.telem(channel::POS_M).to_degrees();
+            assert!(
+                (reported - moved).abs() < 8.6,
+                "reported {reported}° vs {moved}°"
+            );
+            // Holding: nothing inside a hall sector is measurable, and the
+            // commutation angle at rest is the sector centre (≤30° el off),
+            // so this frictionless rotor dithers about one sector (8.6°
+            // mechanical on 7 pole pairs). The real motor's friction holds it
+            // tighter (session 30c: holds within ±4.3°).
+            let mut worst = 0.0f32;
+            for _ in 0..20 {
+                rig.run(0.05);
+                worst =
+                    worst.max(((rig.board.theta_m_total - start).to_degrees() - target_deg).abs());
+            }
+            assert!(worst < 12.0, "{hz} Hz {target_deg}°: hold wandered {worst}°");
+        }
+    }
+}
+
+#[test]
+fn hall_position_tracks_a_slow_move() {
+    // A far target at a slow cruise speed is the low-speed mode: here 5 rad/s
+    // el, which the hall speed loop cannot hold.
+    let mut rig = Rig::new(10_000);
+    rig.send(&Message::SetParam {
+        id: param::POS_VMAX,
+        value: 5.0,
+    });
+    rig.send(&Message::SetDrive(DriveMode::HallPosition {
+        amps: 1.0,
+        theta_m: 100.0,
+    }));
+    rig.run(2.0);
+    let a = rig.board.theta_m_total * 7.0;
+    rig.run(4.0);
+    let b = rig.board.theta_m_total * 7.0;
+    let speed = (b - a) / 4.0;
+    assert!((speed - 5.0).abs() < 0.5, "average {speed} rad/s el for 5");
 }
