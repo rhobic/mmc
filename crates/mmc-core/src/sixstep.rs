@@ -190,6 +190,16 @@ pub struct ZeroCross {
     interval: f32,
     /// Time from the accepted crossing to the commutation it schedules.
     pending: Option<f32>,
+    /// Time that actually elapsed from the last accepted crossing to the
+    /// commutation it scheduled — the scheduled half-interval rounded up to
+    /// a whole tick. 0 when the last commutation was not crossing-timed.
+    pending_elapsed: f32,
+    last_delay: f32,
+    /// The last six measured crossing intervals (one electrical revolution)
+    /// and how many are valid.
+    revolution: [f32; SECTORS],
+    rev_next: usize,
+    rev_count: usize,
     last_sign: bool,
     good: u32,
     locked: bool,
@@ -202,6 +212,11 @@ impl ZeroCross {
             since_comm: 0.0,
             interval: 0.0,
             pending: None,
+            pending_elapsed: 0.0,
+            last_delay: 0.0,
+            revolution: [0.0; SECTORS],
+            rev_next: 0,
+            rev_count: 0,
             last_sign: false,
             good: 0,
             locked: false,
@@ -214,12 +229,23 @@ impl ZeroCross {
         self.locked
     }
 
-    /// Electrical speed implied by the crossing interval [rad/s].
+    /// Electrical speed implied by the crossing intervals [rad/s].
     ///
-    /// One interval is exactly 60°, so `ω = (π/3)/T`. This is a *measurement*,
-    /// not an estimate from a model — its noise is the timing jitter of the
-    /// crossings and nothing else.
+    /// Over a full electrical revolution once six intervals are in: `2π`
+    /// over their sum. A single interval is nominally 60°, but rising and
+    /// falling crossings are rarely detected with the same delay, so
+    /// consecutive intervals alternate long/short; their sum is still exact,
+    /// while `(π/3)/T` averaged over alternating `T` reads high. On motor 3
+    /// at 600 rad/s el that alternation was worth +3% against the halls
+    /// (session 30b). Until a revolution is in: `(π/3)/T` on the running
+    /// interval. This is a *measurement*, not a model estimate.
     pub fn omega_e(&self) -> f32 {
+        if self.rev_count == SECTORS {
+            let sum: f32 = self.revolution.iter().sum();
+            if sum > 1e-6 {
+                return core::f32::consts::TAU / sum;
+            }
+        }
         if self.interval > 1e-6 {
             SECTOR_RAD / self.interval
         } else {
@@ -247,9 +273,12 @@ impl ZeroCross {
         // noise retrigger the same edge.
         if let Some(remaining) = self.pending.as_mut() {
             *remaining -= dt;
+            self.pending_elapsed += dt;
             if *remaining <= 0.0 {
                 self.pending = None;
                 self.commutated();
+                // After `commutated`, which clears it for the untimed paths.
+                self.last_delay = self.pending_elapsed;
                 return ZcEvent::Commutate;
             }
             return ZcEvent::None;
@@ -265,6 +294,7 @@ impl ZeroCross {
         if self.interval > 1e-6 && self.since_comm > self.interval * self.cfg.timeout_factor {
             self.good = 0;
             self.locked = false;
+            self.rev_count = 0;
             self.commutated();
             return ZcEvent::Commutate;
         }
@@ -276,17 +306,32 @@ impl ZeroCross {
             return ZcEvent::None;
         }
 
-        // Interval between crossings is one sector; the previous crossing sat
-        // 30° before the last commutation, so add that half-sector back.
-        let measured = self.since_comm + self.interval * 0.5;
+        // Interval between crossings is one sector: time since the last
+        // commutation plus the time from the previous crossing to that
+        // commutation. Use the time that commutation *actually* took, not
+        // the half-interval it was scheduled for — it can only land on a
+        // tick, so it runs late by half a tick on average, and assuming the
+        // schedule made every interval short by that much: +2.9% speed at
+        // 600 rad/s el on a 10 kHz loop, seen against the halls on motor 3
+        // (session 30b).
+        let since_prev = if self.last_delay > 0.0 {
+            self.last_delay
+        } else {
+            self.interval * 0.5
+        };
+        let measured = self.since_comm + since_prev;
         let plausible = self.interval <= 1e-6
             || (measured < self.interval * self.cfg.interval_tol
                 && measured > self.interval / self.cfg.interval_tol);
         if !plausible {
             self.good = 0;
             self.locked = false;
+            self.rev_count = 0;
             return ZcEvent::None;
         }
+        self.revolution[self.rev_next] = measured;
+        self.rev_next = (self.rev_next + 1) % SECTORS;
+        self.rev_count = (self.rev_count + 1).min(SECTORS);
 
         self.interval = if self.interval <= 1e-6 {
             measured
@@ -301,6 +346,7 @@ impl ZeroCross {
         }
         // Commutate 30° after the crossing = half a sector interval.
         self.pending = Some(self.interval * 0.5);
+        self.pending_elapsed = 0.0;
         ZcEvent::Detected
     }
 
@@ -308,6 +354,7 @@ impl ZeroCross {
     /// blanking restarts.
     pub fn commutated(&mut self) {
         self.since_comm = 0.0;
+        self.last_delay = 0.0;
     }
 }
 
@@ -522,6 +569,75 @@ mod tests {
             "omega {} vs {omega}",
             zc.omega_e()
         );
+    }
+
+    /// The crossing-timed speed must be unbiased even when the tick is coarse
+    /// against the sector time: a commutation lands on the tick after its
+    /// scheduled time, and assuming the schedule biases speed high.
+    #[test]
+    fn detector_speed_is_unbiased_at_a_coarse_tick() {
+        let dt = 100e-6;
+        for omega in [600.0f32, 900.0] {
+            let mut zc = ZeroCross::new(ZcCfg {
+                blank: 30e-6,
+                ..Default::default()
+            });
+            zc.seed(omega);
+            let mut sector = 1usize;
+            let mut theta = SECTOR0_CENTRE + sector as f32 * SECTOR_RAD - SECTOR_RAD * 0.5;
+            let (mut sum, mut n) = (0.0f32, 0);
+            for k in 0..40_000 {
+                theta = wrap_angle(theta + omega * dt);
+                let v = 9.0 + shape(floating_phase(sector), theta) * omega * 0.006;
+                match zc.update(sector, v, 9.0, dt) {
+                    ZcEvent::Commutate => sector = (sector + 1) % SECTORS,
+                    ZcEvent::Detected if k > 5_000 => {
+                        sum += zc.omega_e();
+                        n += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(zc.locked(), "{omega}: never locked");
+            let mean = sum / n as f32;
+            assert!(
+                (mean - omega).abs() < 0.01 * omega,
+                "{omega}: mean measured speed {mean} ({n} crossings)"
+            );
+        }
+    }
+
+    /// Rising and falling crossings detected with different delays make the
+    /// intervals alternate; the speed must still come out right.
+    #[test]
+    fn detector_speed_ignores_rising_falling_asymmetry() {
+        let dt = 50e-6;
+        let omega = 600.0f32;
+        let mut zc = ZeroCross::new(ZcCfg {
+            blank: 30e-6,
+            ..Default::default()
+        });
+        zc.seed(omega);
+        let mut sector = 1usize;
+        let mut theta = SECTOR0_CENTRE + sector as f32 * SECTOR_RAD - SECTOR_RAD * 0.5;
+        let (mut sum, mut n) = (0.0f32, 0);
+        for k in 0..40_000 {
+            theta = wrap_angle(theta + omega * dt);
+            // A reference error that shifts rising crossings one way and
+            // falling ones the other.
+            let v = 9.0 + shape(floating_phase(sector), theta) * omega * 0.006;
+            let v_ref = 9.0 + 0.6;
+            match zc.update(sector, v, v_ref, dt) {
+                ZcEvent::Commutate => sector = (sector + 1) % SECTORS,
+                ZcEvent::Detected if k > 5_000 => {
+                    sum += zc.omega_e();
+                    n += 1;
+                }
+                _ => {}
+            }
+        }
+        let mean = sum / n as f32;
+        assert!((mean - omega).abs() < 0.01 * omega, "mean {mean}");
     }
 
     /// Flyback right after a commutation must not be mistaken for a crossing.
