@@ -139,6 +139,7 @@ impl DriveConfig {
             param::HALL_OFFSET => (-core::f32::consts::PI, core::f32::consts::PI),
             // Only the sign is used; a calibration writes ±1.
             param::HALL_DIR => (-1.0, 1.0),
+            param::HALL_HYST => (0.0, 0.3),
             _ => return None,
         })
     }

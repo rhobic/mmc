@@ -107,7 +107,11 @@ pub mod param {
     /// both from two slow open-loop runs; the hall drive modes need them.
     pub const HALL_OFFSET: u8 = 15;
     pub const HALL_DIR: u8 = 16;
-    pub const COUNT: usize = 17;
+    /// Hall switching hysteresis [rad electrical]: how far past its
+    /// midpoint each edge fires in the direction of travel. Measured against
+    /// the flux observer at speed (`tools/hall_ref.py`); 0 until then.
+    pub const HALL_HYST: u8 = 17;
+    pub const COUNT: usize = 18;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -126,6 +130,7 @@ pub mod param {
         "i_thresh",
         "hall_offset",
         "hall_dir",
+        "hall_hyst",
     ];
 }
 

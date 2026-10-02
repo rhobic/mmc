@@ -79,6 +79,17 @@ pub struct BoardSpec {
     /// The board reads hall sensors ([`MotorBoard::hall_state`] returns
     /// `Some`), so the hall-sensored drive modes are available.
     pub has_halls: bool,
+    /// How late a duty command takes effect, as a fraction of a control
+    /// tick past the sample it was computed from: 0 if it applies at once,
+    /// 0.5 if the ISR finishes after the PWM's next update point and the
+    /// compare values load half a tick later. The flux observer integrates
+    /// the voltage actually on the winding, so it needs this.
+    pub pwm_latency: f32,
+    /// Largest terminal voltage [`MotorBoard::terminal_volts`] can report
+    /// (the BEMF divider's ADC full scale) [V]. A driven-high terminal on a
+    /// bus near or above it reads clipped; the drive then substitutes the
+    /// bus voltage. `f32::INFINITY` if it cannot clip.
+    pub terminal_full_scale: f32,
 }
 
 /// One synchronous set of conversions, taken at the PWM instant where the

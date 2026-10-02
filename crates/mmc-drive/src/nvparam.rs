@@ -19,7 +19,9 @@ const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
 ///
 /// v3 (2026-10-01): added `hall_offset`/`hall_dir`, 15 → 17 params. Same
 /// consequence: re-apply and re-persist after flashing across it.
-const VERSION: u32 = 3;
+///
+/// v4 (2026-10-02): added `hall_hyst`, 17 → 18 params. Same again.
+const VERSION: u32 = 4;
 const HDR: usize = 2; // magic + version
 const CRC_IDX: usize = HDR + param::COUNT;
 const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, round up to even

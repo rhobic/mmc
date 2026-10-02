@@ -28,10 +28,15 @@ pub fn index_of(state: u8) -> Option<usize> {
 /// Electrical angle at the *center* of each [`SEQUENCE`] step — the hall
 /// calibration. `offset` is the electrical angle of the center of step 0;
 /// `dir` is +1 when [`SEQUENCE`] order is positive electrical rotation.
+/// `hyst` [rad] is the sensors' switching hysteresis: each edge fires that
+/// far past its magnetic midpoint *in the direction of travel*. A slow
+/// forward/reverse calibration cannot see it (it lands in the averaged-out
+/// lag); a speed sweep against the flux observer can (`tools/hall_ref.py`).
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct HallMap {
     pub offset: f32,
     pub dir: f32,
+    pub hyst: f32,
 }
 
 impl HallMap {
@@ -185,12 +190,17 @@ impl HallAngle {
             self.have = true;
         } else if edge {
             // Entered this sector across the boundary on the side we came
-            // from: the trailing edge in the direction of travel.
+            // from: the trailing edge in the direction of travel, plus the
+            // hysteresis the sensor switched late by, plus half a sample —
+            // the edge happened somewhere in the last period, on average in
+            // its middle.
             let travel = self.speed.seq_dir() * self.map.dir;
             self.theta = if travel == 0.0 {
                 center
             } else {
-                wrap_angle(center - travel * half)
+                wrap_angle(
+                    center - travel * half + travel * self.map.hyst + 0.5 * self.omega() * dt,
+                )
             };
         } else if self.omega() == 0.0 {
             // No speed estimate (rest, or before two same-direction edges):
@@ -202,8 +212,10 @@ impl HallAngle {
         } else {
             self.theta = wrap_angle(self.theta + self.omega() * dt);
         }
-        // Never leave the sector the sensors say the rotor is in.
-        let d = wrap_angle(self.theta - center).clamp(-half, half);
+        // Never leave the sector the sensors say the rotor is in (widened by
+        // the hysteresis: the rotor really is that far past the boundary).
+        let lim = half + self.map.hyst.abs();
+        let d = wrap_angle(self.theta - center).clamp(-lim, lim);
         self.theta = wrap_angle(center + d);
         Some(self.theta)
     }
@@ -281,6 +293,7 @@ mod tests {
         let map = HallMap {
             offset: 1.0,
             dir: -1.0,
+            hyst: 0.0,
         };
         for &w in &[300.0f32, -300.0] {
             let mut est = HallAngle::new(map);
@@ -306,6 +319,7 @@ mod tests {
         let map = HallMap {
             offset: 0.0,
             dir: 1.0,
+            hyst: 0.0,
         };
         let mut est = HallAngle::new(map);
         for &theta in &[0.0f32, 1.0, 2.5, -2.0] {
@@ -319,10 +333,47 @@ mod tests {
     }
 
     #[test]
+    fn hysteresis_correction_cancels_late_switching() {
+        // Sensors that switch `h` late in the direction of travel: without
+        // the correction the estimate lags by ~h both ways; with it, not.
+        let h = 0.08f32;
+        let late = |theta: f32, dir: f32| ideal(theta - dir * h);
+        for &w in &[300.0f32, -300.0] {
+            for (hyst, expect_lag) in [(0.0f32, true), (h, false)] {
+                let map = HallMap {
+                    offset: 0.0,
+                    dir: 1.0,
+                    hyst,
+                };
+                let mut est = HallAngle::new(map);
+                let dt = 1e-4;
+                let mut theta = 0.0f32;
+                let mut sum = 0.0f32;
+                let mut n = 0;
+                for k in 0..20_000 {
+                    theta = wrap_angle(theta + w * dt);
+                    let a = est.update(late(theta, w.signum()), dt).unwrap();
+                    if k > 2000 {
+                        sum += wrap_angle(a - theta) * w.signum();
+                        n += 1;
+                    }
+                }
+                let lag = -sum / n as f32;
+                if expect_lag {
+                    assert!((lag - h).abs() < 0.03, "w {w}: uncorrected lag {lag}");
+                } else {
+                    assert!(lag.abs() < 0.03, "w {w}: corrected lag {lag}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn map_recovers_sector_centers() {
         let map = HallMap {
             offset: 0.0,
             dir: 1.0,
+            hyst: 0.0,
         };
         for k in 0..6 {
             let center = k as f32 * PI / 3.0;

@@ -28,7 +28,9 @@ pub const THETA_EST: u8 = 15;
 /// Sensorless observer estimate of the electrical velocity [rad/s].
 pub const OMEGA_EST: u8 = 16;
 /// Estimate minus reference angle, wrapped [rad]. Reference = sim truth on
-/// the simulator, the forced/applied angle on hardware.
+/// the simulator; on hardware the calibrated hall angle when the board has
+/// halls (in every drive mode — so a sensorless run is scored against the
+/// rotor, not against itself), else the forced/applied angle.
 pub const THETA_ERR: u8 = 17;
 /// Phase terminal voltages via the shield's BEMF divider network [V].
 /// With the stage Hi-Z (coasting) these are the pure back-EMFs — a direct

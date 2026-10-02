@@ -10,7 +10,7 @@ use mmc_core::inverter::DeadtimeModel;
 use mmc_core::math::wrap_angle;
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
-use mmc_core::transforms::{Abc, Dq};
+use mmc_core::transforms::{Abc, AlphaBeta, Dq};
 use mmc_core::tuning::{current_pi_gains, speed_pi_gains};
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
 
@@ -111,6 +111,8 @@ pub struct SensorlessSim {
     cfg: SensorlessRunCfg,
     foc: Foc,
     obs: FluxObserver,
+    /// Previous tick's voltage command (what the bridge applied).
+    v_applied: AlphaBeta,
     seq: Sequencer,
     speed: SpeedLoop,
     omega_ref_cur: f32,
@@ -137,6 +139,7 @@ impl SensorlessSim {
             rig,
             foc,
             obs: FluxObserver::new(FluxObserverCfg::new(p.rs, p.lq)),
+            v_applied: AlphaBeta::default(),
             seq: Sequencer::new(cfg.seq),
             speed: SpeedLoop::new(
                 speed_pi_gains(p.inertia, p.torque_constant(), p.pole_pairs, cfg.speed_bw),
@@ -202,7 +205,11 @@ impl SensorlessSim {
         self.rig.advance(dt);
 
         // Observer sees what the controller applied and measured.
-        self.obs.update(out.i_ab, out.v_ab, dt);
+        // The current just measured was driven by the previous command (the
+        // firmware's timing): integrating this tick's command would put the
+        // stator-flux estimate a tick ahead of the L·i it is corrected with.
+        let v_obs = core::mem::replace(&mut self.v_applied, out.v_ab);
+        self.obs.update(out.i_ab, v_obs, dt);
 
         let theta_est = self.obs.electrical_angle();
         Sample {

@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host profile",
+  "description": "Profiler dead-time input: locked-rotor DC voltage at omega_e = 0. v = R*i + v_dead*sign(i), so the intercept is the bridge's own drop.",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 601 frames."
+  ],
+  "order": 23,
+  "params": {
+    "divider": 20,
+    "drive": "OpenLoopVoltage { volts: 0.3274887, omega_e: 0.0 }",
+    "drive_step": null,
+    "duration_s": 1.2000000476837158,
+    "iq_A": null
+  },
+  "title": "Dead-time ladder: 0.327 V DC (up)",
+  "unix_time": 1790905596
+}

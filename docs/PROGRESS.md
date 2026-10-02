@@ -3,6 +3,103 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-02 — session 30b: sensorless cleaned up, with the halls as the reference
+
+Bench as session 30, but the **bus is now 18 V** (operator), which keeps the
+BEMF divider's driven-high terminal near its 18.3 V full scale instead of far
+past it. Merged `origin/main` first (Rust 1.99 clippy fixes, rust-version
+1.88, and its mode-switch rule — ported into `Engine::command`, with a sim
+test that switches through five modes without passing Off). Toolchain: Rust
+1.99; workspace and all three firmware crates clippy-clean.
+
+### The halls as a reference
+
+Hall FOC holds any speed ±200…±800 rad/s el to 0.2%, so the shadow
+observer can be scored against it (`tools/hall_ref_sweep.sh` +
+`tools/hall_ref.py`: steady hall-FOC runs both directions, observer − hall
+angle fitted as offset + sign(ω) step + ω·delay). Since this session
+`theta_err` *is* observer − hall in every mode on a board with halls, so a
+sensorless run is scored against the rotor rather than against itself.
+
+| step | relative delay | sign(ω) step | mean obs−hall, \|ω\| ≥ 200 |
+|---|---|---|---|
+| start (30 V) | 213 µs | 0.089 rad | 0.11–0.27 rad |
+| observer integrates the *previous* command | 131 µs | 0.077 | 0.08–0.19 |
+| + `pwm_latency` 0.5 tick, half-sample hall edge timing, `hall_hyst` | 47 µs | −0.017 | **≤ 0.04** |
+| 18 V bus | — | — | ≤ 0.05, spread halved (0.11 vs 0.2 rad std) |
+
+- **Observer voltage timing.** It integrated the command computed this
+  tick, which only reaches the winding from the next PWM update — a one-tick
+  lead. Fixed in the engine and both sim rigs. On hardware the compares
+  also load half a tick late (the F302's ~30 µs ISR finishes after the PWM
+  valley), now `BoardSpec::pwm_latency`, and the observer integrates the
+  blend of the last two commands that was actually on the winding.
+- **Hall timing.** An edge is seen on average half a sample late, and the
+  sensors switch late in the direction of travel — hysteresis that the
+  forward/reverse open-loop calibration had lumped into "rotor lag". New
+  param `hall_hyst` (nvparam **v4**), 0.06 rad on motor 3.
+- Observer floor: −20% speed error at 100 rad/s el on 30 V, −6% on 18 V
+  (dead time is a smaller share of ψω).
+
+### Sensorless FOC: the startup overcurrent was a blend bug
+
+Telemetry cut to 12 channels (~1.7 kHz) and scored against the halls showed
+the blend itself healthy for 30 ms — then **the drive angle jumped 3.5 rad in
+one frame**. The blend interpolates forced → observer by `α·wrap(θ̂ − θ_f)`.
+Once the blend turns the startup current into torque, this light rotor
+outruns the forced frame; the gap grew past π, `wrap` flipped its sign and the
+angle stepped by α·2π, reversing i_q. The sim's rotor was too heavy to ever
+outrun the ramp. `Sequencer` now tracks the gap unwrapped (test reproduces
+the old 2.2 rad step, passes with the fix). Handoff raised to 350 rad/s el,
+clear of the observer floor.
+
+**Result, motor 3 at 18 V** (`testresults/motor3-18v/`): **10/10 starts**
+(5 each direction), peak phase current 0.82–0.95 A, settling 600.0–600.4
+rad/s el with the observer 0.01–0.04 rad from the halls. Closed loop from
+**100 to 1200 rad/s el** (100: observer 5% low, 0.145 rad off — near its
+floor; 1200: 8.3 V of ~10.3 available). Speed tracks a 300 rad/s² reference
+within ±3 rad/s to ~950, one ±35 rad/s wobble before settling at 1200.
+
+Also added FOC angle advance `0.5 + pwm_latency` periods and bring the
+one-tick-old observer angle forward by ω·dt in closed loop. Neutral on motor
+3: the **±0.27 A i_d ripple at 1200 rad/s el is unchanged**, so it is not a
+timing artefact — most likely the motor's back-EMF harmonics (maxon EC
+motors are wound for block commutation) at 6ω = 7200 rad/s, far above the
+1000 rad/s current loop. Unconfirmed: telemetry aliases it.
+
+### Sensorless six-step: runs, and its speed is now right
+
+The live FOC → six-step handover (fw v15's) works on motor 3 at 18 V: FOC to
+600, hand over, lock. But the zero-cross speed it regulates read **5% high**
+against the halls. Three layers:
+
+1. *Not* the divider clipping (exactly 1/3 of terminal samples are full
+   scale — the driven-high one). Made the reference saturation-aware
+   anyway (`BoardSpec::terminal_full_scale`; a clipped v_hi becomes V_bus):
+   no change to the bias. Kept, as it is correct.
+2. The detector assumed each commutation landed exactly half an interval
+   after its crossing; it can only land on a tick, half a tick late on
+   average, so every interval measured short: +2.9% at 600 rad/s el on
+   10 kHz (test: old code reads 619.5 for 600). Now uses the time that
+   actually elapsed. → +3.3%.
+3. Rising and falling crossings are detected with different delays, so
+   intervals alternate long/short; `(π/3)/T` averaged over that reads high.
+   Speed now = 2π / (sum of the last six intervals). → **0.9953 of the hall
+   speed** — the halls' own +0.5% bias (uneven sectors) — and the six-step
+   speed noise fell from ±56 to **±3.8 rad/s**.
+
+(1 and 2 also applied to the G474 at 20 kHz — ~2% on motor 1; unverified
+there.)
+
+### State at the end
+
+F302 fw 9, motor 3 profile for 18 V (`testresults/motor3-18v/motor3_18v.json`:
+v_dead re-measured at 382 mV — it scales with the bus) applied **in RAM
+only**. Open: per-edge hall calibration (edges up to 7° off a comb drive the
+hall speed's ±40 rad/s jitter), the 1200 rad/s i_d ripple, a rising/falling
+detection asymmetry in six-step (now harmless to the speed, still a
+commutation-angle error), G474 port onto the HAL.
+
 ## 2026-10-01 — session 30: a second board — porting to a 72 MHz MCU and an L6230 shield
 
 **New bench:** an F302R8 dev board (Cortex-M4F, 72 MHz, 64 KB flash, 16 KB

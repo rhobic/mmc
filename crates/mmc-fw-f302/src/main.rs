@@ -107,6 +107,12 @@ const SPEC: BoardSpec = BoardSpec {
     r_path: 1.0,
     terminal_offset_max: (PWM_ARR / 2) as f32,
     has_halls: true,
+    // The ISR (~30 µs to the duty write) ends after the PWM valley that
+    // follows its trigger, so new compares load at the next peak: half a
+    // 100 µs tick late.
+    pwm_latency: 0.5,
+    // 3.3 V ADC full scale through the BEMF divider.
+    terminal_full_scale: 3.3 * BEMF_GAIN,
 };
 
 /// Parameter defaults: gentle placeholders for an unknown motor, except
@@ -131,6 +137,7 @@ const DEFAULTS: [f32; param::COUNT] = [
     0.3,                        // I_THRESH
     -1.0775,                    // HALL_OFFSET (motor 3, hall_cal.py)
     1.0,                        // HALL_DIR
+    0.077,                      // HALL_HYST (motor 3, hall_ref.py vs observer)
 ];
 
 /// Probe burst capacity [f32s]: 8 KB of the 16 KB RAM. Enough for the R/L
@@ -143,7 +150,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardF302,
-        fw_version: 2,
+        fw_version: 9,
         name: "mmc-f302",
         defaults: DEFAULTS,
     },

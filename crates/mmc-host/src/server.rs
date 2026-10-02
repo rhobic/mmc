@@ -15,7 +15,7 @@ use mmc_core::pi::PiGains;
 use mmc_core::probe;
 use mmc_core::sensorless::{Phase, Sequencer, SequencerCfg, SpeedLoop};
 use mmc_core::svpwm::svpwm;
-use mmc_core::transforms::{clarke, inverse_clarke, inverse_park, park, Abc, Dq};
+use mmc_core::transforms::{clarke, inverse_clarke, inverse_park, park, Abc, AlphaBeta, Dq};
 use mmc_core::tuning::{current_pi_gains, speed_pi_gains};
 use mmc_hal::{BusVoltageSense, CurrentSense, PwmOutput};
 use mmc_proto::{
@@ -118,6 +118,8 @@ struct SimControl {
     // forced-frame (1/2) + shared blocks
     foc: Foc,
     obs: FluxObserver,
+    /// Previous tick's voltage command (what the bridge applied).
+    v_applied: AlphaBeta,
     theta: f32,
     omega: f32,
     amp: f32,
@@ -169,6 +171,7 @@ impl SimControl {
                 },
             ),
             obs: FluxObserver::new(FluxObserverCfg::new(params.rs, params.lq)),
+            v_applied: AlphaBeta::default(),
             theta: 0.0,
             omega: 0.0,
             amp: 0.0,
@@ -288,6 +291,7 @@ impl SimControl {
         self.amp = 0.0;
         self.rebuild_foc();
         self.obs = FluxObserver::new(FluxObserverCfg::new(self.params.rs, self.params.lq));
+        self.v_applied = AlphaBeta::default();
         if mode == 3 {
             let dir = if omega < 0.0 { -1.0 } else { 1.0 };
             let i_start = amp.abs().clamp(0.1, self.iq_limit);
@@ -492,7 +496,11 @@ impl SimControl {
         };
         rig.set_duties(out.duties);
         rig.advance(dt);
-        self.obs.update(out.i_ab, out.v_ab, dt);
+        // The current just measured was driven by the previous command (the
+        // firmware's timing): integrating this tick's command would put the
+        // stator-flux estimate a tick ahead of the L·i it is corrected with.
+        let v_obs = core::mem::replace(&mut self.v_applied, out.v_ab);
+        self.obs.update(out.i_ab, v_obs, dt);
 
         // Stall detector, firmware-identical: in closed-loop sensorless a
         // stalled rotor leaves the observer confidently locked onto the L·i
@@ -591,6 +599,7 @@ fn default_params(cfg: &ServeCfg) -> [f32; param::COUNT] {
         // Hall map: stored for round-trips; the TCP sim has no halls.
         0.0,
         1.0,
+        0.0,
     ]
 }
 
@@ -891,6 +900,7 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
         param::I_THRESH => (0.01, 5.0),
         param::HALL_OFFSET => (-core::f32::consts::PI, core::f32::consts::PI),
         param::HALL_DIR => (-1.0, 1.0),
+        param::HALL_HYST => (0.0, 0.3),
         _ => return None,
     })
 }

@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial COM9 --baud 1000000 --divider 6 --duration 8",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 10438 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 6,
+    "drive": "Sensorless { amps: 0.6, omega_e: 399.98758 }",
+    "drive_step": "Sensorless { amps: 0.6, omega_e: 1200.0256 }",
+    "duration_s": 8.0,
+    "iq_A": null
+  },
+  "title": "Sensorless FOC step 400 -> 1200 rad/s el @18 V, delay compensation",
+  "unix_time": 1790905905
+}

@@ -87,10 +87,19 @@ pub struct Engine {
     vbus_filt: f32,
     /// Hall edge timing, fed every tick whether or not anything uses it.
     hall: HallSpeed,
-    /// Calibrated hall angle — the angle source of the hall drive modes.
+    /// Calibrated hall angle: the angle source of the hall drive modes, and
+    /// the reference every other mode is scored against on a board with
+    /// halls.
     hall_angle: Option<HallAngle>,
     /// Consecutive invalid hall states while a hall mode runs.
     hall_bad: u32,
+    /// The voltage command of the previous tick: what the bridge actually
+    /// applied over the period the current sample just closed. The observer
+    /// integrates this, not the command computed this tick.
+    v_applied: AlphaBeta,
+    /// The command before that (still on the winding for the first
+    /// `pwm_latency` of the period).
+    v_applied2: AlphaBeta,
 }
 
 impl Default for Engine {
@@ -129,6 +138,14 @@ impl Engine {
             hall: HallSpeed::new(),
             hall_angle: None,
             hall_bad: 0,
+            v_applied: AlphaBeta {
+                alpha: 0.0,
+                beta: 0.0,
+            },
+            v_applied2: AlphaBeta {
+                alpha: 0.0,
+                beta: 0.0,
+            },
         }
     }
 
@@ -196,6 +213,13 @@ impl Engine {
         if let Some(h) = hall_state {
             self.hall.update(h, dt);
         }
+        // The calibrated hall angle, whenever a drive is built on a board
+        // with halls: the angle source of the hall modes and the reference
+        // for all the others.
+        let hall_ref = match (hall_state, self.hall_angle.as_mut()) {
+            (Some(h), Some(ha)) => ha.update(h, dt),
+            _ => None,
+        };
 
         // --- pick up new host commands.
         let epoch = sh.cmd_epoch.load(Ordering::Acquire);
@@ -351,7 +375,7 @@ impl Engine {
                 // Hall-sensored: the calibrated halls own the angle. A short
                 // run of invalid states (a glitch) holds the last estimate;
                 // a longer one is a lost sensor and trips.
-                match hall_state.and_then(|h| self.hall_angle.as_mut().unwrap().update(h, dt)) {
+                match hall_ref {
                     Some(theta) => {
                         self.hall_bad = 0;
                         self.theta = theta;
@@ -424,7 +448,14 @@ impl Engine {
                         speed.update(self.omega_ref_cur, seq_out.omega, dt)
                     }
                 };
-                self.theta = seq_out.theta;
+                // Closed loop: the observer was last updated on the previous
+                // tick's sample, so bring its angle forward to this one before
+                // the Park transforms use it.
+                self.theta = if seq_out.phase == Phase::Closed {
+                    wrap_angle(seq_out.theta + seq_out.omega * dt)
+                } else {
+                    seq_out.theta
+                };
                 self.omega = seq_out.omega;
                 let out = self.foc.as_mut().unwrap().step(
                     i_abc,
@@ -518,11 +549,26 @@ impl Engine {
             // the estimate would be meaningless. Skipping it is also most of
             // why six-step costs less per tick than FOC.
             let observer_runs = !six_step && self.mode != mode::OFF;
+            // The command just computed only reaches the winding from the
+            // next PWM update on; the current sampled this tick was driven by
+            // the previous command. Integrating this tick's command made the
+            // observer lead the rotor by about one tick — measured against the
+            // halls on motor 3 as part of a ~2-tick odd-in-ω angle error
+            // (session 30b).
+            // On hardware the command also lands `pwm_latency` of a tick late,
+            // so the period just closed was driven partly by the one before.
+            let lat = spec.pwm_latency;
+            let v_obs = AlphaBeta {
+                alpha: (1.0 - lat) * self.v_applied.alpha + lat * self.v_applied2.alpha,
+                beta: (1.0 - lat) * self.v_applied.beta + lat * self.v_applied2.beta,
+            };
+            self.v_applied2 = self.v_applied;
+            self.v_applied = v_ab;
             if let Some(obs) = self.obs.as_mut().filter(|_| observer_runs) {
-                obs.update(i_ab, v_ab, dt);
+                obs.update(i_ab, v_obs, dt);
                 theta_est = obs.electrical_angle();
                 omega_est = obs.electrical_velocity();
-                theta_err = wrap_angle(theta_est - self.theta);
+                theta_err = wrap_angle(theta_est - hall_ref.unwrap_or(self.theta));
 
                 // Stall detector (closed-loop sensorless only): a stalled
                 // rotor makes no back-EMF, but the observer still "locks"
@@ -730,6 +776,8 @@ impl Engine {
         self.theta = 0.0;
         self.omega = 0.0;
         self.amp = 0.0;
+        self.v_applied = AlphaBeta::default();
+        self.v_applied2 = AlphaBeta::default();
         self.oc_strikes = 0;
         self.stall_strikes = 0;
         self.probe_ticks = 0;
@@ -841,13 +889,16 @@ impl Engine {
             self.speed = None;
             self.sl_preload = 0.0;
         }
-        if mode == mode::HALL_FOC || mode == mode::SS_HALL {
-            self.hall_angle = Some(HallAngle::new(HallMap {
+        // Every drive on a board with halls carries the calibrated hall
+        // angle: the hall modes run on it, the rest are scored against it.
+        self.hall_angle = spec.has_halls.then(|| {
+            HallAngle::new(HallMap {
                 offset: p(param::HALL_OFFSET),
                 dir: if p(param::HALL_DIR) < 0.0 { -1.0 } else { 1.0 },
-            }));
-            self.hall_bad = 0;
-        }
+                hyst: p(param::HALL_HYST),
+            })
+        });
+        self.hall_bad = 0;
         if mode == mode::SS_HALL {
             // Duty per rad/s el, preloaded with the duty that drives the
             // current ceiling through two windings at standstill (the
@@ -869,6 +920,12 @@ impl Engine {
         // exactly the same way. `v_dead = 0` (the default until the rig is
         // measured) leaves the modulator untouched.
         if let Some(foc) = self.foc.as_mut() {
+            // Command the voltage vector where the rotor will be while it is
+            // applied: half a period for the hold itself, plus however late
+            // this board's duties land. Left at the sim's 0.5 on hardware,
+            // the field lagged ~0.1-0.2 rad at 1200 rad/s el on motor 3 and
+            // i_d rippled ±0.28 A (session 30b).
+            foc.advance_periods = 0.5 + spec.pwm_latency;
             foc.deadtime = Some(DeadtimeModel {
                 v_dead: p(param::V_DEAD),
                 i_thresh: p(param::I_THRESH),
@@ -940,7 +997,18 @@ impl Engine {
         // sector parity undetectable. Measuring both driven terminals cancels
         // the drops exactly.
         let (hi_i, lo_i, fl_i) = sixstep::TABLE[self.ss_sector];
-        let v_ref = 0.5 * (vt[hi_i as usize] + vt[lo_i as usize]);
+        // A driven-high terminal can clip at the divider's full scale (the
+        // shields' 10k/2.2k reads at most 18.3 V): on motor 3 at an 18 V bus
+        // exactly a third of the samples — the driven-high one — were
+        // clipped, the midpoint sat low, crossings alternated early/late and
+        // the measured speed read 5% high against the halls (session 30b).
+        // The clipped terminal is at the bus, less one switch drop.
+        let v_hi = if vt[hi_i as usize] >= 0.995 * spec.terminal_full_scale {
+            self.vbus_filt
+        } else {
+            vt[hi_i as usize]
+        };
+        let v_ref = 0.5 * (v_hi + vt[lo_i as usize]);
         let v_float = vt[fl_i as usize];
         // `amp` is a duty ceiling in both phases: the ramp feeds forward the
         // duty its commanded speed needs, and once sensing the speed loop sets

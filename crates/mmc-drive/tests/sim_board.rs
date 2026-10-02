@@ -155,6 +155,9 @@ fn config(ctrl_hz: u32, motor: &PmsmParams) -> DriveConfig {
             r_path: 0.0,
             terminal_offset_max: 0.0,
             has_halls: true,
+            // The sim board applies a duty for the whole next period.
+            pwm_latency: 0.0,
+            terminal_full_scale: f32::INFINITY,
         },
         kind: DeviceKind::Sim,
         fw_version: 1,

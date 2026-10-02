@@ -117,6 +117,12 @@ const SPEC: BoardSpec = BoardSpec {
     // The shield has a hall connector, but no motor on this bench has used
     // it; the inputs are not wired up in this firmware.
     has_halls: false,
+    // Same timing argument as the F302, unmeasured here: the ~24 µs ISR
+    // writes after the 40 kHz PWM's next update point (12.5 µs past the
+    // trigger), so compares load a 25 µs PWM period later = half a tick.
+    pwm_latency: 0.5,
+    // 3.3 V ADC full scale through the BEMF divider.
+    terminal_full_scale: 3.3 * BEMF_GAIN,
 };
 
 /// Parameter defaults: motor 1, measured on this bench (Stage F0 rotating
@@ -145,6 +151,7 @@ const DEFAULTS: [f32; param::COUNT] = [
     0.5,                        // I_THRESH (FOC ripple amplitude, 30 µH at 40 kHz)
     0.0,                        // HALL_OFFSET (unused: no halls)
     1.0,                        // HALL_DIR
+    0.0,                        // HALL_HYST
 ];
 
 /// f32 capacity of the probe burst buffer: the saliency sweep's full
@@ -156,7 +163,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardG474,
-        fw_version: 17,
+        fw_version: 20,
         name: "mmc-g474",
         defaults: DEFAULTS,
     },
