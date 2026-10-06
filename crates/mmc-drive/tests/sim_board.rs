@@ -154,6 +154,7 @@ fn config(ctrl_hz: u32, motor: &PmsmParams) -> DriveConfig {
     defaults[param::POS_KD as usize] = 6e-4;
     defaults[param::POS_VMAX as usize] = 200.0;
     defaults[param::INERTIA as usize] = motor.inertia;
+    defaults[param::SS_CONDUCTION as usize] = 120.0;
     DriveConfig {
         spec: BoardSpec {
             ctrl_hz,
@@ -445,6 +446,31 @@ fn hall_six_step_spins_both_ways() {
 }
 
 #[test]
+fn hall_six_step_at_180_degrees_spins_both_ways() {
+    for hz in RATES {
+        for target in [250.0f32, -250.0] {
+            let mut rig = Rig::new(hz);
+            rig.send(&Message::SetParam {
+                id: param::SS_CONDUCTION,
+                value: 180.0,
+            });
+            rig.send(&Message::SetDrive(DriveMode::SixStepHall {
+                duty: 0.6,
+                omega_e: target,
+            }));
+            rig.run(4.0);
+            assert_eq!(rig.sh.state(), ST_RUN, "{hz} Hz {target}: running");
+            assert_eq!(rig.board.enables, 0b111, "no phase floats at 180°");
+            let w = rig.board.motor.omega_e();
+            assert!(
+                (w - target).abs() < 0.15 * target.abs(),
+                "{hz} Hz: rotor at {w}, target {target}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_dead_hall_sensor_trips_the_hall_drive() {
     let mut rig = Rig::new(10_000);
     rig.send(&Message::SetDrive(DriveMode::HallFoc {
@@ -549,7 +575,10 @@ fn hall_position_moves_and_holds_both_ways() {
                 worst =
                     worst.max(((rig.board.theta_m_total - start).to_degrees() - target_deg).abs());
             }
-            assert!(worst < 12.0, "{hz} Hz {target_deg}°: hold wandered {worst}°");
+            assert!(
+                worst < 12.0,
+                "{hz} Hz {target_deg}°: hold wandered {worst}°"
+            );
         }
     }
 }

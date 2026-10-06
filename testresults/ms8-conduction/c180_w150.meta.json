@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial COM9 --baud 1000000 --divider 4 --duration 6",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 7550 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 4,
+    "drive": "SixStepHall { duty: 0.85, omega_e: 149.99849 }",
+    "drive_step": null,
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "Hall six-step 180° conduction @ 150 rad/s el, motor 3, 18 V",
+  "unix_time": 1791326020
+}

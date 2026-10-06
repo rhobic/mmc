@@ -125,7 +125,13 @@ pub mod param {
     /// the sign of the position reference's velocity, so the position loop
     /// does not have to wind up an integrator to keep the rotor moving.
     pub const I_FRIC: u8 = 23;
-    pub const COUNT: usize = 24;
+    /// Hall six-step conduction angle [electrical degrees]: 120 drives two
+    /// phases and floats the third (the classic trapezoidal pattern, the one
+    /// sensorless six-step needs); 180 drives all three, stepping through the
+    /// inverter's six active voltage vectors (15% more fundamental voltage,
+    /// no idle phase to sense from). Anything else reads as 120.
+    pub const SS_CONDUCTION: u8 = 24;
+    pub const COUNT: usize = 25;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -151,6 +157,7 @@ pub mod param {
         "pos_vmax",
         "inertia",
         "i_fric",
+        "ss_conduction",
     ];
 }
 

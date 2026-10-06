@@ -158,6 +158,7 @@ const DEFAULTS: [f32; param::COUNT] = [
     200.0,                      // POS_VMAX
     1.75e-6,                    // INERTIA (motor 1 fit)
     0.0,                        // I_FRIC
+    120.0,                      // SS_CONDUCTION [deg el]
 ];
 
 /// f32 capacity of the probe burst buffer: the saliency sweep's full

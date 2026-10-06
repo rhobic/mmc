@@ -1091,6 +1091,18 @@ impl Engine {
             // every deceleration and would otherwise wind up.
             pi.preload(duty);
         }
+        if p(param::SS_CONDUCTION) >= 150.0 {
+            // 180°: all three legs driven, on the six active vectors. The
+            // state 3 on is the complement, so reversing works as above.
+            let mut state = sixstep::state_180(self.theta);
+            if dir < 0.0 {
+                state = (state + 3) % sixstep::SECTORS;
+            }
+            self.ss_sector = state;
+            b.set_phase_enables(0b111);
+            sh.sixstep_sector.store(state as u8, Ordering::Relaxed);
+            return sixstep::duties_180(state, duty);
+        }
         let (hi, lo, fl) = sixstep::TABLE[sector];
         let mut duties = [0.0; 3];
         duties[hi as usize] = duty;

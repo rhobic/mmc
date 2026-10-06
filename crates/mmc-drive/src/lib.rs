@@ -147,6 +147,7 @@ impl DriveConfig {
             param::POS_VMAX => (0.1, OMEGA_E_MAX),
             param::INERTIA => (1e-8, 1e-2),
             param::I_FRIC => (0.0, 0.5 * self.spec.i_trip),
+            param::SS_CONDUCTION => (120.0, 180.0),
             _ => return None,
         })
     }

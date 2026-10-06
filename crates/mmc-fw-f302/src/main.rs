@@ -146,6 +146,7 @@ const DEFAULTS: [f32; param::COUNT] = [
     200.0,  // POS_VMAX [rad/s el]
     4.4e-6, // INERTIA [kg·m²] (maxon EC-i 40 datasheet)
     0.11,   // I_FRIC [A] (motor 3: steady i_q in hall FOC)
+    120.0,  // SS_CONDUCTION [deg el]
 ];
 
 /// Probe burst capacity [f32s]: 8 KB of the 16 KB RAM. Enough for the R/L
@@ -158,7 +159,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardF302,
-        fw_version: 13,
+        fw_version: 14,
         name: "mmc-f302",
         defaults: DEFAULTS,
     },

@@ -607,6 +607,7 @@ fn default_params(cfg: &ServeCfg) -> [f32; param::COUNT] {
         200.0,
         params.inertia,
         0.0,
+        120.0, // ss_conduction
     ]
 }
 
@@ -916,6 +917,7 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
         param::POS_VMAX => (0.1, 2000.0),
         param::INERTIA => (1e-8, 1e-2),
         param::I_FRIC => (0.0, 1.0),
+        param::SS_CONDUCTION => (120.0, 180.0),
         _ => return None,
     })
 }

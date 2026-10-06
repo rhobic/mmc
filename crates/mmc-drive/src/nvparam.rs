@@ -24,7 +24,9 @@ const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
 ///
 /// v5 (2026-10-02): added the hall position loop (`pos_kp`, `pos_ki`,
 /// `pos_kd`, `pos_vmax`), `inertia` and `i_fric`, 18 → 24 params.
-const VERSION: u32 = 5;
+///
+/// v6 (2026-10-06): added `ss_conduction`, 24 → 25 params.
+const VERSION: u32 = 6;
 const HDR: usize = 2; // magic + version
 const CRC_IDX: usize = HDR + param::COUNT;
 const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, round up to even

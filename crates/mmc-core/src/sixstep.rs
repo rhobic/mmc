@@ -133,6 +133,43 @@ pub fn rising_edge(sector: usize) -> bool {
     sector % 2 == 1
 }
 
+/// 180° conduction: which phases sit at the high rail in each of the six
+/// states (bit `k` = phase `k`, U = bit 0), the inverter's six active voltage
+/// vectors. Every phase is driven in every state — high for 180°, low for
+/// 180° — so there is no idle terminal and no back-EMF to read.
+///
+/// State `j` is the union of 120° sectors `j` and `j + 1`: the phase high in
+/// either is high, the phase low in either is low. Its centre is therefore
+/// the boundary between those two sectors, 30° past sector `j`'s centre, and
+/// its own boundaries fall at 120° sector centres — exactly where the 120°
+/// idle phase crosses zero. So each leg switches at its own back-EMF zero
+/// crossing: the instants 120° *detects* are the instants 180° *commutates*.
+pub const TABLE_180: [u8; SECTORS] = [
+    0b001, // U+ V− W−
+    0b011, // U+ V+ W−
+    0b010, // V+ U− W−
+    0b110, // V+ W+ U−
+    0b100, // W+ U− V−
+    0b101, // W+ U+ V−
+];
+
+/// Rotor angle of 180° state 0's centre [rad electrical].
+pub const STATE0_CENTRE_180: f32 = SECTOR0_CENTRE + SECTOR_RAD * 0.5;
+
+/// The 180° state whose voltage vector is best aligned to produce torque at
+/// `theta_e`.
+pub fn state_180(theta_e: f32) -> usize {
+    sector_of(theta_e - SECTOR_RAD * 0.5)
+}
+
+/// Duties for a 180° state: `duty` on every high leg, 0 on the low ones.
+/// During the PWM off-time all three legs sit low (the zero vector), which
+/// is where the low-side shunts read all three currents.
+pub fn duties_180(state: usize, duty: f32) -> [f32; 3] {
+    let hi = TABLE_180[state % SECTORS];
+    core::array::from_fn(|k| if hi & (1 << k) != 0 { duty } else { 0.0 })
+}
+
 /// Zero-cross detector configuration.
 #[derive(Copy, Clone, Debug)]
 pub struct ZcCfg {
@@ -508,6 +545,65 @@ mod tests {
                 rising_edge(k),
                 "sector {k}: slope disagrees with rising_edge"
             );
+        }
+    }
+
+    /// Each 180° state is the union of two consecutive 120° pairs.
+    #[test]
+    fn state_180_is_union_of_adjacent_sectors() {
+        for j in 0..SECTORS {
+            let (h0, l0, _) = TABLE[j];
+            let (h1, l1, _) = TABLE[(j + 1) % SECTORS];
+            let hi = (1u8 << h0) | (1 << h1);
+            let lo = (1u8 << l0) | (1 << l1);
+            assert_eq!(hi & lo, 0, "state {j}: a phase both high and low");
+            assert_eq!(hi | lo, 0b111, "state {j}: a phase undriven");
+            assert_eq!(TABLE_180[j], hi, "state {j}");
+        }
+    }
+
+    /// The 180° state chosen at its centre must have the phase-voltage
+    /// pattern best aligned with the back-EMF — the six-vector analogue of
+    /// `table_picks_max_torque_pair` — and the state 3 on must be its exact
+    /// reverse (the table's reverse-direction trick).
+    #[test]
+    fn state_180_aligns_with_back_emf() {
+        // Phase-to-neutral voltage of a state: +2/3 or −1/3 per high leg.
+        let v = |j: usize, k: usize| {
+            let n = TABLE_180[j].count_ones() as f32;
+            (if TABLE_180[j] & (1 << k) != 0 {
+                1.0
+            } else {
+                0.0
+            }) - n / 3.0
+        };
+        for j in 0..SECTORS {
+            let centre = STATE0_CENTRE_180 + j as f32 * SECTOR_RAD;
+            assert_eq!(state_180(centre), j, "centre of {j}");
+            let align = |s: usize| (0..3).map(|k| v(s, k) * shape(k, centre)).sum::<f32>();
+            for other in 0..SECTORS {
+                assert!(align(j) >= align(other) - 1e-4, "state {j} vs {other}");
+            }
+            assert_eq!(TABLE_180[j] ^ TABLE_180[(j + 3) % SECTORS], 0b111);
+        }
+    }
+
+    /// At every 180° boundary exactly one leg switches, and it is the phase
+    /// whose back-EMF crosses zero there — the 120° idle phase at its
+    /// window centre.
+    #[test]
+    fn state_180_legs_switch_at_their_own_zero_crossings() {
+        for (j, state) in TABLE_180.iter().enumerate() {
+            let next = (j + 1) % SECTORS;
+            let changed = state ^ TABLE_180[next];
+            assert_eq!(changed.count_ones(), 1, "{j} -> {next}");
+            let leg = changed.trailing_zeros() as usize;
+            let boundary = STATE0_CENTRE_180 + (j as f32 + 0.5) * SECTOR_RAD;
+            assert!(
+                shape(leg, boundary).abs() < 1e-3,
+                "leg {leg} at {j}->{next}"
+            );
+            assert_eq!(leg, floating_phase(next), "{j} -> {next}");
         }
     }
 
