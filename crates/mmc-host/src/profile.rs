@@ -85,6 +85,8 @@ pub struct StageTuning {
     /// Accel-run startup/authority current [A] — raise for a high-drag or
     /// heavy motor that can't reach handoff on the default.
     pub accel_amps: f32,
+    /// Coast stage: hall FOC speed to cut the stage at [rad/s el].
+    pub coast_omega: f32,
 }
 
 impl Default for StageTuning {
@@ -100,6 +102,7 @@ impl Default for StageTuning {
             ],
             accel: (300.0, 900.0),
             accel_amps: 0.5,
+            coast_omega: 1000.0,
         }
     }
 }
@@ -135,9 +138,12 @@ pub struct StageDef {
     /// Execution order — spinning stages first, parking probes last
     /// (separatrix lesson: a parked rotor ejects on the next I-f start).
     pub order: u32,
+    /// Part of a plain `mmc-host profile` run. A stage that needs hardware
+    /// not every bench has (halls) runs only when named in `--only`.
+    pub default: bool,
 }
 
-pub const STAGES: [StageDef; 5] = [
+pub const STAGES: [StageDef; 6] = [
     StageDef {
         id: "sweep",
         title: "Rotating I-f flux sweep",
@@ -147,6 +153,7 @@ pub const STAGES: [StageDef; 5] = [
         needs: "shaft free to spin with no external load; motor may run up to \
                 ~450 rad/s electrical",
         order: 1,
+        default: true,
     },
     StageDef {
         id: "accel",
@@ -157,6 +164,20 @@ pub const STAGES: [StageDef; 5] = [
         needs: "shaft free to spin; requires working sensorless startup (R, \
                 L, flux already roughly right)",
         order: 2,
+        default: true,
+    },
+    StageDef {
+        id: "coast",
+        title: "Coast: back-EMF on the terminal sense",
+        rotor: Rotor::FreeSpinning,
+        what: "hall FOC up to speed, then every switch off; the line EMF \
+               between unclamped terminals against the hall angle gives psi \
+               with no load or angle model (tools/coast_flux.py). On a light \
+               load it is the better flux measurement than the I-f sweep",
+        needs: "halls (hall_offset/hall_dir/widths calibrated) and a free \
+                shaft; terminal-sense dividers that read the coasting EMF",
+        order: 3,
+        default: false,
     },
     StageDef {
         id: "rl",
@@ -165,8 +186,11 @@ pub const STAGES: [StageDef; 5] = [
         what: "aligns the rotor, then d-axis square-wave; R from the level \
                change (differential), L from the folded exponential",
         needs: "nothing - the align phase parks the rotor magnetically; a \
-                clamped shaft is equally fine",
+                clamped shaft is equally fine. The align current must hold \
+                the rotor against its cogging (and keep the PWM ripple off \
+                zero): if the fit warns of overshoot, raise --rl-volts",
         order: 10,
+        default: true,
     },
     StageDef {
         id: "saliency",
@@ -179,6 +203,7 @@ pub const STAGES: [StageDef; 5] = [
                 rotor only dithers a few electrical degrees; a clamp gives \
                 the cleanest data",
         order: 11,
+        default: true,
     },
     StageDef {
         id: "vdead",
@@ -191,6 +216,7 @@ pub const STAGES: [StageDef; 5] = [
         needs: "nothing - a DC vector parks the rotor; a clamped shaft is \
                 ideal and makes the descending branch a clean thermal check",
         order: 12,
+        default: true,
     },
 ];
 
@@ -209,7 +235,13 @@ pub struct ProfileOpts {
 pub fn list_stages() {
     println!("profiler stages (run order; --only <ids> selects a subset):");
     for s in &STAGES {
-        println!("\n  {:10} [{}]  {}", s.id, s.rotor.label().trim(), s.title);
+        let opt = if s.default { "" } else { "  (opt-in: --only)" };
+        println!(
+            "\n  {:10} [{}]  {}{opt}",
+            s.id,
+            s.rotor.label().trim(),
+            s.title
+        );
         println!("    does:  {}", s.what);
         println!("    needs: {}", s.needs);
     }
@@ -239,7 +271,7 @@ pub fn run(link: &mut Link, dir: &Path, opts: &ProfileOpts) -> std::io::Result<(
 
     // Resolve the stage list: validate ids, then execute in declared order.
     let mut selected: Vec<&StageDef> = match &opts.only {
-        None => STAGES.iter().collect(),
+        None => STAGES.iter().filter(|s| s.default).collect(),
         Some(ids) => {
             let mut v = Vec::new();
             for id in ids {
@@ -365,6 +397,7 @@ pub fn run_stages(
         let note = match s.id {
             "sweep" => stage_sweep(link, dir, &tuning.sweep, log)?,
             "accel" => stage_accel(link, dir, tuning.accel, tuning.accel_amps, log)?,
+            "coast" => stage_coast(link, dir, tuning.coast_omega, log)?,
             "rl" => stage_rl(link, dir, tuning.rl_volts, ctrl_hz, log)?,
             "saliency" => {
                 let need = probe::SAL_HDR + probe::SAL_TICKS * 2;
@@ -513,6 +546,50 @@ fn stage_accel(
     Ok(format!("sensorless {lo}->{hi} rad/s el"))
 }
 
+/// Coast from hall FOC with the stage off, recording the terminal sense and
+/// the halls at a high frame rate (few channels) for tools/coast_flux.py.
+fn stage_coast(
+    link: &mut Link,
+    dir: &Path,
+    omega_e: f32,
+    log: &mut dyn FnMut(&str),
+) -> std::io::Result<String> {
+    use mmc_proto::channel;
+    log(&format!(
+        "  hall FOC to {omega_e} rad/s el, then the stage off: the rotor coasts (~10 s)"
+    ));
+    let title = format!("Coast from {omega_e} rad/s el, terminal sense");
+    let mask = [
+        channel::VB_U,
+        channel::VB_V,
+        channel::VB_W,
+        channel::STATE,
+        channel::HALL,
+        channel::OMEGA_HALL,
+        channel::VBUS,
+    ]
+    .iter()
+    .fold(0u32, |m, &c| m | 1 << c);
+    capture::run(
+        link,
+        &CaptureCfg {
+            divider: 2,
+            mask,
+            duration: 10.0,
+            iq: None,
+            drive: Some(DriveMode::HallFoc { amps: 1.0, omega_e }),
+            drive_step: Some(DriveMode::Off),
+            title: &title,
+            description: "Profiler flux input: the coasting terminals' line EMF \
+                          against the hall angle (tools/coast_flux.py).",
+            order: 10,
+            command: "mmc-host profile".into(),
+        },
+        dir.join("coast.csv").as_path(),
+    )?;
+    Ok(format!("coast from {omega_e} rad/s el"))
+}
+
 /// Locked-rotor R/L step probe (on-device burst at the control rate).
 fn stage_rl(
     link: &mut Link,
@@ -545,10 +622,12 @@ fn stage_rl(
         dir,
         "rl_step",
         "R/L step probe",
-        "Locked-rotor d-axis voltage step (0.5 V align -> 1.0 V, unslewed), \
-         (i_d, v_d) recorded on-device at the control rate and read back over the \
-         protocol. tools/profile.py fits R from the level change and L from \
-         the exponential.",
+        &format!(
+            "Locked-rotor d-axis voltage step ({v_align} V align -> {v_step} V, \
+             unslewed), (i_d, v_d) recorded on-device at the control rate and read \
+             back over the protocol. tools/profile.py fits R from the level change \
+             and L from the exponential."
+        ),
         0,
         None,
     )?;

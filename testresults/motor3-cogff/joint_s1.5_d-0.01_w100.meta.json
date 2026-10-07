@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial COM9 --baud 1000000 --divider 3 --duration 6",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 6554 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 3,
+    "drive": "HallFoc { amps: 1.0, omega_e: 100.00004 }",
+    "drive_step": null,
+    "duration_s": 6.0,
+    "iq_A": null
+  },
+  "title": "Hall FOC 100 rad/s el, feed-forward 15/14 x1.5, rotated -0.01",
+  "unix_time": 1791381733
+}

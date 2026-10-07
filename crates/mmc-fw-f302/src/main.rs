@@ -147,6 +147,21 @@ const DEFAULTS: [f32; param::COUNT] = [
     4.4e-6, // INERTIA [kg·m²] (maxon EC-i 40 datasheet)
     0.11,   // I_FRIC [A] (motor 3: steady i_q in hall FOC)
     120.0,  // SS_CONDUCTION [deg el]
+    0.0,    // ID_INJECT [A]
+    // HALL_W0..5 [rad el]: even until tools/hall_widths.py has run.
+    core::f32::consts::FRAC_PI_3,
+    core::f32::consts::FRAC_PI_3,
+    core::f32::consts::FRAC_PI_3,
+    core::f32::consts::FRAC_PI_3,
+    core::f32::consts::FRAC_PI_3,
+    core::f32::consts::FRAC_PI_3,
+    0.0, // ID_DITHER [A] (off)
+    0.5, // ID_DITHER_PERIOD [s]
+    0.0, // COG_FF (off)
+    -1.0, // COG_SHIFT (identify)
+    0.0, 0.0, 0.0, 0.0, // COG_N0..3 (no series until measured)
+    0.0, 0.0, 0.0, 0.0, // COG_A0..3 [N·m]
+    0.0, 0.0, 0.0, 0.0, // COG_P0..3 [rad]
 ];
 
 /// Probe burst capacity [f32s]: 8 KB of the 16 KB RAM. Enough for the R/L
@@ -159,7 +174,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardF302,
-        fw_version: 14,
+        fw_version: 19,
         name: "mmc-f302",
         defaults: DEFAULTS,
     },

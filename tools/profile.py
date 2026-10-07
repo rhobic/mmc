@@ -27,6 +27,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import coast_flux as cf  # noqa: E402  (coast stage: psi from the line EMF)
 import fit_params as fp  # noqa: E402  (hang-angle sweep fit lives there)
 
 POLE_PAIRS = 7.0  # fallback; the device snapshot overrides (pole_pairs_for)
@@ -119,9 +120,23 @@ def fit_rl(path):
     z_acc = [z for z, k in zip(z_acc, keep) if k]
     r = float(np.mean(r_list))
     zbar = np.mean(np.array(z_acc), axis=0)
+    # A winding is first order: the current never passes its final value.
+    # When it does, the rotor is moving in its detent on every edge (too
+    # little align current to hold it against the cogging) and its back-EMF
+    # bends the exponential: on motor 3 the overshoot is 62 % at 0.35 A of
+    # align current, 4.7 % at 0.56 A, 1.1 % at 0.70 A and under 0.8 % from
+    # 0.83 A, while the fitted L runs 0.23, 0.31, then 0.348–0.351 mH
+    # (testresults/motor3-rlprobe).
+    overshoot = float(max(0.0, -zbar.min()))
+    stiffer = ("raise the probe current (`mmc-host profile --rl-volts a,b`, e.g. "
+               "1.2,2.0 on motor 3) until the align current holds the rotor")
     k = np.flatnonzero((zbar > 0.02) & (zbar < 0.9))
     if len(k) < 2:
-        raise SystemExit("rl_step: settling fraction unusable even after folding")
+        raise SystemExit("rl_step: settling fraction unusable even after folding"
+                         + (f" (current overshoots by {100 * overshoot:.0f} %: {stiffer})" if overshoot > 0.01 else ""))
+    if overshoot > 0.01:
+        print(f"WARNING rl_step: the current overshoots its final value by {100 * overshoot:.1f} %, "
+              f"so L is not trustworthy: {stiffer}.")
     slope, _ = np.polyfit((k + 1) * dt, np.log(zbar[k]), 1)
     tau = -1.0 / slope
     l = r * tau
@@ -134,6 +149,7 @@ def fit_rl(path):
         "delta_i": float(np.mean(di_list)),
         "r_sigma": float(np.std(r_list)),
         "exp_points": len(k),
+        "overshoot": overshoot,
     }
 
 
@@ -433,6 +449,29 @@ def main(dir_):
     else:
         print("flux sweep: no sweep_*.csv — skipped "
               "(capture: mmc-host profile --only sweep)")
+
+    coast_path = os.path.join(dir_, "coast.csv")
+    if os.path.exists(coast_path):
+        # The coast needs neither a load nor an angle model, so it wins
+        # over the sweep when both exist (motor 3: 6.59 mWb against the
+        # scope's 6.618; the sweep is ill-conditioned on a light load).
+        widths = None
+        try:
+            with open(os.path.join(dir_, "profile_state.json")) as f:
+                params = json.load(f)["device"]["params"]
+            widths = [params[f"hall_w{k}"] for k in range(6)]
+        except (OSError, KeyError, ValueError):
+            pass
+        c = cf.fit(coast_path, widths, out=lambda s: print("  " + s))
+        if psi is not None:
+            print(f"  (the sweep's {psi * 1e3:.4f} mWb is overridden by the coast)")
+        psi = c["psi"]
+        kt = 1.5 * pole_pairs * psi
+        print(f"coast: psi = {psi * 1e3:.4f} mWb -> kt = {kt * 1e3:.3f} mN*m/A "
+              f"({c['pairs']} terminal pairs, {c['omega_range'][1]:.0f} -> {c['omega_range'][0]:.0f} rad/s el)")
+        profile["flux"] = psi
+        fit_info["kt"] = kt
+        fit_info["psi_source"] = "coast"
 
     accel_path = os.path.join(dir_, "accel.csv")
     if os.path.exists(accel_path) and kt is not None:

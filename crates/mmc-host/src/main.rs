@@ -10,12 +10,13 @@
 //! protocol, and the motor profiler.
 
 mod capture;
-mod link;
 mod panel;
 mod profile;
 mod report;
 mod scenario;
 mod server;
+
+use mmc_host::{estimate, link};
 
 use std::path::PathBuf;
 
@@ -52,6 +53,26 @@ enum Command {
     Profile(ProfileArgs),
     /// Apply a fitted motor profile (tools/profile.py JSON) to the device.
     Apply(ApplyArgs),
+    /// Read the device's parameter table (all, or the names given).
+    Params(ParamsArgs),
+    /// Run the online R/ψ estimator over captures that recorded the dq
+    /// channels (i_d, i_q, v_d, v_q, omega_hall, state).
+    Estimate(EstimateArgs),
+}
+
+#[derive(clap::Args)]
+struct EstimateArgs {
+    #[arg(required = true)]
+    captures: Vec<PathBuf>,
+    /// Prior R [Ω], ψ [Wb] and L [H] (default: motor 3's 18 V profile).
+    #[arg(long, default_value_t = 1.4177)]
+    r: f32,
+    #[arg(long, default_value_t = 6.6448e-3)]
+    psi: f32,
+    #[arg(long, default_value_t = 0.356e-3)]
+    l: f32,
+    #[arg(long, default_value = "testresults/estim")]
+    out_dir: PathBuf,
 }
 
 #[derive(clap::Args)]
@@ -96,6 +117,10 @@ struct ProfileArgs {
     /// high-drag or heavy motor.
     #[arg(long)]
     accel_amps: Option<f32>,
+    /// Coast stage: hall FOC speed to cut the stage at [rad/s el]
+    /// (default 1000).
+    #[arg(long)]
+    coast_omega: Option<f32>,
 }
 
 fn parse_sweep_points(specs: &[String]) -> std::io::Result<Vec<(f32, f32)>> {
@@ -129,6 +154,18 @@ struct ApplyArgs {
     /// Also write the applied table to flash so it survives a power cycle.
     #[arg(long)]
     persist: bool,
+}
+
+#[derive(clap::Args)]
+struct ParamsArgs {
+    #[arg(long, default_value = "auto")]
+    serial: String,
+    #[arg(long, default_value_t = 1_000_000)]
+    baud: u32,
+    #[arg(long)]
+    addr: Option<String>,
+    /// Parameter names to read (default: all).
+    names: Vec<String>,
 }
 
 #[derive(clap::Args)]
@@ -429,6 +466,17 @@ fn main() -> std::io::Result<()> {
                 },
             )
         }
+        Command::Estimate(args) => {
+            for c in &args.captures {
+                match estimate::estimate_file(c, args.r, args.psi, args.l, &args.out_dir)? {
+                    Some((r, psi)) => {
+                        println!("{}: R {r:.4} Ω  ψ {:.4} mWb", c.display(), psi * 1e3)
+                    }
+                    None => println!("{}: no usable frames", c.display()),
+                }
+            }
+            Ok(())
+        }
         Command::Capture(args) => {
             let mut link = match (&args.addr, &args.serial) {
                 (Some(addr), _) => link::Link::tcp(addr)?,
@@ -550,6 +598,9 @@ fn main() -> std::io::Result<()> {
             if let Some(a) = args.accel_amps {
                 tuning.accel_amps = a;
             }
+            if let Some(w) = args.coast_omega {
+                tuning.coast_omega = w;
+            }
             profile::run(
                 &mut link,
                 &args.dir,
@@ -567,6 +618,26 @@ fn main() -> std::io::Result<()> {
                 None => link::Link::serial(&args.serial, args.baud)?,
             };
             profile::apply(&mut link, &args.profile, args.persist)
+        }
+        Command::Params(args) => {
+            let mut link = match &args.addr {
+                Some(addr) => link::Link::tcp(addr)?,
+                None => link::Link::serial(&args.serial, args.baud)?,
+            };
+            for (id, name) in mmc_proto::param::NAMES.iter().enumerate() {
+                if !args.names.is_empty() && !args.names.iter().any(|n| n == name) {
+                    continue;
+                }
+                match link.request(
+                    &mmc_proto::Message::GetParam { id: id as u8 },
+                    |m| matches!(m, mmc_proto::Message::ParamValue { id: i, .. } if *i == id as u8),
+                    std::time::Duration::from_secs(2),
+                )? {
+                    mmc_proto::Message::ParamValue { value, .. } => println!("{name} = {value}"),
+                    m => println!("{name}: unexpected reply {m:?}"),
+                }
+            }
+            Ok(())
         }
     }
 }

@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial COM9 --baud 1000000 --divider 2 --duration 10",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 18926 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 2,
+    "drive": "HallFoc { amps: 1.0, omega_e: 1000.00037 }",
+    "drive_step": "Off",
+    "duration_s": 10.0,
+    "iq_A": null
+  },
+  "title": "Coast from 1000 rad/s el, terminal sense only (flux from telemetry)",
+  "unix_time": 1791343532
+}

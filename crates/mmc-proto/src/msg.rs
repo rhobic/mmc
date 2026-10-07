@@ -7,7 +7,7 @@ use crate::{cobs, crc::crc16};
 pub const MAX_PAYLOAD: usize = 8 + MAX_CHANNELS * 4;
 
 /// Cap on simultaneously streamed channels (mask bits 0..24).
-pub const MAX_CHANNELS: usize = 26;
+pub const MAX_CHANNELS: usize = 28;
 
 mod ty {
     pub const PING: u8 = 0x01;
@@ -131,7 +131,41 @@ pub mod param {
     /// inverter's six active voltage vectors (15% more fundamental voltage,
     /// no idle phase to sense from). Anything else reads as 120.
     pub const SS_CONDUCTION: u8 = 24;
-    pub const COUNT: usize = 25;
+    /// Hall FOC d-axis current reference [A]. Zero is the efficient choice;
+    /// a small injected i_d makes stator resistance observable online
+    /// (`mmc_core::estim`) and heats the winding without torque.
+    pub const ID_INJECT: u8 = 25;
+    /// Hall sector widths [rad electrical] in `mmc_core::hall::SEQUENCE`
+    /// order, measured at steady speed (`tools/hall_widths.py`). Default
+    /// π/3 each; the drive rescales them to a full turn and falls back to
+    /// even sectors if any is not positive.
+    pub const HALL_W0: u8 = 26;
+    /// Hall FOC i_d dither [A]: when not 0, the drive square-waves i_d
+    /// between `id_inject` and `id_inject + id_dither` every half
+    /// `id_dither_period` while it runs above the online estimator's speed
+    /// floor, so R̂ keeps updating without a host stepping `id_inject`.
+    /// Negative is the field-weakening side (no extra voltage needed).
+    pub const ID_DITHER: u8 = 32;
+    /// Full period of the i_d dither [s].
+    pub const ID_DITHER_PERIOD: u8 = 33;
+    /// Position-torque feed-forward gain (`mmc_core::cogging`): 0 off, 1 the
+    /// measured series. Hall FOC and hall position mode add
+    /// `−gain·τ(θ_m)/k_t` to their i_q reference once the pole pair is known.
+    pub const COG_FF: u8 = 34;
+    /// Which pole pair the series' origin is on, counted from power-up
+    /// (0..p). −1: unknown; the drive identifies it while hall FOC turns the
+    /// rotor and publishes it here. Reset to −1 at every boot (the count
+    /// restarts); a host write of −1 asks for a fresh identification, of
+    /// 0..p forces one.
+    pub const COG_SHIFT: u8 = 35;
+    /// The series, four terms `amp·sin(order·θ_m + phase)`: orders (per
+    /// mechanical turn, 0 = unused), amplitudes [N·m], phases [rad], θ_m
+    /// from the hall edge into the first SEQUENCE state
+    /// (`tools/drag_profile.py`).
+    pub const COG_N0: u8 = 36;
+    pub const COG_A0: u8 = 40;
+    pub const COG_P0: u8 = 44;
+    pub const COUNT: usize = 48;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -158,6 +192,29 @@ pub mod param {
         "inertia",
         "i_fric",
         "ss_conduction",
+        "id_inject",
+        "hall_w0",
+        "hall_w1",
+        "hall_w2",
+        "hall_w3",
+        "hall_w4",
+        "hall_w5",
+        "id_dither",
+        "id_dither_period",
+        "cog_ff",
+        "cog_shift",
+        "cog_n0",
+        "cog_n1",
+        "cog_n2",
+        "cog_n3",
+        "cog_a0",
+        "cog_a1",
+        "cog_a2",
+        "cog_a3",
+        "cog_p0",
+        "cog_p1",
+        "cog_p2",
+        "cog_p3",
     ];
 }
 

@@ -608,6 +608,29 @@ fn default_params(cfg: &ServeCfg) -> [f32; param::COUNT] {
         params.inertia,
         0.0,
         120.0, // ss_conduction
+        0.0,   // id_inject
+        std::f32::consts::FRAC_PI_3,
+        std::f32::consts::FRAC_PI_3,
+        std::f32::consts::FRAC_PI_3,
+        std::f32::consts::FRAC_PI_3,
+        std::f32::consts::FRAC_PI_3,
+        std::f32::consts::FRAC_PI_3,
+        0.0,  // id_dither
+        0.5,  // id_dither_period
+        0.0,  // cog_ff
+        -1.0, // cog_shift
+        0.0,
+        0.0,
+        0.0,
+        0.0, // cog_n0..3
+        0.0,
+        0.0,
+        0.0,
+        0.0, // cog_a0..3
+        0.0,
+        0.0,
+        0.0,
+        0.0, // cog_p0..3
     ]
 }
 
@@ -918,6 +941,17 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
         param::INERTIA => (1e-8, 1e-2),
         param::I_FRIC => (0.0, 1.0),
         param::SS_CONDUCTION => (120.0, 180.0),
+        param::ID_INJECT => (-1.0, 1.0),
+        param::ID_DITHER => (-1.0, 1.0),
+        param::ID_DITHER_PERIOD => (0.2, 10.0),
+        param::COG_FF => (0.0, 2.0),
+        param::COG_SHIFT => (-1.0, 15.0),
+        id if (param::COG_N0..param::COG_N0 + 4).contains(&id) => (0.0, 255.0),
+        id if (param::COG_A0..param::COG_A0 + 4).contains(&id) => (-0.1, 0.1),
+        id if (param::COG_P0..param::COG_P0 + 4).contains(&id) => (-7.0, 7.0),
+        id if (param::HALL_W0..param::HALL_W0 + 6).contains(&id) => {
+            (std::f32::consts::FRAC_PI_6, std::f32::consts::FRAC_PI_2)
+        }
         _ => return None,
     })
 }

@@ -155,6 +155,9 @@ fn config(ctrl_hz: u32, motor: &PmsmParams) -> DriveConfig {
     defaults[param::POS_VMAX as usize] = 200.0;
     defaults[param::INERTIA as usize] = motor.inertia;
     defaults[param::SS_CONDUCTION as usize] = 120.0;
+    for k in 0..6 {
+        defaults[(param::HALL_W0 + k) as usize] = std::f32::consts::FRAC_PI_3;
+    }
     DriveConfig {
         spec: BoardSpec {
             ctrl_hz,

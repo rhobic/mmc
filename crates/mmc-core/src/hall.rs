@@ -8,8 +8,11 @@
 //! sits, depend on how the sensors are mounted and wired — that is the
 //! calibration ([`HallMap`]), measured on the bench, not assumed.
 //!
-//! Speed comes from the time between edges: each edge is 60° electrical, so a
-//! single edge interval gives ω = (π/3)/Δt. The estimate is held between
+//! Speed comes from the time between edges: an edge interval spans one sector,
+//! nominally 60° electrical, so ω = (π/3)/Δt. Real sensors are not placed
+//! exactly 120° apart (motor 3: one sensor 3.4° el off, sectors from 56° to
+//! 63°), so the map can carry each sector's measured width; the angle and the
+//! speed then use it instead of 60°. The estimate is held between
 //! edges and decays to zero once the rotor has been quiet longer than the
 //! last interval would allow, so a stalled rotor reads 0, not its last speed.
 
@@ -32,24 +35,62 @@ pub fn index_of(state: u8) -> Option<usize> {
 /// far past its magnetic midpoint *in the direction of travel*. A slow
 /// forward/reverse calibration cannot see it (it lands in the averaged-out
 /// lag); a speed sweep against the flux observer can (`tools/hall_ref.py`).
+///
+/// `widths` [rad] are the sectors' electrical widths in [`SEQUENCE`] order
+/// ([`EVEN`] for ideal sensors). They are measured as the share of time each
+/// state lasts at steady speed (`tools/hall_widths.py`).
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct HallMap {
     pub offset: f32,
     pub dir: f32,
     pub hyst: f32,
+    pub widths: [f32; 6],
 }
 
+/// Six equal 60° sectors.
+pub const EVEN: [f32; 6] = [PI / 3.0; 6];
+
 impl HallMap {
-    /// Electrical angle [rad] of the center of `state`'s 60° sector.
+    /// Sector widths that sum to a full turn: `w` rescaled, or [`EVEN`] if
+    /// any entry is not positive (a missing or corrupt calibration).
+    pub fn normalized_widths(w: [f32; 6]) -> [f32; 6] {
+        let sum: f32 = w.iter().sum();
+        // Written so a NaN anywhere also falls back to even sectors.
+        if !w.iter().all(|x| x.is_finite() && *x > 0.0) || !sum.is_finite() {
+            return EVEN;
+        }
+        w.map(|x| x * 2.0 * PI / sum)
+    }
+
+    /// Electrical angle [rad] of the center of `state`'s sector.
     pub fn angle(&self, state: u8) -> Option<f32> {
-        index_of(state).map(|k| wrap_angle(self.offset + self.dir * k as f32 * PI / 3.0))
+        let k = index_of(state)?;
+        // Centre of step 0 is `offset`; each step on is half of the sector
+        // left plus half of the sector entered.
+        let mut c = 0.0;
+        for j in 1..=k {
+            c += 0.5 * (self.widths[j - 1] + self.widths[j]);
+        }
+        Some(wrap_angle(self.offset + self.dir * c))
+    }
+
+    /// Half the electrical width of `state`'s sector [rad].
+    pub fn half_width(&self, state: u8) -> f32 {
+        index_of(state)
+            .map(|k| 0.5 * self.widths[k])
+            .unwrap_or(PI / 6.0)
     }
 }
 
 /// Hall-edge speed estimator.
 #[derive(Clone, Debug)]
 pub struct HallSpeed {
+    /// Sector widths in [`SEQUENCE`] order [rad]; an edge interval spans
+    /// the width of the sector it timed.
+    pub widths: [f32; 6],
     last_idx: Option<usize>,
+    /// Width of the sector the last interval spanned [rad].
+    span: f32,
     /// Time since the last edge [s].
     since_edge: f32,
     /// Last full edge interval [s] (0 until two edges were seen).
@@ -70,8 +111,14 @@ impl Default for HallSpeed {
 
 impl HallSpeed {
     pub const fn new() -> Self {
+        Self::with_widths(EVEN)
+    }
+
+    pub const fn with_widths(widths: [f32; 6]) -> Self {
         Self {
+            widths,
             last_idx: None,
+            span: PI / 3.0,
             since_edge: 0.0,
             interval: 0.0,
             dir: 0.0,
@@ -117,6 +164,7 @@ impl HallSpeed {
         } else {
             0.0
         };
+        self.span = self.widths[last];
         self.dir = dir;
         self.last_idx = Some(idx);
         self.since_edge = 0.0;
@@ -132,12 +180,22 @@ impl HallSpeed {
         if self.interval <= 0.0 {
             return 0.0;
         }
-        let t = self.interval.max(self.since_edge);
-        // Treat a rotor quiet for 4× its last interval as stopped.
-        if self.since_edge > 4.0 * self.interval {
+        // The current sector may be wider than the one just timed, so the
+        // bound is the current sector in the time since the edge: the rotor
+        // cannot have crossed more than that without another edge.
+        let cur = self.last_idx.map(|k| self.widths[k]).unwrap_or(self.span);
+        let measured = self.span / self.interval;
+        // Treat a rotor quiet for 4× the time this sector should take as
+        // stopped.
+        if self.since_edge * measured > 4.0 * cur {
             return 0.0;
         }
-        self.dir * (PI / 3.0) / t
+        let bound = if self.since_edge > 0.0 {
+            cur / self.since_edge
+        } else {
+            f32::MAX
+        };
+        self.dir * measured.min(bound)
     }
 
     /// Current position in [`SEQUENCE`], if a valid state has been seen.
@@ -173,7 +231,7 @@ impl HallAngle {
     pub const fn new(map: HallMap) -> Self {
         Self {
             map,
-            speed: HallSpeed::new(),
+            speed: HallSpeed::with_widths(map.widths),
             theta: 0.0,
             have: false,
         }
@@ -184,7 +242,7 @@ impl HallAngle {
     pub fn update(&mut self, state: u8, dt: f32) -> Option<f32> {
         let edge = self.speed.update(state, dt);
         let center = self.map.angle(state)?;
-        let half = PI / 6.0;
+        let half = self.map.half_width(state);
         if !self.have {
             self.theta = center;
             self.have = true;
@@ -296,7 +354,7 @@ impl HallTracker {
     pub fn update(&mut self, state: u8, iq: f32, dt: f32) -> Option<(f32, f32)> {
         let idx = index_of(state)?;
         let center = self.map.angle(state)?;
-        let half = PI / 6.0;
+        let half = self.map.half_width(state);
         let Some(last) = self.last_idx else {
             self.theta = center;
             self.last_idx = Some(idx);
@@ -344,7 +402,7 @@ impl HallTracker {
                 if travel == self.last_travel {
                     // Two edges the same way: one sector in t is a direct
                     // speed measurement; average it with the model.
-                    self.omega = 0.5 * self.omega + 0.5 * travel * (PI / 3.0) / t;
+                    self.omega = 0.5 * self.omega + 0.5 * travel * self.map.widths[last] / t;
                 }
                 let lim = self.accel_per_amp;
                 self.load = (self.load + Self::LOAD_GAIN * e / (t * t)).clamp(-lim, lim);
@@ -368,7 +426,7 @@ impl HallTracker {
                 // over-predicted, so learn it into the load term.
                 self.theta = b;
                 let t = self.since_edge.max(Self::MIN_INTERVAL);
-                let cap = (PI / 3.0) / t;
+                let cap = 2.0 * half / t;
                 let capped = self.omega.clamp(-cap, cap);
                 let excess = self.omega - capped;
                 self.omega = capped;
@@ -389,6 +447,66 @@ mod tests {
     fn ideal(theta: f32) -> u8 {
         let k = ((wrap_angle(theta) + PI / 6.0).rem_euclid(2.0 * PI) / (PI / 3.0)) as usize % 6;
         SEQUENCE[k]
+    }
+
+    /// Halls whose sectors are `w` wide (SEQUENCE order, step 0 centred on
+    /// 0): what a misplaced sensor looks like.
+    fn uneven(theta: f32, w: &[f32; 6]) -> u8 {
+        let mut x = (wrap_angle(theta) + 0.5 * w[0]).rem_euclid(2.0 * PI);
+        for (k, wk) in w.iter().enumerate() {
+            if x < *wk {
+                return SEQUENCE[k];
+            }
+            x -= wk;
+        }
+        SEQUENCE[5]
+    }
+
+    /// Motor 3's measured sectors: with 60° assumed, the angle is wrong by
+    /// several degrees in a fixed pattern and the edge speed jumps from
+    /// edge to edge; with the widths in the map both go away. Sampled at
+    /// 10 µs so tick quantisation (±1 sample per sector) does not mask it.
+    #[test]
+    fn calibrated_widths_remove_the_sector_pattern() {
+        let w = [63.3f32, 60.0, 56.3, 62.9, 60.7, 56.9].map(|d| d.to_radians());
+        let w = HallMap::normalized_widths(w);
+        let run = |widths: [f32; 6]| {
+            let mut est = HallAngle::new(HallMap {
+                offset: 0.0,
+                dir: 1.0,
+                hyst: 0.0,
+                widths,
+            });
+            let (omega, dt) = (300.0f32, 1e-5);
+            let (mut theta, mut worst, mut wmin, mut wmax) = (0.0f32, 0.0f32, f32::MAX, 0.0f32);
+            for k in 0..200_000 {
+                theta = wrap_angle(theta + omega * dt);
+                let a = est.update(uneven(theta, &w), dt).unwrap();
+                if k > 50_000 {
+                    worst = worst.max(wrap_angle(a - theta).abs());
+                    wmin = wmin.min(est.omega());
+                    wmax = wmax.max(est.omega());
+                }
+            }
+            (worst, (wmax - wmin) / omega)
+        };
+        let (err_even, ripple_even) = run(EVEN);
+        let (err_cal, ripple_cal) = run(w);
+        assert!(
+            err_even > 3f32.to_radians(),
+            "uncalibrated worst {}",
+            err_even.to_degrees()
+        );
+        assert!(
+            ripple_even > 0.08,
+            "uncalibrated speed ripple {ripple_even}"
+        );
+        assert!(
+            err_cal < 1.0f32.to_radians(),
+            "calibrated worst {}",
+            err_cal.to_degrees()
+        );
+        assert!(ripple_cal < 0.01, "calibrated speed ripple {ripple_cal}");
     }
 
     #[test]
@@ -443,6 +561,7 @@ mod tests {
             offset: 1.0,
             dir: -1.0,
             hyst: 0.0,
+            widths: EVEN,
         };
         for &w in &[300.0f32, -300.0] {
             let mut est = HallAngle::new(map);
@@ -469,6 +588,7 @@ mod tests {
             offset: 0.0,
             dir: 1.0,
             hyst: 0.0,
+            widths: EVEN,
         };
         let mut est = HallAngle::new(map);
         for &theta in &[0.0f32, 1.0, 2.5, -2.0] {
@@ -493,6 +613,7 @@ mod tests {
                     offset: 0.0,
                     dir: 1.0,
                     hyst,
+                    widths: EVEN,
                 };
                 let mut est = HallAngle::new(map);
                 let dt = 1e-4;
@@ -526,6 +647,7 @@ mod tests {
             offset: 0.0,
             dir: 1.0,
             hyst: 0.0,
+            widths: EVEN,
         };
         let g = 1.0e5;
         let mut tr = HallTracker::new(map, g);
@@ -556,6 +678,7 @@ mod tests {
             offset: 0.0,
             dir: 1.0,
             hyst: 0.0,
+            widths: EVEN,
         };
         for k in 0..6 {
             let center = k as f32 * PI / 3.0;

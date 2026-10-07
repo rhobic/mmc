@@ -15,6 +15,7 @@ extern crate std;
 // Always available: the arithmetic and building blocks both control
 // methodologies are made of.
 pub mod angle;
+pub mod cogging;
 pub mod hall;
 pub mod math;
 pub mod pi;
@@ -25,6 +26,8 @@ pub mod tuning;
 // Field-oriented control and the sensorless stack built on it.
 #[cfg(feature = "foc")]
 pub mod current_loop;
+#[cfg(feature = "foc")]
+pub mod estim;
 #[cfg(feature = "foc")]
 pub mod foc;
 #[cfg(feature = "foc")]

@@ -1,0 +1,8 @@
+{
+  "command": "mmc-host profile",
+  "description": "Locked-rotor d-axis voltage step (0.5 V align -> 1.0 V, unslewed), (i_d, v_d) recorded on-device at the control rate and read back over the protocol. tools/profile.py fits R from the level change and L from the exponential.",
+  "notes": [],
+  "order": 0,
+  "title": "R/L step probe",
+  "unix_time": 1791343391
+}

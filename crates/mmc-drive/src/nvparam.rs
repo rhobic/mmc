@@ -26,7 +26,18 @@ const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
 /// `pos_kd`, `pos_vmax`), `inertia` and `i_fric`, 18 → 24 params.
 ///
 /// v6 (2026-10-06): added `ss_conduction`, 24 → 25 params.
-const VERSION: u32 = 6;
+///
+/// v7 (2026-10-06): added `id_inject`, 25 → 26 params.
+///
+/// v8 (2026-10-06): added the hall sector widths `hall_w0`…`hall_w5`,
+/// 26 → 32 params.
+///
+/// v9 (2026-10-06): added the i_d dither (`id_dither`, `id_dither_period`),
+/// 32 → 34 params.
+///
+/// v10 (2026-10-07): added the position-torque feed-forward (`cog_ff`,
+/// `cog_shift`, four series terms), 34 → 48 params.
+const VERSION: u32 = 10;
 const HDR: usize = 2; // magic + version
 const CRC_IDX: usize = HDR + param::COUNT;
 const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, round up to even

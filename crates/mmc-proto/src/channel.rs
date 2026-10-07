@@ -57,7 +57,13 @@ pub const POS_M: u8 = 24;
 /// the final target).
 pub const POS_REF: u8 = 25;
 
-pub const COUNT: usize = 26;
+/// Online stator-resistance [Ω] and magnet-flux [Wb] estimates
+/// (`mmc_core::estim`), referred to the commanded voltage like the
+/// profiler's. 0 outside the closed-loop FOC modes.
+pub const R_HAT: u8 = 26;
+pub const PSI_HAT: u8 = 27;
+
+pub const COUNT: usize = 28;
 
 /// Wire names, indexed by channel id; used as CSV headers by the host.
 pub const NAMES: [&str; COUNT] = [
@@ -87,6 +93,8 @@ pub const NAMES: [&str; COUNT] = [
     "omega_hall",
     "pos_m",
     "pos_ref",
+    "r_hat",
+    "psi_hat",
 ];
 
 /// Selection mask with every defined channel enabled.

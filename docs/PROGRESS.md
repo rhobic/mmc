@@ -3,6 +3,63 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-07 — session 34: cancelling the position torque
+
+- `mmc_core::cogging`: hall states counted from power-up, the pole pair
+  identified by correlating measured boundary torques with a series, and
+  the feed-forward, placed by the hall tracker (which now also models the
+  known position torque). Params `cog_ff`, `cog_shift`, four terms
+  (ids 34–47): **fw 19, nvparam v10**, re-applied and persisted on bench 2
+  with the bench-tuned series (`testresults/motor3-cogff/cogging_ff_bench.json`).
+- Bench, hall FOC: speed σ at 100 rad/s el 44.9 → 19.6, at 150 21.4 →
+  11.9, reverse −100 54.5 → 40.4; neutral above 400. The drive found the
+  pole pair by itself on every boot (~1.5 s).
+- ISR: a first build overran (9414/7200 cycles); fixed to 6499 worst case.
+- `mmc-host params` reads the parameter table.
+- Details: [CALIBRATION.md](CALIBRATION.md) "The torque around a turn".
+
+## 2026-10-06 — session 33: low-speed hunting, i_d dither, probe current, coast flux
+
+- **Low-speed hunting** is a position-locked load (89 % of the 100 rad/s el
+  speed variance repeats with rotor position), not a loop cycle.
+  `tools/drag_profile.py` measures it from steady runs in both directions:
+  friction flat at 7.40 mN·m, a conservative 12-per-turn torque (one per
+  slot) plus smaller orders.
+- **i_d dither in firmware** (params `id_dither`, `id_dither_period`,
+  ids 32–33): **fw 18, nvparam v9**. Drive R̂ matches the host within 1.2 %
+  on the same frames.
+- **R/L probe**: L read low for too little align current (the rotor moves
+  in its detent): 0.23 mH at 0.56 A, 0.35 mH from 0.83 A. `profile.py` flags
+  overshoot; motor 3 wants `--rl-volts 1.2,2.0`. Probe metadata now records
+  the volts used.
+- **ψ from a coast** in telemetry (`tools/coast_flux.py`, profiler stage
+  `coast`, opt-in): 6.56–6.59 mWb against a scope's 6.618.
+- Details: [CALIBRATION.md](CALIBRATION.md).
+
+## 2026-10-06 — session 32: hall sector widths, back-EMF, estimator in firmware
+
+- Hall sectors on motor 3 run 56–63°; params `hall_w0…5` (fw 16,
+  **nvparam v8**: re-apply after flashing; done and persisted on bench 2,
+  widths included). 2nd-order i_q ripple at 400 rad/s el 47.6 → 6.3 mA.
+  Hall speed's decay bound fixed.
+- Back-EMF from a coasting terminal (`tools/bemf_scope.py`,
+  `tools/bemf_fit.py`): ψ 6.618 mWb, harmonics < 0.1 %.
+- Estimator in firmware (fw 17): channels `r_hat`/`psi_hat`; matches the
+  host to 1 % on the bench; ISR 4700/7200 cycles.
+- Details: [CALIBRATION.md](CALIBRATION.md).
+
+## 2026-10-06 — session 31: online R/ψ
+
+(Earlier the same day: the 120° vs 180° six-step comparison, fw 14 —
+[SIXSTEP-CONDUCTION.md](SIXSTEP-CONDUCTION.md).)
+
+- `mmc_core::estim`: Kalman R/ψ/offset estimator + block averager;
+  `mmc-host estimate` runs it over captures.
+- Param `id_inject` (id 25): hall FOC d-axis reference. **fw 15, nvparam
+  v7** — re-apply and persist the profile after flashing (done on bench 2).
+- Online R on the bench, i_d stepped: 1.31–1.37 Ω from 200 to 800 rad/s el
+  (profiler 1.418); ψ 6.31 mWb (commanded-voltage referred).
+
 ## 2026-10-02 — session 30c: how slow on halls — a position mode, and stiction
 
 **Question:** how slowly can motor 3 be controlled with the halls, and is

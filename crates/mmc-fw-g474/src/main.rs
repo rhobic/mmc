@@ -159,6 +159,20 @@ const DEFAULTS: [f32; param::COUNT] = [
     1.75e-6,                    // INERTIA (motor 1 fit)
     0.0,                        // I_FRIC
     120.0,                      // SS_CONDUCTION [deg el]
+    0.0,                        // ID_INJECT [A]
+    core::f32::consts::FRAC_PI_3, // HALL_W0..5 [rad el] (no halls: unused)
+    core::f32::consts::FRAC_PI_3,
+    core::f32::consts::FRAC_PI_3,
+    core::f32::consts::FRAC_PI_3,
+    core::f32::consts::FRAC_PI_3,
+    core::f32::consts::FRAC_PI_3,
+    0.0,                        // ID_DITHER [A] (off)
+    0.5,                        // ID_DITHER_PERIOD [s]
+    0.0, // COG_FF (off)
+    -1.0, // COG_SHIFT (identify)
+    0.0, 0.0, 0.0, 0.0, // COG_N0..3 (no series until measured)
+    0.0, 0.0, 0.0, 0.0, // COG_A0..3 [N·m]
+    0.0, 0.0, 0.0, 0.0, // COG_P0..3 [rad]
 ];
 
 /// f32 capacity of the probe burst buffer: the saliency sweep's full
@@ -170,7 +184,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardG474,
-        fw_version: 22,
+        fw_version: 24,
         name: "mmc-g474",
         defaults: DEFAULTS,
     },

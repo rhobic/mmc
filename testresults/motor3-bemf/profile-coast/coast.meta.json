@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host profile",
+  "description": "Profiler flux input: the coasting terminals' line EMF against the hall angle (tools/coast_flux.py).",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 18920 frames."
+  ],
+  "order": 10,
+  "params": {
+    "divider": 2,
+    "drive": "HallFoc { amps: 1.0, omega_e: 1000.0 }",
+    "drive_step": "Off",
+    "duration_s": 10.0,
+    "iq_A": null
+  },
+  "title": "Coast from 1000 rad/s el, terminal sense",
+  "unix_time": 1791344102
+}

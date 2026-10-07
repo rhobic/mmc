@@ -148,6 +148,20 @@ impl DriveConfig {
             param::INERTIA => (1e-8, 1e-2),
             param::I_FRIC => (0.0, 0.5 * self.spec.i_trip),
             param::SS_CONDUCTION => (120.0, 180.0),
+            param::ID_INJECT => (-0.5 * self.spec.i_trip, 0.5 * self.spec.i_trip),
+            param::ID_DITHER => (-0.5 * self.spec.i_trip, 0.5 * self.spec.i_trip),
+            // At least two estimator blocks (50 ms) per level.
+            param::ID_DITHER_PERIOD => (0.2, 10.0),
+            param::COG_FF => (0.0, 2.0),
+            param::COG_SHIFT => (-1.0, 15.0),
+            id if (param::COG_N0..param::COG_N0 + 4).contains(&id) => (0.0, 255.0),
+            id if (param::COG_A0..param::COG_A0 + 4).contains(&id) => (-0.1, 0.1),
+            id if (param::COG_P0..param::COG_P0 + 4).contains(&id) => (-7.0, 7.0),
+            // A sector between 30° and 90°: anything outside is a broken
+            // sensor or a bad fit, not a placement tolerance.
+            id if (param::HALL_W0..param::HALL_W0 + 6).contains(&id) => {
+                (core::f32::consts::FRAC_PI_6, core::f32::consts::FRAC_PI_2)
+            }
             _ => return None,
         })
     }

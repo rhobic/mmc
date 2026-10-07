@@ -313,6 +313,13 @@ sync — normal for motor control in any language.
   the probe doubles as the INFORM measurement primitive if pursued. Design
   notes: `~/.claude/plans/back-to-motor-control-enumerated-hejlsberg.md`.
 
+- **Online calibration on halls** *(2026-10-06/07, see
+  [CALIBRATION.md](CALIBRATION.md))*: hall sector widths (fw 16), the
+  online R/ψ estimator in firmware with i_d injection and dither (fw 17–18),
+  flux from a coast, and the position torque around a turn measured and fed
+  forward with on-board pole-pair identification (fw 19, nvparam v10).
+  Next: better cancellation in reverse, or with the encoder.
+
 ## Verification strategy
 
 - `cargo test` at workspace root: transform round-trips, anti-windup, sim step

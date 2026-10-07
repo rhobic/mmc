@@ -4,6 +4,8 @@
 use core::sync::atomic::Ordering;
 
 use mmc_core::angle::AngleEstimator;
+use mmc_core::cogging::{CogComp, Ident, Term, TERMS};
+use mmc_core::estim::{RpsiAverager, RpsiCfg, RpsiEstimator};
 use mmc_core::foc::{Decoupling, Foc};
 use mmc_core::hall::{HallAngle, HallMap, HallSpeed, HallTracker};
 use mmc_core::inverter::DeadtimeModel;
@@ -34,6 +36,16 @@ const DEADMAN_S: f32 = 2.0;
 const STALL_S: f32 = 0.1;
 /// Invalid hall states tolerated in a row (a glitch) before the hall fault.
 const HALL_BAD_S: f32 = 0.003;
+/// Speed floor of the online R/ψ estimator [rad/s el]; the i_d dither runs
+/// only above it too (below, it would only heat the winding).
+const ESTIM_OMEGA_MIN: f32 = 100.0;
+/// Speed band [rad/s el] where the pole-pair identification collects: fast
+/// enough to cross states steadily, slow enough that state times are many
+/// control ticks long and the position torque shows in the speed.
+const COG_ID_OMEGA: (f32, f32) = (50.0, 600.0);
+/// Above this speed [rad/s el] the position-torque feed-forward is off: it
+/// measured neutral on motor 3 from 400 rad/s el up (testresults/motor3-cogff).
+const COG_FF_OMEGA_MAX: f32 = 500.0;
 
 // Locked-rotor R/L probe (RunTest RL_STEP): rotor-align time at the first
 // voltage level, then square-wave excitation between the two levels. τ=L/R
@@ -104,6 +116,28 @@ pub struct Engine {
     // Hall position mode: measured position (electrical, unwrapped from the
     // hall angle), the trapezoidal reference, and the PID integrator.
     tracker: Option<HallTracker>,
+    /// Online R/ψ estimate in the closed-loop FOC modes.
+    rpsi: Option<RpsiAverager>,
+    /// i_d dither: time into the current level, and which level.
+    dither_t: f32,
+    dither_hi: bool,
+    /// Hall states counted since power-up, the pole-pair identification and
+    /// the position-torque feed-forward (boards with halls).
+    cog: Option<CogComp>,
+    /// The shift last published to `cog_shift`.
+    cog_published: Option<u8>,
+    /// Angle and speed [rad, rad/s el] the position-torque feed-forward is
+    /// placed by: the hall tracker's, which predicts between edges with the
+    /// known torque (the plain hall interpolation assumes constant speed and
+    /// is several degrees off while the rotor hunts).
+    ff_theta: Option<(f32, f32)>,
+    /// The position torque as cancelling i_q [A], held between updates: at
+    /// the tracker's angle (its model) and advanced for the current loop
+    /// (the feed-forward). Each is re-evaluated every other tick, in turn,
+    /// so a tick pays for one series (the F302's interrupt budget).
+    cog_now: f32,
+    cog_ff: f32,
+    cog_odd: bool,
     pos_origin: Option<f32>,
     pos_meas: f32,
     pos_ref: TrapRef,
@@ -158,6 +192,15 @@ impl Engine {
                 beta: 0.0,
             },
             tracker: None,
+            rpsi: None,
+            dither_t: 0.0,
+            dither_hi: false,
+            cog: None,
+            cog_published: None,
+            ff_theta: None,
+            cog_now: 0.0,
+            cog_ff: 0.0,
+            cog_odd: false,
             pos_origin: None,
             pos_meas: 0.0,
             pos_ref: TrapRef { pos: 0.0, vel: 0.0 },
@@ -167,6 +210,23 @@ impl Engine {
     }
 
     /// Calibrated zero-current amplifier outputs [V] (diagnostic).
+    /// The hall-state counter and position-torque identification (boards
+    /// with halls), for diagnostics.
+    pub fn cog(&self) -> Option<&CogComp> {
+        self.cog.as_ref()
+    }
+
+    /// The angle [rad el, unwrapped] the position-torque feed-forward used
+    /// last tick (the hall tracker's), if any.
+    pub fn ff_angle(&self) -> Option<f32> {
+        self.ff_theta.map(|t| t.0)
+    }
+
+    /// The drive's electrical angle [rad] as of the last tick.
+    pub fn theta(&self) -> f32 {
+        self.theta
+    }
+
     pub fn current_offsets(&self) -> [f32; 3] {
         self.offset_v
     }
@@ -209,6 +269,8 @@ impl Engine {
             }
             self.cal_count += 1;
             if self.cal_count == CAL_TICKS {
+                // A persisted shift belongs to a count that restarted.
+                sh.params[param::COG_SHIFT as usize].store((-1.0f32).to_bits(), Ordering::Relaxed);
                 for (offset, &sum) in self.offset_v.iter_mut().zip(&self.cal_sum) {
                     *offset = sum / CAL_TICKS as f32;
                 }
@@ -237,6 +299,53 @@ impl Engine {
             (Some(h), Some(ha)) => ha.update(h, dt),
             _ => None,
         };
+        let cog_terms = cog_terms(&p);
+        let kt = 1.5 * p(param::POLE_PAIRS) * p(param::FLUX);
+        if spec.has_halls {
+            let pp = p(param::POLE_PAIRS).max(1.0) as u8;
+            let cog = self
+                .cog
+                .get_or_insert_with(|| CogComp::new(&hall_map(&p), pp));
+            // Collect torque samples only in steady hall FOC: the energy
+            // balance needs a speed loop holding the rotor near a setpoint.
+            // Gated on the setpoint, not the measured speed: a hunting rotor
+            // is slowest exactly where the torque is largest (motor 3: 27
+            // rad/s el at its worst state for a 100 setpoint), and gating
+            // on speed starved that boundary forever.
+            let collect = self.mode == mode::HALL_FOC
+                && sh.state.load(Ordering::Relaxed) == ST_RUN
+                && (COG_ID_OMEGA.0..COG_ID_OMEGA.1).contains(&self.omega_ref_cur.abs())
+                && self.omega_ref_cur == f32::from_bits(sh.cmd_omega.load(Ordering::Relaxed));
+            let lost = cog.tick(
+                hall_state,
+                self.iq_last,
+                dt,
+                collect,
+                kt,
+                p(param::INERTIA),
+                &cog_terms,
+            );
+            let host = p(param::COG_SHIFT);
+            if lost {
+                self.cog_published = None;
+                sh.params[param::COG_SHIFT as usize].store((-1.0f32).to_bits(), Ordering::Relaxed);
+            } else if host >= 0.0 {
+                // Forced, or ours echoed back.
+                let s = (host as u8) % pp.max(1);
+                if cog.shift != Some(s) {
+                    cog.shift = Some(s);
+                    cog.ident = Ident::Found;
+                }
+                self.cog_published = Some(s);
+            } else if self.cog_published.is_some() {
+                // The host cleared it: identify afresh.
+                self.cog_published = None;
+                cog.reset_ident();
+            } else if let Some(s) = cog.shift {
+                self.cog_published = Some(s);
+                sh.params[param::COG_SHIFT as usize].store((s as f32).to_bits(), Ordering::Relaxed);
+            }
+        }
 
         // --- pick up new host commands.
         let epoch = sh.cmd_epoch.load(Ordering::Acquire);
@@ -244,6 +353,7 @@ impl Engine {
             self.epoch_seen = epoch;
             self.command(sh, b);
         }
+        let (cog_now, cog_unit) = self.cog_unit(&p, &cog_terms, kt, dt);
 
         // --- protection trips (only meaningful once running).
         if self.mode != mode::OFF {
@@ -416,8 +526,8 @@ impl Engine {
                     // loop limit-cycled ±10° mechanical in the sim. The
                     // target arrives in mechanical radians.
                     let pp = p(param::POLE_PAIRS).max(1.0);
-                    if let Some((pos, w)) =
-                        hall_state.and_then(|h| self.tracker.as_mut()?.update(h, self.iq_last, dt))
+                    if let Some((pos, w)) = hall_state
+                        .and_then(|h| self.tracker.as_mut()?.update(h, self.iq_last - cog_now, dt))
                     {
                         // Positions are relative to where the drive started.
                         if self.pos_origin.is_none() {
@@ -425,6 +535,7 @@ impl Engine {
                         }
                         self.pos_meas = pos - self.pos_origin.unwrap_or(0.0);
                         self.omega = w;
+                        self.ff_theta = Some((pos, w));
                     }
                     let measured = self.pos_meas;
                     let target = omega_target * pp;
@@ -463,6 +574,8 @@ impl Engine {
                         + p(param::POS_KD) * (self.pos_ref.vel - self.omega)
                         + fric)
                         .clamp(-auth, auth);
+                    iq_ref = (iq_ref + p(param::COG_FF) * cog_unit)
+                        .clamp(-p(param::IQ_LIMIT), p(param::IQ_LIMIT));
                     let out = self.foc.as_mut().unwrap().step(
                         i_abc,
                         self.theta,
@@ -487,11 +600,44 @@ impl Engine {
                             .as_mut()
                             .unwrap()
                             .update(self.omega_ref_cur, self.omega, dt);
+                    if let Some(h) = hall_state {
+                        self.ff_theta = self
+                            .tracker
+                            .as_mut()
+                            .and_then(|t| t.update(h, self.iq_last - cog_now, dt));
+                    }
+                    iq_ref = (iq_ref + p(param::COG_FF) * cog_unit)
+                        .clamp(-p(param::IQ_LIMIT), p(param::IQ_LIMIT));
+                    // An injected i_d (normally 0) makes R observable to an
+                    // online estimator; no torque on a surface magnet. The
+                    // dither steps it so R shows as a slope, which voltage
+                    // offsets cannot fake (docs/CALIBRATION.md).
+                    let lim = p(param::IQ_LIMIT);
+                    let mut id_ref = p(param::ID_INJECT);
+                    let dither = p(param::ID_DITHER);
+                    if dither != 0.0 && self.omega.abs() >= ESTIM_OMEGA_MIN {
+                        let half = 0.5 * p(param::ID_DITHER_PERIOD);
+                        self.dither_t += dt;
+                        if self.dither_t >= half {
+                            self.dither_t -= half;
+                            self.dither_hi = !self.dither_hi;
+                        }
+                        if self.dither_hi {
+                            id_ref += dither;
+                        }
+                    } else {
+                        self.dither_t = 0.0;
+                        self.dither_hi = false;
+                    }
+                    let id_ref = id_ref.clamp(-lim, lim);
                     let out = self.foc.as_mut().unwrap().step(
                         i_abc,
                         self.theta,
                         self.omega,
-                        Dq { d: 0.0, q: iq_ref },
+                        Dq {
+                            d: id_ref,
+                            q: iq_ref,
+                        },
                         vbus,
                         dt,
                     );
@@ -689,6 +835,16 @@ impl Engine {
         put(channel::I_D, i_dq.d);
         put(channel::I_Q, i_dq.q);
         put(channel::V_D, v_dq.d);
+        if let Some(e) = self.rpsi.as_mut() {
+            let running = sh.state.load(Ordering::Relaxed) == ST_RUN
+                && matches!(self.mode, mode::HALL_FOC | mode::SENSORLESS);
+            e.push(v_dq, i_dq, self.omega, cfg.dt(), running);
+            put(channel::R_HAT, e.est.r());
+            put(channel::PSI_HAT, e.est.psi());
+        } else {
+            put(channel::R_HAT, 0.0);
+            put(channel::PSI_HAT, 0.0);
+        }
         put(channel::V_Q, v_dq.q);
         put(channel::DUTY_A, duties[0]);
         put(channel::DUTY_B, duties[1]);
@@ -751,6 +907,43 @@ impl Engine {
 
         let dur = b.cycles().wrapping_sub(t0);
         sh.isr_max_cycles.fetch_max(dur, Ordering::Relaxed);
+    }
+
+    /// The i_q [A] that cancels the position torque at the tracker's angle,
+    /// and at that angle advanced by the current loop's lag (its bandwidth)
+    /// plus a control period; zeros before the pole pair is known. One
+    /// series pass a tick: the tracker's model subtracts the first from the
+    /// measured current (the torque acts on the rotor whether or not it is
+    /// cancelled), the feed-forward adds `cog_ff` times the second.
+    fn cog_unit(
+        &mut self,
+        p: &impl Fn(u8) -> f32,
+        terms: &[Term; TERMS],
+        kt: f32,
+        dt: f32,
+    ) -> (f32, f32) {
+        let active = self.cog.as_ref().is_some_and(|c| c.shift.is_some())
+            && matches!(self.mode, mode::HALL_FOC | mode::HALL_POS)
+            // Above this the inertia filters the position torque and the
+            // feed-forward measured neutral on the bench; skip it there
+            // (and its cycles, where the interrupt is busiest).
+            && self.omega.abs() <= COG_FF_OMEGA_MAX;
+        if !active {
+            (self.cog_now, self.cog_ff) = (0.0, 0.0);
+            return (0.0, 0.0);
+        }
+        let c = self.cog.as_ref().unwrap();
+        let (th, w) = self.ff_theta.unwrap_or((self.theta, self.omega));
+        self.cog_odd = !self.cog_odd;
+        if self.cog_odd {
+            // Held for two ticks: lead by the current loop's lag, one
+            // period of PWM latency and the extra period it is held.
+            let lead = 1.0 / p(param::CUR_BW).max(1.0) + 2.0 * dt;
+            self.cog_ff = c.feedforward(terms, th + w * lead, kt);
+        } else {
+            self.cog_now = c.feedforward(terms, th + w * dt, kt);
+        }
+        (self.cog_now, self.cog_ff)
     }
 
     fn finish_probe<const N: usize>(&mut self, sh: &Shared<N>, b: &mut impl MotorBoard) {
@@ -969,14 +1162,7 @@ impl Engine {
             // Electrical acceleration per amp: 1.5·p²·ψ / J.
             let pp = p(param::POLE_PAIRS).max(1.0);
             let g = 1.5 * pp * pp * p(param::FLUX) / p(param::INERTIA);
-            self.tracker = Some(HallTracker::new(
-                HallMap {
-                    offset: p(param::HALL_OFFSET),
-                    dir: if p(param::HALL_DIR) < 0.0 { -1.0 } else { 1.0 },
-                    hyst: p(param::HALL_HYST),
-                },
-                g,
-            ));
+            self.tracker = Some(HallTracker::new(hall_map(&p), g));
             self.pos_origin = None;
             self.pos_meas = 0.0;
             self.pos_ref = TrapRef::new(0.0);
@@ -1015,14 +1201,42 @@ impl Engine {
         }
         // Every drive on a board with halls carries the calibrated hall
         // angle: the hall modes run on it, the rest are scored against it.
-        self.hall_angle = spec.has_halls.then(|| {
-            HallAngle::new(HallMap {
-                offset: p(param::HALL_OFFSET),
-                dir: if p(param::HALL_DIR) < 0.0 { -1.0 } else { 1.0 },
-                hyst: p(param::HALL_HYST),
-            })
-        });
+        let map = hall_map(&p);
+        self.hall_angle = spec.has_halls.then(|| HallAngle::new(map));
+        self.hall.widths = map.widths;
+        if let Some(c) = self.cog.as_mut() {
+            c.retune(&map, p(param::POLE_PAIRS).max(1.0) as u8);
+        }
+        self.ff_theta = None;
+        if mode == mode::HALL_FOC && spec.has_halls {
+            // Hall FOC keeps the hall angle for its FOC; the tracker only
+            // places the position-torque feed-forward.
+            let pp = p(param::POLE_PAIRS).max(1.0);
+            let g = 1.5 * pp * pp * p(param::FLUX) / p(param::INERTIA);
+            self.tracker = Some(HallTracker::new(map, g));
+        }
         self.hall_bad = 0;
+        // Online R/ψ in the closed-loop FOC modes, starting from the
+        // profile. Tuned per 50 ms block, as the host estimator is
+        // (docs/CALIBRATION.md): R may drift ~1 %/s, ψ ~0.1 %/s.
+        self.rpsi = matches!(mode, mode::HALL_FOC | mode::SENSORLESS).then(|| {
+            let l = p(param::L);
+            let cfg = RpsiCfg {
+                ld: l,
+                lq: l,
+                q_r: 1e-5,
+                q_psi: 2e-12,
+                q_bias: 1e-6,
+                noise: 1e-4,
+                omega_min: ESTIM_OMEGA_MIN,
+                i_min: 0.1,
+                use_derivative: false,
+                p0: 1.0,
+            };
+            RpsiAverager::new(RpsiEstimator::new(cfg, p(param::R), p(param::FLUX)), 0.05)
+        });
+        self.dither_t = 0.0;
+        self.dither_hi = false;
         if mode == mode::SS_HALL {
             // Duty per rad/s el, preloaded with the duty that drives the
             // current ceiling through two windings at standstill (the
@@ -1218,5 +1432,25 @@ impl Engine {
         sh.sixstep_sector
             .store(self.ss_sector as u8, Ordering::Relaxed);
         duties
+    }
+}
+
+/// The position-torque series as the parameter table holds it.
+fn cog_terms(p: &impl Fn(u8) -> f32) -> [Term; TERMS] {
+    core::array::from_fn(|k| Term {
+        order: p(param::COG_N0 + k as u8),
+        amp: p(param::COG_A0 + k as u8),
+        phase: p(param::COG_P0 + k as u8),
+    })
+}
+
+/// The hall calibration as the parameter table holds it.
+fn hall_map(p: &impl Fn(u8) -> f32) -> HallMap {
+    let w: [f32; 6] = core::array::from_fn(|k| p(param::HALL_W0 + k as u8));
+    HallMap {
+        offset: p(param::HALL_OFFSET),
+        dir: if p(param::HALL_DIR) < 0.0 { -1.0 } else { 1.0 },
+        hyst: p(param::HALL_HYST),
+        widths: HallMap::normalized_widths(w),
     }
 }

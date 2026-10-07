@@ -10,6 +10,7 @@ mmc-core.workspace = true
 mmc-hal.workspace = true
 mmc-proto.workspace = true
 mmc-sim.workspace = true
+mmc-drive.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

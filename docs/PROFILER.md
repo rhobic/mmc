@@ -83,6 +83,16 @@ The default excitation is sized for the small bench BLDC. A different motor
 usually needs different numbers — all settable per run:
 
 - `--rl-volts a,b` — probe voltages; lower for low-R motors (trip = 1.5 A).
+  Not too low either: the align current must hold the rotor against its
+  cogging and keep the PWM ripple off zero. Too little and the current
+  overshoots its final value and L reads low (motor 3: 0.23 mH at 0.56 A
+  of align current, 0.35 mH from 0.83 A); `tools/profile.py` warns above
+  1 % overshoot. Motor 3: `--rl-volts 1.2,2.0`.
+- `--only coast` (opt-in, needs halls; `--coast-omega`, default 1000 rad/s
+  el) — spins up in hall FOC, cuts the stage and fits ψ from the coasting
+  terminals' line EMF against the hall angle (`tools/coast_flux.py`). No
+  load or angle model, so it is the better flux measurement on a light
+  load; `tools/profile.py` prefers it over the I-f sweep when both exist.
 - `--sweep-points 0.6@60,0.9@90,…` — I-f amps@ω_e. Two constraints: the
   motor must hold sync **from rest** through the 500 rad/s² el ramp (heavier
   rotor / more friction ⇒ more amps, lower speeds), and ω·ψ must stay under

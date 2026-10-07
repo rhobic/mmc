@@ -1,0 +1,10 @@
+{
+ "psi": 0.006559121476378661,
+ "pairs": 78,
+ "residual_V": 0.281301740875302,
+ "omega_range": [
+  413.4960833980099,
+  972.3151437646893
+ ],
+ "source": "testresults/motor3-bemf/coast_1000_telem_b.csv"
+}
