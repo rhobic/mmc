@@ -7,7 +7,7 @@ use crate::{cobs, crc::crc16};
 pub const MAX_PAYLOAD: usize = 8 + MAX_CHANNELS * 4;
 
 /// Cap on simultaneously streamed channels (mask bits 0..24).
-pub const MAX_CHANNELS: usize = 28;
+pub const MAX_CHANNELS: usize = 29;
 
 mod ty {
     pub const PING: u8 = 0x01;
@@ -49,6 +49,13 @@ pub mod test {
     /// Ld ≠ Lq. No rotor clamping required — the ± pairing cancels net
     /// torque impulse and the fit recovers the rotor angle as a parameter.
     pub const L_THETA: u8 = 1;
+    /// High-frequency injection sweep at standstill (`mmc_core::hfi`): a
+    /// square-wave carrier of `a` volts at half the control rate along 24
+    /// test angles, demodulated and accumulated on the device. `b`: align
+    /// the rotor first with a DC current vector at `b` rad electrical, or
+    /// no align for `b` outside ±7. Param `id_inject` adds a DC bias current
+    /// along each test axis (saturation polarity: a 1θ term).
+    pub const HFI_SWEEP: u8 = 2;
 }
 
 /// Runtime device parameter ids for [`Message::SetParam`] / `GetParam` —
@@ -165,7 +172,17 @@ pub mod param {
     pub const COG_N0: u8 = 36;
     pub const COG_A0: u8 = 40;
     pub const COG_P0: u8 = 44;
-    pub const COUNT: usize = 48;
+    /// High-frequency injection (`mmc_core::hfi::Tracker`): carrier amplitude
+    /// [V] added along the tracker's d axis each control period, 0 = off. In
+    /// the hall modes it runs in shadow (its angle on the estimate channels,
+    /// `theta_err` its error sampled at hall edges).
+    pub const HFI_V: u8 = 48;
+    /// HFI tracking-loop bandwidth [rad/s].
+    pub const HFI_BW: u8 = 49;
+    /// Saliency ratio (Lq − Ld)/(Lq + Ld) the HFI loop gains are scaled by
+    /// (`mmc-host hfi` + `tools/hfi_fit.py` measure it).
+    pub const HFI_XI: u8 = 50;
+    pub const COUNT: usize = 51;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -215,6 +232,9 @@ pub mod param {
         "cog_p1",
         "cog_p2",
         "cog_p3",
+        "hfi_v",
+        "hfi_bw",
+        "hfi_xi",
     ];
 }
 

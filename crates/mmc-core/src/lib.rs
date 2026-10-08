@@ -17,6 +17,7 @@ extern crate std;
 pub mod angle;
 pub mod cogging;
 pub mod hall;
+pub mod hfi;
 pub mod math;
 pub mod pi;
 pub mod position;

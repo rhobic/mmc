@@ -37,7 +37,10 @@ const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
 ///
 /// v10 (2026-10-07): added the position-torque feed-forward (`cog_ff`,
 /// `cog_shift`, four series terms), 34 → 48 params.
-const VERSION: u32 = 10;
+///
+/// v11 (2026-10-08): added high-frequency injection (`hfi_v`, `hfi_bw`,
+/// `hfi_xi`), 48 → 51 params.
+const VERSION: u32 = 11;
 const HDR: usize = 2; // magic + version
 const CRC_IDX: usize = HDR + param::COUNT;
 const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, round up to even

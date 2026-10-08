@@ -8,6 +8,7 @@ use mmc_core::cogging::{CogComp, Ident, Term, TERMS};
 use mmc_core::estim::{RpsiAverager, RpsiCfg, RpsiEstimator};
 use mmc_core::foc::{Decoupling, Foc};
 use mmc_core::hall::{HallAngle, HallMap, HallSpeed, HallTracker};
+use mmc_core::hfi::Tracker as HfiTracker;
 use mmc_core::inverter::DeadtimeModel;
 use mmc_core::math::{sin_cos, wrap_angle};
 use mmc_core::observer::{FluxObserver, FluxObserverCfg};
@@ -49,6 +50,36 @@ const COG_FF_OMEGA_MAX: f32 = 500.0;
 /// Slowest rotor [rad/s el] a drive start catches on the fly; below it the
 /// rotor is treated as at rest and the mode starts as it always has.
 const CATCH_OMEGA_MIN: f32 = 30.0;
+/// HFI sensorless start (`hfi_v` > 0): time for the tracker to lock at zero
+/// current, each polarity pulse (and its unrecorded settling), and the
+/// pulse current along ±d. Saturation makes the +d (magnet north) pulse
+/// answer the carrier more strongly (motor 3: 2-20 % at ±0.7 A).
+const HFI_LOCK_S: f32 = 0.3;
+const HFI_POL_S: f32 = 0.025;
+const HFI_POL_SETTLE_S: f32 = 0.008;
+/// Polarity pulse pairs, alternating +d/−d: averages the noise, and a rotor
+/// drifting during the test biases both signs alike.
+const HFI_POL_PAIRS: u32 = 3;
+
+const HFI_POL_A: f32 = 0.6;
+
+/// Phases of the HFI sensorless start.
+#[derive(Copy, Clone, Debug, PartialEq)]
+enum HfiPhase {
+    Lock,
+    PolPos,
+    PolNeg,
+    Run,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct HfiStart {
+    phase: HfiPhase,
+    ticks: u32,
+    acc: [f32; 2],
+    n: [u32; 2],
+    pairs: u32,
+}
 
 // Locked-rotor R/L probe (RunTest RL_STEP): rotor-align time at the first
 // voltage level, then square-wave excitation between the two levels. τ=L/R
@@ -131,6 +162,15 @@ pub struct Engine {
     cog_published: Option<u8>,
     /// Hall angle of the last tick (boards with halls; every mode).
     hall_last: Option<f32>,
+    /// High-frequency injection tracker (`hfi_v` > 0), and its error against
+    /// the hall angle sampled at the last hall edge (where the halls are
+    /// exact), for scoring it.
+    hfi: Option<HfiTracker>,
+    /// Sensorless start on HFI (`hfi_v` > 0): lock, polarity, run, then
+    /// hand over to the flux observer. `None` once handed over.
+    hfi_start: Option<HfiStart>,
+    hfi_edge_err: f32,
+    hall_state_prev: Option<u8>,
     /// Measured stator current of the last tick, αβ: a flying start reads
     /// the torque current the rotor was carrying in the rotor's own frame
     /// (the outgoing mode's i_q may be in a forced frame).
@@ -207,6 +247,10 @@ impl Engine {
             cog: None,
             cog_published: None,
             hall_last: None,
+            hfi: None,
+            hfi_start: None,
+            hfi_edge_err: 0.0,
+            hall_state_prev: None,
             i_ab_last: AlphaBeta {
                 alpha: 0.0,
                 beta: 0.0,
@@ -400,6 +444,7 @@ impl Engine {
         let mut theta_est = 0.0f32;
         let mut omega_est = 0.0f32;
         let mut theta_err = 0.0f32;
+        let mut hfi_out: Option<(f32, f32)> = None;
 
         if self.mode != mode::OFF {
             // Sample point is a runtime param so it can be swept over the wire.
@@ -419,7 +464,90 @@ impl Engine {
             let i_ab = clarke(i_abc);
             let vbus = self.vbus_filt.max(1.0);
 
-            let v_ab = if self.mode == mode::PROBE
+            let mut v_ab = if self.mode == mode::PROBE
+                && sh.probe_kind.load(Ordering::Relaxed) == test::HFI_SWEEP
+            {
+                // HFI sweep (`mmc_core::hfi`): optional align, a short
+                // release, then a ±V_h carrier along each test angle, the
+                // response demodulated and accumulated into the burst.
+                use mmc_core::hfi;
+                self.probe_ticks += 1;
+                let v_h = f32::from_bits(sh.probe_v_step.load(Ordering::Relaxed));
+                let align_at = f32::from_bits(sh.probe_v_align.load(Ordering::Relaxed));
+                let aligning = align_at.abs() <= 7.0;
+                let (t_align, t_rel) = if aligning {
+                    (cfg.ticks(hfi::ALIGN_S), cfg.ticks(hfi::RELEASE_S))
+                } else {
+                    (0, 0)
+                };
+                // Safety: the host only reads once DONE.
+                let buf = unsafe { &mut *sh.burst.0.get() };
+                if self.probe_ticks <= t_align {
+                    // Park the rotor: a DC current vector at the align angle.
+                    let sc = sin_cos(align_at);
+                    i_dq = park(i_ab, sc);
+                    v_dq = Dq {
+                        d: hfi::ALIGN_A * p(param::R),
+                        q: 0.0,
+                    };
+                    let v_ab = inverse_park(v_dq, sc);
+                    duties = svpwm(v_ab, vbus);
+                    v_ab
+                } else if self.probe_ticks <= t_align + t_rel {
+                    // Released: zero volts while the align current decays.
+                    duties = svpwm(AlphaBeta::default(), vbus);
+                    AlphaBeta::default()
+                } else {
+                    let t = (self.probe_ticks - t_align - t_rel - 1) as usize;
+                    if t == 0 {
+                        buf[..hfi::LEN].fill(0.0);
+                        let hdr = [
+                            test::HFI_SWEEP as f32,
+                            hfi::ANGLES as f32,
+                            hfi::CYCLES as f32,
+                            hfi::DWELL as f32,
+                            hfi::SKIP as f32,
+                            v_h,
+                            if aligning { align_at } else { hfi::NONE },
+                            self.hall_last.unwrap_or(hfi::NONE),
+                            spec.ctrl_hz as f32,
+                            hfi::samples_per_bin() as f32,
+                        ];
+                        buf[..hfi::HDR].copy_from_slice(&hdr);
+                    }
+                    if t >= hfi::TICKS {
+                        sh.burst_len.store(hfi::LEN as u32, Ordering::Relaxed);
+                        self.finish_probe(sh, b);
+                        AlphaBeta::default()
+                    } else {
+                        let (k, sign, w, rec) = hfi::schedule(t);
+                        let sc = sin_cos(hfi::angle(k));
+                        i_dq = park(i_ab, sc);
+                        if rec {
+                            // The change since the last sample, in this
+                            // angle's frame (the visit's first ticks settle
+                            // unrecorded, so the last sample was this angle).
+                            let before = park(self.i_ab_last, sc);
+                            let at = hfi::HDR + k * hfi::PER_ANGLE;
+                            buf[at] += i_dq.d;
+                            buf[at + 1] += i_dq.q;
+                            buf[at + 2] += w * (i_dq.d - before.d);
+                            buf[at + 3] += w * (i_dq.q - before.q);
+                        }
+                        // `id_inject` doubles as a DC bias along each test
+                        // axis (as volts over R): saturation then lowers L
+                        // toward the magnet's north only, which puts a 1θ
+                        // term (the polarity) beside the 2θ one.
+                        v_dq = Dq {
+                            d: sign * v_h + p(param::ID_INJECT) * p(param::R),
+                            q: 0.0,
+                        };
+                        let v_ab = inverse_park(v_dq, sc);
+                        duties = svpwm(v_ab, vbus);
+                        v_ab
+                    }
+                }
+            } else if self.mode == mode::PROBE
                 && sh.probe_kind.load(Ordering::Relaxed) == test::L_THETA
             {
                 // Saliency sweep: align at v_low on θ = 0 (parks a free
@@ -665,6 +793,113 @@ impl Engine {
                     i_dq = park(i_ab, sin_cos(self.theta));
                     AlphaBeta::default()
                 }
+            } else if self.mode == mode::SENSORLESS && self.hfi_start.is_some() {
+                // Sensorless from standstill on high-frequency injection:
+                // the tracker owns the angle (one tick old; it updates in
+                // the injection hook below), the start sequence the d-axis
+                // current, the speed loop q once running.
+                let tr = *self.hfi.as_ref().unwrap();
+                let th = wrap_angle(tr.theta() + tr.omega() * dt);
+                let w = tr.omega();
+                let st = self.hfi_start.as_mut().unwrap();
+                st.ticks += 1;
+                let pol_a = HFI_POL_A.min(0.5 * spec.i_trip);
+                let mut iq_cmd = 0.0;
+                let id_cmd = match st.phase {
+                    HfiPhase::Lock => {
+                        if st.ticks >= cfg.ticks(HFI_LOCK_S) {
+                            st.phase = HfiPhase::PolPos;
+                            st.ticks = 0;
+                        }
+                        // The d bias (`id_inject`) keeps the phase currents
+                        // off zero, where the dead time would flip with the
+                        // carrier and swamp it. Off the axis it is torque,
+                        // so the rotor turns a little toward the estimate as
+                        // the estimate turns onto the rotor.
+                        p(param::ID_INJECT)
+                    }
+                    HfiPhase::PolPos | HfiPhase::PolNeg => {
+                        let k = (st.phase == HfiPhase::PolNeg) as usize;
+                        if st.ticks > cfg.ticks(HFI_POL_SETTLE_S) {
+                            st.acc[k] += tr.d_amp.abs();
+                            st.n[k] += 1;
+                        }
+                        if st.ticks >= cfg.ticks(HFI_POL_S) {
+                            st.ticks = 0;
+                            if k == 0 {
+                                st.phase = HfiPhase::PolNeg;
+                            } else if st.pairs + 1 < HFI_POL_PAIRS {
+                                st.pairs += 1;
+                                st.phase = HfiPhase::PolPos;
+                            } else {
+                                // The axis the tracker found is the magnet's
+                                // south if −d answered the stronger.
+                                let pos = st.acc[0] / st.n[0].max(1) as f32;
+                                let neg = st.acc[1] / st.n[1].max(1) as f32;
+                                if neg > pos {
+                                    self.hfi.as_mut().unwrap().flip();
+                                }
+                                st.phase = HfiPhase::Run;
+                            }
+                        }
+                        if k == 0 {
+                            pol_a
+                        } else {
+                            -pol_a
+                        }
+                    }
+                    HfiPhase::Run => {
+                        let accel = p(param::OMEGA_ACCEL);
+                        let d = (omega_target - self.omega_ref_cur).clamp(-accel * dt, accel * dt);
+                        self.omega_ref_cur += d;
+                        iq_cmd = self
+                            .speed
+                            .as_mut()
+                            .unwrap()
+                            .update(self.omega_ref_cur, w, dt);
+                        // Fast enough for the flux observer, which has been
+                        // integrating all along: hand over, stop injecting.
+                        if w.abs() >= p(param::SL_HANDOFF) && w * omega_target > 0.0 {
+                            if let Some(q) = self.seq.as_mut() {
+                                q.start_closed();
+                            }
+                            self.hfi_start = None;
+                            self.hfi = None;
+                        }
+                        p(param::ID_INJECT)
+                    }
+                };
+                iq_ref = iq_cmd;
+                // Locking and polarity happen on a rotor meant to stand
+                // still: the tracker's speed is noise there, and fed to the
+                // FOC's back-EMF and cross-coupling feedforward it becomes q
+                // voltage, torque and motion.
+                let w_ff = if self
+                    .hfi_start
+                    .as_ref()
+                    .is_some_and(|s| s.phase != HfiPhase::Run)
+                {
+                    0.0
+                } else {
+                    w
+                };
+                self.theta = th;
+                self.omega = w;
+                let out = self.foc.as_mut().unwrap().step(
+                    i_abc,
+                    th,
+                    w_ff,
+                    Dq {
+                        d: id_cmd,
+                        q: iq_cmd,
+                    },
+                    vbus,
+                    dt,
+                );
+                duties = out.duties;
+                v_dq = out.v_dq;
+                i_dq = out.i_dq;
+                out.v_ab
             } else if self.mode == mode::SENSORLESS {
                 // Sensorless: the sequencer owns the angle (I-f ramp → blend
                 // → observer), the speed loop owns i_q once closed. The
@@ -781,6 +1016,27 @@ impl Engine {
                     out.v_ab
                 }
             };
+            // High-frequency injection: track the rotor's axis from its
+            // saliency, the carrier riding on whatever the mode applied. In
+            // the hall modes this is a shadow, scored at hall edges.
+            let hfi_mode = matches!(self.mode, mode::HALL_FOC | mode::HALL_POS)
+                || (self.mode == mode::SENSORLESS && self.hfi_start.is_some());
+            if let Some(tr) = self.hfi.as_mut().filter(|_| hfi_mode) {
+                let (th, w) = tr.update(i_ab, dt);
+                let inj = inverse_park(
+                    Dq {
+                        d: tr.carrier(),
+                        q: 0.0,
+                    },
+                    sin_cos(th),
+                );
+                v_ab = AlphaBeta {
+                    alpha: v_ab.alpha + inj.alpha,
+                    beta: v_ab.beta + inj.beta,
+                };
+                duties = svpwm(v_ab, vbus);
+                hfi_out = Some((th, w));
+            }
             if self.mode != mode::OFF {
                 b.set_duties(duties);
             }
@@ -884,6 +1140,28 @@ impl Engine {
             _ => sh.state.load(Ordering::Relaxed),
         };
         put(channel::STATE, state_telem as f32);
+        if let Some((th, w)) = hfi_out {
+            // A hall edge is where the hall angle is exact: score the HFI
+            // axis (mod π) there and hold it until the next edge.
+            if let (Some(h), Some(prev), Some(href)) =
+                (hall_state, self.hall_state_prev, self.hall_last)
+            {
+                if h != prev {
+                    self.hfi_edge_err = 0.5 * wrap_angle(2.0 * (th - href));
+                }
+            }
+            theta_est = th;
+            omega_est = w;
+            theta_err = self.hfi_edge_err;
+        }
+        self.hall_state_prev = hall_state;
+        put(
+            channel::HFI_D,
+            self.hfi
+                .as_ref()
+                .filter(|_| hfi_out.is_some())
+                .map_or(0.0, |t| t.d_amp),
+        );
         put(channel::THETA_EST, theta_est);
         put(channel::OMEGA_EST, omega_est);
         put(channel::THETA_ERR, theta_err);
@@ -1345,6 +1623,35 @@ impl Engine {
             c.retune(&map, p(param::POLE_PAIRS).max(1.0) as u8);
         }
         self.ff_theta = None;
+        // HFI: a shadow in the hall modes; in sensorless, the start from
+        // standstill unless a flying start already caught the rotor.
+        let sl_hfi = mode == mode::SENSORLESS
+            && self
+                .seq
+                .as_ref()
+                .is_some_and(|q| q.phase() != Phase::Closed);
+        let hfi_on =
+            p(param::HFI_V) > 0.0 && (matches!(mode, mode::HALL_FOC | mode::HALL_POS) || sl_hfi);
+        self.hfi = hfi_on.then(|| {
+            HfiTracker::new(
+                p(param::HFI_V),
+                p(param::HFI_XI),
+                p(param::HFI_BW),
+                self.hall_last.filter(|_| !sl_hfi).unwrap_or(0.0),
+            )
+        });
+        self.hfi_start = (hfi_on && sl_hfi).then_some(HfiStart {
+            phase: HfiPhase::Lock,
+            ticks: 0,
+            acc: [0.0; 2],
+            n: [0; 2],
+            pairs: 0,
+        });
+        if self.hfi_start.is_some() {
+            // The speed reference ramps from rest, not from the I-f handoff.
+            self.omega_ref_cur = 0.0;
+            self.sl_preload = 0.0;
+        }
         if mode == mode::HALL_FOC && spec.has_halls {
             // Hall FOC keeps the hall angle for its FOC; the tracker only
             // places the position-torque feed-forward.

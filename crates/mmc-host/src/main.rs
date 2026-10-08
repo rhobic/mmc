@@ -55,6 +55,9 @@ enum Command {
     Apply(ApplyArgs),
     /// Read the device's parameter table (all, or the names given).
     Params(ParamsArgs),
+    /// High-frequency injection sweep at standstill (zero-speed position
+    /// from saliency): one sweep per align angle, written as CSV.
+    Hfi(HfiArgs),
     /// Run the online R/ψ estimator over captures that recorded the dq
     /// channels (i_d, i_q, v_d, v_q, omega_hall, state).
     Estimate(EstimateArgs),
@@ -154,6 +157,28 @@ struct ApplyArgs {
     /// Also write the applied table to flash so it survives a power cycle.
     #[arg(long)]
     persist: bool,
+}
+
+#[derive(clap::Args)]
+struct HfiArgs {
+    #[arg(long, default_value = "auto")]
+    serial: String,
+    #[arg(long, default_value_t = 1_000_000)]
+    baud: u32,
+    #[arg(long)]
+    addr: Option<String>,
+    /// Carrier amplitude [V].
+    #[arg(long, default_value_t = 1.0)]
+    amp: f32,
+    /// Align angles [deg electrical], comma-separated; `none` sweeps the
+    /// rotor where it stands. Each align is one sweep.
+    #[arg(long, value_delimiter = ',', default_value = "none")]
+    align: Vec<String>,
+    /// Repeat each sweep this many times.
+    #[arg(long, default_value_t = 1)]
+    repeat: u32,
+    #[arg(long, default_value = "testresults/hfi/sweep.csv")]
+    out: PathBuf,
 }
 
 #[derive(clap::Args)]
@@ -618,6 +643,71 @@ fn main() -> std::io::Result<()> {
                 None => link::Link::serial(&args.serial, args.baud)?,
             };
             profile::apply(&mut link, &args.profile, args.persist)
+        }
+        Command::Hfi(args) => {
+            use std::io::Write as _;
+            let mut link = match &args.addr {
+                Some(addr) => link::Link::tcp(addr)?,
+                None => link::Link::serial(&args.serial, args.baud)?,
+            };
+            if let Some(dir) = args.out.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let mut w = std::io::BufWriter::new(std::fs::File::create(&args.out)?);
+            writeln!(w, "sweep,align_deg,hall_deg,v_h,k,theta_deg,id,iq,ad,aq")?;
+            let mut sweep = 0;
+            for a in &args.align {
+                let align = match a.trim() {
+                    "none" => 99.0f32,
+                    s => s
+                        .parse::<f32>()
+                        .map_err(|e| std::io::Error::other(format!("--align {s}: {e}")))?
+                        .to_radians(),
+                };
+                for _ in 0..args.repeat {
+                    let v =
+                        profile::run_probe(&mut link, mmc_proto::test::HFI_SWEEP, args.amp, align)?;
+                    use mmc_core::hfi;
+                    if v.len() < hfi::LEN {
+                        return Err(std::io::Error::other(format!(
+                            "short sweep: {} floats",
+                            v.len()
+                        )));
+                    }
+                    let n = v[9].max(1.0);
+                    let deg = |x: f32| {
+                        if x == hfi::NONE {
+                            f32::NAN
+                        } else {
+                            x.to_degrees()
+                        }
+                    };
+                    for k in 0..hfi::ANGLES {
+                        let at = hfi::HDR + k * hfi::PER_ANGLE;
+                        writeln!(
+                            w,
+                            "{sweep},{},{},{},{k},{},{},{},{},{}",
+                            deg(v[6]),
+                            deg(v[7]),
+                            v[5],
+                            hfi::angle(k).to_degrees(),
+                            v[at] / n,
+                            v[at + 1] / n,
+                            v[at + 2] / n,
+                            v[at + 3] / n
+                        )?;
+                    }
+                    println!(
+                        "sweep {sweep}: align {:.0}°, hall {:.0}°",
+                        deg(v[6]),
+                        deg(v[7])
+                    );
+                    sweep += 1;
+                }
+            }
+            w.flush()?;
+            println!("wrote {}", args.out.display());
+            Ok(())
         }
         Command::Params(args) => {
             let mut link = match &args.addr {

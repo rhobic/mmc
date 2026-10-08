@@ -3,6 +3,22 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-08 — session 36: zero-speed position by high-frequency injection
+
+- Motor 3 is salient: ξ = (Lq − Ld)/(Lq + Ld) = 0.055 from standstill
+  sweeps (`RunTest HFI_SWEEP`, `mmc-host hfi`, `tools/hfi_fit.py`), and the
+  magnet saturates the iron: +d current raises the carrier response over −d
+  at every position tried (1.5–22 %).
+- `mmc_core::hfi::Tracker`: pulsating square-wave HFI with a `++−−` carrier
+  (a `+−` carrier cancels on the F302's mid-period duty load), difference
+  demodulation and a ξ-scaled PLL. Params `hfi_v`, `hfi_bw`, `hfi_xi`
+  (48–50), telemetry `hfi_d` (28): **F302 fw 20, G474 fw 25, nvparam v11**.
+- Sensorless start from standstill on HFI: lock, polarity pulses, run on the
+  tracker, handover to the flux observer. Bench: **18/18 starts reached
+  target** (+300, +600 through handover, −300); polarity right 13/18.
+- Back-EMF sensing is not needed for low-speed FOC; HFI uses the shunts only.
+- Details and limits: [HFI.md](HFI.md).
+
 ## 2026-10-08 — session 35: review follow-ups merged
 
 Ported from origin `claude/charming-feynman-a57o83` (`5bc16cd`, written

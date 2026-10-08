@@ -62,8 +62,12 @@ pub const POS_REF: u8 = 25;
 /// profiler's. 0 outside the closed-loop FOC modes.
 pub const R_HAT: u8 = 26;
 pub const PSI_HAT: u8 = 27;
+/// HFI tracker's demodulated d-axis carrier response [A] (∝ 1/L along its
+/// axis; a DC bias along ±d compares it for the magnet's polarity). 0 while
+/// the tracker is off.
+pub const HFI_D: u8 = 28;
 
-pub const COUNT: usize = 28;
+pub const COUNT: usize = 29;
 
 /// Wire names, indexed by channel id; used as CSV headers by the host.
 pub const NAMES: [&str; COUNT] = [
@@ -95,6 +99,7 @@ pub const NAMES: [&str; COUNT] = [
     "pos_ref",
     "r_hat",
     "psi_hat",
+    "hfi_d",
 ];
 
 /// Selection mask with every defined channel enabled.

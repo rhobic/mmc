@@ -162,6 +162,9 @@ const DEFAULTS: [f32; param::COUNT] = [
     0.0, 0.0, 0.0, 0.0, // COG_N0..3 (no series until measured)
     0.0, 0.0, 0.0, 0.0, // COG_A0..3 [N·m]
     0.0, 0.0, 0.0, 0.0, // COG_P0..3 [rad]
+    0.0,   // HFI_V [V] (off)
+    300.0, // HFI_BW [rad/s]
+    0.05,  // HFI_XI
 ];
 
 /// Probe burst capacity [f32s]: 8 KB of the 16 KB RAM. Enough for the R/L
@@ -174,7 +177,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardF302,
-        fw_version: 19,
+        fw_version: 20,
         name: "mmc-f302",
         defaults: DEFAULTS,
     },

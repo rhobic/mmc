@@ -157,6 +157,9 @@ impl DriveConfig {
             id if (param::COG_N0..param::COG_N0 + 4).contains(&id) => (0.0, 255.0),
             id if (param::COG_A0..param::COG_A0 + 4).contains(&id) => (-0.1, 0.1),
             id if (param::COG_P0..param::COG_P0 + 4).contains(&id) => (-7.0, 7.0),
+            param::HFI_V => (0.0, V_AMP_MAX),
+            param::HFI_BW => (10.0, 2000.0),
+            param::HFI_XI => (0.005, 0.5),
             // A sector between 30° and 90°: anything outside is a broken
             // sensor or a bad fit, not a placement tolerance.
             id if (param::HALL_W0..param::HALL_W0 + 6).contains(&id) => {
@@ -441,6 +444,7 @@ impl<const N: usize> Shared<N> {
                     // Any length works; a short buffer just folds fewer edges.
                     test::RL_STEP => N >= 1024,
                     test::L_THETA => N >= probe::SAL_HDR + probe::SAL_TICKS * 2,
+                    test::HFI_SWEEP => N >= mmc_core::hfi::LEN,
                     _ => false,
                 };
                 if !fits || !a.is_finite() || !b.is_finite() {
@@ -474,10 +478,17 @@ impl<const N: usize> Shared<N> {
                 } else {
                     V_AMP_MAX
                 };
-                self.probe_v_align
-                    .store(a.clamp(0.05, v_max).to_bits(), Ordering::Relaxed);
-                self.probe_v_step
-                    .store(b.clamp(0.05, v_max).to_bits(), Ordering::Relaxed);
+                if kind == test::HFI_SWEEP {
+                    // a: carrier amplitude; b: align angle, as given.
+                    self.probe_v_step
+                        .store(a.clamp(0.05, v_max).to_bits(), Ordering::Relaxed);
+                    self.probe_v_align.store(b.to_bits(), Ordering::Relaxed);
+                } else {
+                    self.probe_v_align
+                        .store(a.clamp(0.05, v_max).to_bits(), Ordering::Relaxed);
+                    self.probe_v_step
+                        .store(b.clamp(0.05, v_max).to_bits(), Ordering::Relaxed);
+                }
                 self.probe_kind.store(kind, Ordering::Relaxed);
                 self.burst_len.store(0, Ordering::Relaxed);
                 self.burst_state.store(BURST_RECORDING, Ordering::Relaxed);

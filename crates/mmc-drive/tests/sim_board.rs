@@ -771,3 +771,35 @@ fn hall_foc_resumes_at_speed() {
     assert_eq!(rig.sh.state(), ST_RUN);
     assert!(lo > 0.7 * w0, "dipped to {lo:.0} from {w0:.0}");
 }
+
+/// Sensorless from standstill on high-frequency injection (`hfi_v` > 0) on
+/// a salient motor: lock, polarity test, run on the tracker. The sim has no
+/// saturation, so the polarity test can read either way; a start must still
+/// end at the commanded speed and direction without a fault.
+#[test]
+fn hfi_starts_a_salient_motor_from_standstill() {
+    let mut motor = PmsmParams::small_bldc();
+    motor.lq = 1.25 * motor.ld;
+    let mut rig = Rig::build(10_000, motor, false);
+    for (id, v) in [
+        (param::HFI_V, 1.0),
+        (param::HFI_XI, 0.11),
+        (param::HFI_BW, 150.0),
+        (param::ID_INJECT, 0.3),
+        (param::SL_HANDOFF, 1000.0), // stay on HFI throughout
+    ] {
+        assert!(matches!(
+            rig.send(&Message::SetParam { id, value: v }),
+            Message::Ack { .. }
+        ));
+    }
+    rig.send(&Message::SetDrive(DriveMode::Sensorless {
+        amps: 0.5,
+        omega_e: 200.0,
+    }));
+    rig.run(3.0);
+    let w = rig.board.motor.omega_e();
+    println!("HFI start: {w:.0} rad/s el after 3 s");
+    assert!(rig.sh.state() != mmc_drive::ST_FAULT_OC, "tripped");
+    assert!((w - 200.0).abs() < 40.0, "ended at {w:.0} rad/s el");
+}

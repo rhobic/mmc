@@ -854,7 +854,7 @@ fn stage_saliency(
 
 /// Start a firmware test sequence and poll the burst buffer until the
 /// recording is complete, keeping the deadman fed. Returns the raw f32s.
-fn run_probe(link: &mut Link, kind: u8, a: f32, b: f32) -> std::io::Result<Vec<f32>> {
+pub fn run_probe(link: &mut Link, kind: u8, a: f32, b: f32) -> std::io::Result<Vec<f32>> {
     let t = Duration::from_secs(2);
     let req = Message::RunTest { kind, a, b };
     match link.request(
