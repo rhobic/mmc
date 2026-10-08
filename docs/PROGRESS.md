@@ -3,6 +3,20 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-08 — session 39: low-speed floor, HFI vs the flux observer
+
+Bench 2, motor 3, 18 V, fw 20 (HFI and observer code as on `main`).
+`tools/lowspeed_sweep.sh` / `tools/lowspeed_eval.py`, captures in
+`testresults/motor3-hfi-vs-obs/`; table in [HFI.md](HFI.md#low-speed-floor-hfi-vs-the-flux-observer).
+
+- **Observer FOC converges down to 100 rad/s el**; 75–50 runs on a wrong
+  angle (±60°), 40 and below trips the stall detector.
+- **HFI holds 20–30 rad/s el** with the angle to ±5–11° throughout (≈4×
+  lower); 10 averages 8.8 in bursts, 5 never breaks away.
+- Below ~75 both stick-slip: cogging against the speed loop, not the
+  estimate. Next: reverse, zero crossing, and whether more current
+  authority (speed-loop gain) beats the cogging.
+
 ## 2026-10-08 — session 38: F302 flash headroom, pinned toolchain, size check
 
 The F302 image had 608 bytes of its 62 KB left on rustc 1.99 and overflowed

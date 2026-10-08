@@ -89,6 +89,38 @@ Stronger polarity pulses (±0.75 A) trip the 1.5 A overcurrent limit.
 hall FOC with the HFI shadow 7167 — a diagnostic, not to be combined with
 the cogging feed-forward (6640 on its own).
 
+## Low-speed floor: HFI vs the flux observer
+
+*`testresults/motor3-hfi-vs-obs/`, `tools/lowspeed_sweep.sh`,
+`tools/lowspeed_eval.py`. Forward only, one run per point, cogging
+feed-forward off (it runs only in the hall modes).*
+
+Observer: I-f to `sl_handoff` (350), closed on the flux observer, then
+stepped down to the target. HFI: sensorless from rest straight to the
+target, on the tracker throughout. True speed from counted hall steps;
+angle error against the hall angle (HFI: at hall edges, mod π).
+
+| target rad/s el | observer: speed | observer: θ err | HFI: speed | HFI: θ err |
+|---|---|---|---|---|
+| 200 | 200.1 | −2° ± 9° | 200.0 | −5° ± 5° |
+| 150 | 149.9 | −5° ± 15° | 149.9 | −3° ± 6° |
+| 100 | 100.8 | −10° ± 23° | 99.8 | −3° ± 9° |
+| 75 | 57.9 | −8° ± 64° | 76.6 | −5° ± 9° |
+| 50 | 41.5 | −22° ± 63° | 48.0 | +4° ± 9° |
+| 40 | stall trip | | | |
+| 30 | stall trip | | 29.3 | −4° ± 11° |
+| 20 | stall trip | | 17.0 | +1° ± 9° |
+| 10 | | | 8.8, in bursts | −5° ± 7° |
+| 5 | | | never broke away | |
+
+The observer converges down to **100 rad/s el**; at 75–50 it has lost the
+rotor (±60°, speed short, i_q doubled), at 40 and below the stall detector
+trips it. HFI holds the angle to ±5–11° at every speed it turns at, and the
+mean speed to a few percent down to 20–30 rad/s el. Below ~75 both
+stick-slip (hall speed σ 50–95): that is the speed loop against cogging, as
+in hall FOC (session 30c), not the estimate. The shadow result (lost at
+20–100) did not repeat with HFI in control.
+
 ## Is back-EMF sensing needed?
 
 The terminal voltage dividers (back-EMF sensing) are used by: sensorless
@@ -107,7 +139,8 @@ need them; it needs saliency, which motor 3 has.
   saliency term, and the pulses jerk the rotor. Options for a motor with less d-axis saturation: read the
   contrast from the first current rise rather than the averaged ripple, or a
   short q-current nudge read on the tracker.
-- **20–100 rad/s el** with heavy hunting: the tracker needs the known torque
+- **20–100 rad/s el** with heavy hunting (in shadow; under HFI control the
+  tracker holds, see the low-speed floor above): the tracker needs the known torque
   (an acceleration feed-forward into its PLL) or the cogging feed-forward
   running alongside (which the interrupt budget only allows without the
   shadow).
