@@ -196,8 +196,19 @@ impl Rig {
     }
 
     fn with_motor(hz: u32, motor: PmsmParams) -> Self {
+        Self::build(hz, motor, true)
+    }
+
+    /// A board that does not report halls (the drive never reads them).
+    fn without_halls(hz: u32) -> Self {
+        Self::build(hz, PmsmParams::small_bldc(), false)
+    }
+
+    fn build(hz: u32, motor: PmsmParams, halls: bool) -> Self {
+        let mut cfg = config(hz, &motor);
+        cfg.spec.has_halls = halls;
         let mut rig = Self {
-            sh: Box::new(Shared::new(config(hz, &motor), Box::leak(Box::default()))),
+            sh: Box::new(Shared::new(cfg, Box::leak(Box::default()))),
             eng: Engine::new(),
             board: SimBoard::new(motor, hz),
             store: RamStore([0xFF; nvparam::BYTES]),
@@ -229,6 +240,24 @@ impl Rig {
 
     fn run(&mut self, secs: f32) {
         self.run_with(secs, false);
+    }
+
+    /// Run `secs` and return the slowest and fastest true rotor speed
+    /// [rad/s el] seen, signed.
+    fn run_speed_range(&mut self, secs: f32) -> (f32, f32) {
+        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+        let n = (secs * self.hz as f32) as u32;
+        for k in 0..n {
+            if k % (self.hz / 10) == 0 {
+                self.sh.host_activity();
+            }
+            self.eng.tick(&self.sh, &mut self.board);
+            self.board.advance();
+            let w = self.board.motor.omega_e();
+            lo = lo.min(w);
+            hi = hi.max(w);
+        }
+        (lo, hi)
     }
 
     fn telem(&self, ch: u8) -> f32 {
@@ -631,7 +660,114 @@ fn non_finite_commands_are_refused() {
         },
     ] {
         let reply = rig.send(&msg);
-        assert!(matches!(reply, Message::Nak { err: 1, .. }), "{msg:?}: {reply:?}");
+        assert!(
+            matches!(reply, Message::Nak { err: 1, .. }),
+            "{msg:?}: {reply:?}"
+        );
     }
     assert_eq!(rig.telem(channel::STATE) as u8, ST_OFF, "nothing started");
+}
+
+/// Flying start: switching modes on a turning rotor starts the new mode at
+/// the rotor's angle and speed (from the halls, or from the locked flux
+/// observer of the outgoing mode) instead of from rest. Before, I-f →
+/// sensorless restarted the I-f ramp from 0 rad/s under a rotor at speed.
+#[test]
+fn a_live_switch_catches_the_turning_rotor() {
+    let cases: [(&str, DriveMode, DriveMode); 3] = [
+        (
+            "I-f -> sensorless",
+            DriveMode::IfCurrent {
+                amps: 0.5,
+                omega_e: 400.0,
+            },
+            DriveMode::Sensorless {
+                amps: 0.5,
+                omega_e: 400.0,
+            },
+        ),
+        (
+            "open loop -> I-f",
+            // Open loop pulls out on this motor much above 1 V / 50 rad/s el.
+            DriveMode::OpenLoopVoltage {
+                volts: 1.0,
+                omega_e: 50.0,
+            },
+            DriveMode::IfCurrent {
+                amps: 0.5,
+                omega_e: 50.0,
+            },
+        ),
+        (
+            "sensorless -> I-f",
+            DriveMode::Sensorless {
+                amps: 0.5,
+                omega_e: 400.0,
+            },
+            DriveMode::IfCurrent {
+                amps: 0.5,
+                omega_e: 400.0,
+            },
+        ),
+    ];
+    for halls in [false, true] {
+        for (name, from, to) in cases {
+            // Without halls the catch comes from the flux observer, which is
+            // not trusted below half the handoff speed; open loop only holds
+            // this motor at 50 rad/s el.
+            if !halls && name.starts_with("open loop") {
+                continue;
+            }
+            let mut rig = if halls {
+                Rig::new(10_000)
+            } else {
+                Rig::without_halls(10_000)
+            };
+            assert!(matches!(
+                rig.send(&Message::SetDrive(from)),
+                Message::Ack { .. }
+            ));
+            rig.run(2.0);
+            let w0 = rig.board.motor.omega_e();
+            assert!(
+                w0 > 40.0,
+                "{name} (halls {halls}): only {w0} rad/s before the switch"
+            );
+            assert!(matches!(
+                rig.send(&Message::SetDrive(to)),
+                Message::Ack { .. }
+            ));
+            let (lo, hi) = rig.run_speed_range(0.5);
+            println!("{name} (halls {halls}): {w0:.0} rad/s el, then {lo:.0}..{hi:.0}");
+            assert_eq!(rig.sh.state(), ST_RUN, "{name} (halls {halls}): faulted");
+            assert!(
+                lo > 0.6 * w0 && hi < 1.6 * w0,
+                "{name} (halls {halls}): speed {lo:.0}..{hi:.0} after the switch from {w0:.0}"
+            );
+        }
+    }
+}
+
+/// Hall FOC re-entered on a turning rotor ramps from the rotor's speed
+/// instead of braking it to rest first.
+#[test]
+fn hall_foc_resumes_at_speed() {
+    let mut rig = Rig::new(10_000);
+    let hall = DriveMode::HallFoc {
+        amps: 1.0,
+        omega_e: 400.0,
+    };
+    rig.send(&Message::SetDrive(hall));
+    rig.run(2.0);
+    rig.send(&Message::SetDrive(DriveMode::IfCurrent {
+        amps: 0.5,
+        omega_e: 400.0,
+    }));
+    rig.run(0.5);
+    let w0 = rig.board.motor.omega_e();
+    rig.send(&Message::SetDrive(hall));
+    let (lo, _) = rig.run_speed_range(0.5);
+    println!("hall FOC re-entry at {w0:.0} rad/s el: slowest {lo:.0}");
+    assert_eq!(rig.sh.state(), ST_RUN);
+    assert!(lo > 0.7 * w0, "dipped to {lo:.0} from {w0:.0}");
 }

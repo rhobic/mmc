@@ -17,7 +17,21 @@ against the pre-HAL G474 firmware) into `mmc-drive`, so both boards get it:
 - **Sim parity**: the sim's `set_drive` hands back a probe's partial buffer
   when switching straight to another running mode. (Its speed loop already
   read `speed_kp`/`speed_ki` from the param table.)
-- Flying start / live mode switch added to the PLAN backlog.
+- Flying start / live mode switch added to the PLAN backlog, then done:
+
+**Flying start.** A new drive mode (or a start from Off) on a turning rotor
+now starts at the rotor's angle and speed instead of θ = ω = 0. The source
+is the halls (they run in every mode, Off included; `HallAngle` now keeps
+its state across drive builds) or, without halls, the outgoing mode's flux
+observer if it is locked and the rotor is above half the sensorless handoff.
+Per mode: sensorless goes straight to closed loop with the observer kept or
+primed (`FluxObserver::prime`) and the speed loop preloaded with the torque
+current measured in the rotor's frame; hall FOC ramps its reference from the
+rotor's speed; I-f starts at its steady hang angle at full current; open loop
+starts on the back-EMF at its magnitude. Sim tests
+`a_live_switch_catches_the_turning_rotor`, `hall_foc_resumes_at_speed`:
+I-f → sensorless at 400 rad/s el now holds 366–400 (before: swung to −196,
+a reversal); hall FOC re-entry holds 366 of 396 (before: −61).
 
 ## 2026-10-07 — session 34: cancelling the position torque
 

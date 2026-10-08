@@ -115,6 +115,13 @@ impl Sequencer {
         self.phase
     }
 
+    /// Skip the I-f ramp and the blend: the rotor is already turning and the
+    /// observer already locked (a flying start), so the observer owns the
+    /// angle and the speed loop the current from the first tick.
+    pub fn start_closed(&mut self) {
+        self.phase = Phase::Closed;
+    }
+
     /// Fraction of `i_start` the blend tapered to (load-adaptive, set at the
     /// blend entry; 1.0 until then). Preload the speed loop with
     /// `i_start · taper_end()` signed for a bumpless takeover.

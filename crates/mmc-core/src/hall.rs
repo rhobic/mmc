@@ -237,6 +237,14 @@ impl HallAngle {
         }
     }
 
+    /// New calibration, same rotor: the angle and speed state carry on, so a
+    /// drive rebuilt while the rotor turns sees its speed from the first tick
+    /// instead of zero until two fresh edges.
+    pub fn retune(&mut self, map: HallMap) {
+        self.map = map;
+        self.speed.widths = map.widths;
+    }
+
     /// Feed one sample; returns the angle estimate [rad], or `None` until a
     /// valid state has been seen (and on an invalid one: a sensor fault).
     pub fn update(&mut self, state: u8, dt: f32) -> Option<f32> {

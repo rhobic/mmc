@@ -46,6 +46,9 @@ const COG_ID_OMEGA: (f32, f32) = (50.0, 600.0);
 /// Above this speed [rad/s el] the position-torque feed-forward is off: it
 /// measured neutral on motor 3 from 400 rad/s el up (testresults/motor3-cogff).
 const COG_FF_OMEGA_MAX: f32 = 500.0;
+/// Slowest rotor [rad/s el] a drive start catches on the fly; below it the
+/// rotor is treated as at rest and the mode starts as it always has.
+const CATCH_OMEGA_MIN: f32 = 30.0;
 
 // Locked-rotor R/L probe (RunTest RL_STEP): rotor-align time at the first
 // voltage level, then square-wave excitation between the two levels. τ=L/R
@@ -126,6 +129,12 @@ pub struct Engine {
     cog: Option<CogComp>,
     /// The shift last published to `cog_shift`.
     cog_published: Option<u8>,
+    /// Hall angle of the last tick (boards with halls; every mode).
+    hall_last: Option<f32>,
+    /// Measured stator current of the last tick, αβ: a flying start reads
+    /// the torque current the rotor was carrying in the rotor's own frame
+    /// (the outgoing mode's i_q may be in a forced frame).
+    i_ab_last: AlphaBeta,
     /// Angle and speed [rad, rad/s el] the position-torque feed-forward is
     /// placed by: the hall tracker's, which predicts between edges with the
     /// known torque (the plain hall interpolation assumes constant speed and
@@ -197,6 +206,11 @@ impl Engine {
             dither_hi: false,
             cog: None,
             cog_published: None,
+            hall_last: None,
+            i_ab_last: AlphaBeta {
+                alpha: 0.0,
+                beta: 0.0,
+            },
             ff_theta: None,
             cog_now: 0.0,
             cog_ff: 0.0,
@@ -299,6 +313,7 @@ impl Engine {
             (Some(h), Some(ha)) => ha.update(h, dt),
             _ => None,
         };
+        self.hall_last = hall_ref;
         let cog_terms = cog_terms(&p);
         let kt = 1.5 * p(param::POLE_PAIRS) * p(param::FLUX);
         if spec.has_halls {
@@ -897,6 +912,7 @@ impl Engine {
             if in_pos { self.pos_meas / pp } else { 0.0 },
         );
         self.iq_last = i_dq.q;
+        self.i_ab_last = clarke(i_abc);
         put(
             channel::POS_REF,
             if in_pos { self.pos_ref.pos / pp } else { 0.0 },
@@ -944,6 +960,109 @@ impl Engine {
             self.cog_now = c.feedforward(terms, th + w * dt, kt);
         }
         (self.cog_now, self.cog_ff)
+    }
+
+    /// The rotor's electrical angle and speed if it is turning: from the
+    /// halls when the board has them (they run in every mode, from Off too)
+    /// at [`CATCH_OMEGA_MIN`] and up, else from the flux observer if the
+    /// outgoing mode fed it, it is locked (flux within ±50 % of the profile)
+    /// and the rotor is at `obs_min` or faster (half the sensorless handoff:
+    /// slower, the observer's angle is not to be trusted). The flag says the
+    /// observer was the source.
+    fn catch_rotor(&self, flux: f32, obs_min: f32) -> Option<(f32, f32, bool)> {
+        if let Some(ha) = self.hall_angle.as_ref() {
+            let w = ha.omega();
+            return match self.hall_last {
+                Some(th) if w.abs() >= CATCH_OMEGA_MIN => Some((th, w, false)),
+                // The halls say it is slow or at rest: believe them.
+                _ => None,
+            };
+        }
+        let fed = matches!(
+            self.mode,
+            mode::VOLT | mode::IF | mode::SENSORLESS | mode::HALL_FOC | mode::HALL_POS
+        );
+        let o = self.obs.as_ref().filter(|_| fed)?;
+        let w = o.electrical_velocity();
+        let locked = (0.5 * flux..1.5 * flux).contains(&o.flux_mag());
+        (w.abs() >= CATCH_OMEGA_MIN.max(obs_min) && locked).then(|| (o.electrical_angle(), w, true))
+    }
+
+    /// Start `mode` on a rotor already at electrical angle `th` and speed
+    /// `w` (after `clean_start` built its blocks for a start from rest).
+    fn seed_flying<const N: usize>(
+        &mut self,
+        sh: &Shared<N>,
+        mode: u8,
+        th: f32,
+        w: f32,
+        from_obs: bool,
+        old_obs: Option<FluxObserver>,
+    ) {
+        let p = |id| sh.param(id);
+        let flux = p(param::FLUX);
+        // The observer: keep the locked one, or prime the fresh one at the
+        // halls' angle so it is locked from the first tick.
+        if from_obs {
+            self.obs = old_obs;
+        } else if let Some(o) = self.obs.as_mut() {
+            o.prime(th, w, flux, AlphaBeta::default());
+        }
+        let target = f32::from_bits(sh.cmd_omega.load(Ordering::Relaxed));
+        // The torque current the rotor carried, on its own q axis.
+        let iq_rotor = park(self.i_ab_last, sin_cos(th)).q;
+        match mode {
+            mode::SENSORLESS => {
+                // Same direction and fast enough for the observer: no I-f
+                // ramp from standstill under a turning rotor, closed loop at
+                // once, speed reference from where the rotor is.
+                let fast = w.abs() >= 0.5 * p(param::SL_HANDOFF);
+                if fast && w * target > 0.0 {
+                    if let Some(q) = self.seq.as_mut() {
+                        q.start_closed();
+                    }
+                    self.theta = th;
+                    self.omega = w;
+                    self.omega_ref_cur = w;
+                    self.sl_preload = iq_rotor;
+                }
+            }
+            mode::HALL_FOC => {
+                // The reference ramps from the rotor's speed, not from rest
+                // (which would brake it first), with the current it carried.
+                self.omega_ref_cur = w;
+                if let Some(s) = self.speed.as_mut() {
+                    s.preload(iq_rotor);
+                }
+            }
+            mode::IF => {
+                // The forced frame where steady I-f would hold this rotor:
+                // the current mostly on its d axis, leaning toward q only by
+                // the torque it was carrying (the hang angle), at the
+                // commanded amplitude at once. Full current on q would be a
+                // torque step; slewing up from zero lets the rotor slip out
+                // of the frame before the current can hold it.
+                let amp = f32::from_bits(sh.cmd_amp.load(Ordering::Relaxed));
+                let frac = (iq_rotor / amp.abs().max(1e-3)).clamp(-1.0, 1.0);
+                let lean = mmc_core::math::sqrt(1.0 - frac * frac) * w.signum();
+                // Current angle in the rotor frame, then the forced frame
+                // whose q axis carries it.
+                let phi = mmc_core::math::atan2(frac, lean);
+                self.theta = wrap_angle(th + phi - core::f32::consts::FRAC_PI_2);
+                self.omega = w;
+                self.amp = amp;
+            }
+            mode::VOLT => {
+                // The voltage vector on the back-EMF (a quarter turn ahead
+                // of the rotor flux in the direction of travel) at its
+                // magnitude: no current at entry. Starting from zero volts
+                // would short the windings against the back-EMF.
+                self.theta = wrap_angle(th + core::f32::consts::FRAC_PI_2 * w.signum());
+                self.omega = w;
+                self.amp = flux * w.abs();
+            }
+            _ => {}
+        }
     }
 
     fn finish_probe<const N: usize>(&mut self, sh: &Shared<N>, b: &mut impl MotorBoard) {
@@ -1068,6 +1187,10 @@ impl Engine {
     fn clean_start<const N: usize>(&mut self, sh: &Shared<N>, mode: u8) {
         let spec = &sh.cfg.spec;
         let p = |id| sh.param(id);
+        // Flying start: where the rotor is and how fast it turns, before
+        // the resets below forget it. `self.mode` is still the outgoing mode.
+        let catch = self.catch_rotor(p(param::FLUX), 0.5 * p(param::SL_HANDOFF));
+        let old_obs = self.obs;
         self.theta = 0.0;
         self.omega = 0.0;
         self.amp = 0.0;
@@ -1204,10 +1327,19 @@ impl Engine {
             self.speed = None;
             self.sl_preload = 0.0;
         }
+        if let Some((th, w, from_obs)) = catch {
+            self.seed_flying(sh, mode, th, w, from_obs, old_obs);
+        }
         // Every drive on a board with halls carries the calibrated hall
         // angle: the hall modes run on it, the rest are scored against it.
         let map = hall_map(&p);
-        self.hall_angle = spec.has_halls.then(|| HallAngle::new(map));
+        match self.hall_angle.as_mut() {
+            // Keep the speed and angle the halls have been tracking (they
+            // run in every mode): a drive started on a turning rotor needs
+            // them from the first tick.
+            Some(h) => h.retune(map),
+            None => self.hall_angle = spec.has_halls.then(|| HallAngle::new(map)),
+        }
         self.hall.widths = map.widths;
         if let Some(c) = self.cog.as_mut() {
             c.retune(&map, p(param::POLE_PAIRS).max(1.0) as u8);

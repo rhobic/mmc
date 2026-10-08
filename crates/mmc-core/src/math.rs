@@ -45,6 +45,12 @@ pub fn sqrt(x: f32) -> f32 {
     libm::sqrtf(x)
 }
 
+/// `atan2(y, x)` [rad]. `libm`'s single-precision routine: fine for a
+/// one-off (a drive start), not for every control tick.
+pub fn atan2(y: f32, x: f32) -> f32 {
+    libm::atan2f(y, x)
+}
+
 /// Wrap an angle to `[-PI, PI)`.
 ///
 /// No `%` here: `f32 % f32` lowers to a software `fmodf` on targets without

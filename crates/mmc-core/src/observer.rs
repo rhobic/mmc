@@ -79,6 +79,25 @@ impl FluxObserver {
         self.omega = omega;
     }
 
+    /// Put the observer straight into the state it converges to for a rotor
+    /// at electrical angle `theta`, speed `omega` and flux linkage `flux`,
+    /// with stator current `i_ab` flowing: the leaky integral leads the rotor
+    /// flux by `atan(leak/ω)` and is attenuated by the matching factor. A
+    /// flying start (catching a rotor that is already turning, from halls or
+    /// another estimate) then runs closed loop from the first tick instead
+    /// of waiting out the integrator's ~1/leak settling with a wrong angle.
+    pub fn prime(&mut self, theta: f32, omega: f32, flux: f32, i_ab: AlphaBeta) {
+        let att = self.leak_attenuation_at(omega);
+        let (s, c) = sin_cos(theta + self.lead_compensation_at(omega));
+        let mag = flux * att;
+        self.psi = AlphaBeta {
+            alpha: mag * c + self.cfg.ls * i_ab.alpha,
+            beta: mag * s + self.cfg.ls * i_ab.beta,
+        };
+        self.flux_mag = mag;
+        self.seed(theta, omega);
+    }
+
     /// Rotor-flux magnitude [Wb]; converges to the magnet flux linkage and
     /// doubles as the lock-quality indicator the stall detector trips on.
     ///
@@ -163,6 +182,53 @@ mod tests {
     use super::*;
     use crate::math::PI;
     use crate::transforms::{inverse_park, Dq};
+
+    /// A primed observer is locked from the first tick: angle within the
+    /// steady-state bound throughout, where an unprimed one starts a radian
+    /// or more off.
+    #[test]
+    fn primed_observer_is_locked_from_the_start() {
+        let (rs, ls, flux) = (0.5, 0.6e-3, 0.008);
+        for &omega in &[150.0f32, 400.0, -400.0] {
+            let dt = 5e-5;
+            let iq = 1.0f32;
+            let theta0: f32 = 2.0;
+            let run = |primed: bool| {
+                let mut obs = FluxObserver::new(FluxObserverCfg::new(rs, ls));
+                let mut theta = theta0;
+                if primed {
+                    let i_ab = inverse_park(Dq { d: 0.0, q: iq }, sin_cos(theta));
+                    obs.prime(theta, omega, flux, i_ab);
+                }
+                let mut worst = 0.0f32;
+                for _ in 0..(0.02 / dt) as usize {
+                    theta = wrap_angle(theta + omega * dt);
+                    let sc = sin_cos(theta);
+                    let v_dq = Dq {
+                        d: -omega * ls * iq,
+                        q: rs * iq + omega * flux,
+                    };
+                    obs.update(
+                        inverse_park(Dq { d: 0.0, q: iq }, sc),
+                        inverse_park(v_dq, sc),
+                        dt,
+                    );
+                    worst = worst.max(wrap_angle(obs.electrical_angle() - theta).abs());
+                }
+                worst
+            };
+            let (p, u) = (run(true), run(false));
+            let bound = 0.03 + 1.5 * omega.abs() * dt;
+            assert!(
+                p < bound,
+                "omega {omega}: primed error {p} rad (bound {bound})"
+            );
+            assert!(
+                u > 5.0 * bound,
+                "omega {omega}: unprimed error only {u} rad?"
+            );
+        }
+    }
 
     /// Ideal SPMSM electrical steady state at constant speed: the observer
     /// must lock to the rotor angle within tolerance, including the leak

@@ -313,7 +313,11 @@ sync — normal for motor control in any language.
   the probe doubles as the INFORM measurement primitive if pursued. Design
   notes: `~/.claude/plans/back-to-motor-control-enumerated-hejlsberg.md`.
 
-- **Flying start / live mode switch — investigate, then do properly.** A
+- **Flying start / live mode switch** — *done 2026-10-08 for a rotor the
+  drive can see* (halls, or a locked observer above half the handoff speed;
+  see PROGRESS session 35). Open: a hall-less rotor coasting from Off, or
+  turning slower than that, needs a probing catch (zero-vector burst).
+  Original note: a
   change of drive mode while running is a clean start: θ, ω and amp reset to
   0 and the new mode's blocks are rebuilt with the bridge still live and the
   rotor still turning (the one exception is the live sensorless-FOC →
