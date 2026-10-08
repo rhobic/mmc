@@ -546,9 +546,16 @@ impl<const N: usize> Shared<N> {
 
     /// Interval between telemetry frames [µs]: the divider counts control
     /// periods (the protocol's definition), so it scales with the board.
+    ///
+    /// `⌊d·10⁶/hz⌋` in 32-bit steps, `d·⌊10⁶/hz⌋ + ⌊d·(10⁶ mod hz)/hz⌋`: a
+    /// 64-bit division pulls ~900 bytes of `u64_div_rem` into the image. Exact
+    /// while `d·(10⁶ mod hz)` fits, which a `u16` divider guarantees for any
+    /// `ctrl_hz ≤ 65 536`; beyond that the remainder term saturates.
     pub fn telemetry_period_us(&self) -> u64 {
-        let d = self.divider.load(Ordering::Relaxed).max(1) as u64;
-        d * 1_000_000 / self.cfg.spec.ctrl_hz as u64
+        let d = self.divider.load(Ordering::Relaxed).max(1);
+        let hz = self.cfg.spec.ctrl_hz;
+        let whole = d as u64 * (1_000_000 / hz) as u64;
+        whole + (d.saturating_mul(1_000_000 % hz) / hz) as u64
     }
 
     /// A consistent snapshot of the selected channels, or `None` while not

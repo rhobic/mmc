@@ -3,6 +3,80 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-08 — session 38: F302 flash headroom, pinned toolchain, size check
+
+The F302 image had 608 bytes of its 62 KB left on rustc 1.99 and overflowed
+by 464 on 1.97, with CI on a floating `stable`. Same source, no behaviour
+change, no fw version bump (all sizes rustc 1.99, `cargo build --release`):
+
+| | flash before | flash after | .text | .rodata | .data | .bss |
+|---|---|---|---|---|---|---|
+| F302 (62 KB) | 62 880 (608 free) | **59 768 (3 720 free)** | 59 752 → 58 340 | 2 064 → 360 | 672 | 12 076 |
+| G474 (512 KB) | 60 400 | 57 088 | 55 508 → 53 896 | 2 392 → 692 | 2 024 | 35 004 |
+| G0B1 (512 KB) | 15 000 | 14 920 | 14 472 → 14 360 | 308 → 340 | 32 | 2 280 |
+
+Flash is the programmed image (`.data` initial values included). F302
+cumulative, in the order they went in:
+
+- **`math::sqrt` is `VSQRT.F32` on hard-float Arm** (−188): `libm::sqrtf`
+  has no Arm path and was a 220-byte software routine plus a 256-byte table,
+  called from seven sites in the tick and `Foc::step` (the observer, the
+  voltage limit). Correctly rounded either way, so bit-identical. Rust
+  refuses `sreg` asm operands without `vfp2` (which implies double
+  precision), so the value goes through a core register and `s0` is pushed
+  and popped around it. About 20 cycles a call (14 of them the VSQRT)
+  instead of a call into the integer software routine, so the ISR should
+  get slightly faster on both M4F boards; not yet measured on the bench.
+  The tick itself grew 320 bytes from different inlining.
+- **CRC16 (link) and CRC32 (nvparam) take four bits per step from 16-entry
+  tables** (−1 608): LLVM 23 (rustc 1.99) recognises a bit-at-a-time CRC
+  loop and replaces it with a 256-entry table, 512 + 1 024 bytes of
+  `.rodata` here.
+  Both are `#[inline(never)]`, or their loops unroll into each task. Tests
+  check them against the bitwise definition, so stored parameter blobs
+  still validate.
+- **`telemetry_period_us` in 32-bit steps** (−896): one `u64` division
+  pulled in `u64_div_rem`. Exact for any `u16` divider at `ctrl_hz ≤ 65 536`
+  (test `telemetry_period_is_exact`).
+- **F302 profile: opt-level "s" for crates off the control path** (−424):
+  embassy, the executor and the protocol codec. The firmware crate (which
+  instantiates `Engine::tick`), mmc-core, mmc-drive, libm and embassy-stm32
+  stay at 2; every function reachable from `ADC1` is the same size as in the
+  all-2 build. embassy-stm32 at "s" saved ~200 more but turned
+  `Pi::update` and `TrapRef::update` into calls from the tick.
+
+Where the F302 flash goes now: `Engine::tick` 26.4 KB, the RX task with
+command handling inlined 7.3 KB, the main task (init) 3.8 KB, frame
+encoding 2.0 KB, `Foc::step` 1.8 KB, the TX task 1.8 KB, six-step
+sensorless 1.5 KB. `core::fmt` was already absent (panic-halt; the panic
+entry points are 8-byte stubs). On rustc 1.97 the image is now 60 244.
+
+**Guards.** `rust-toolchain.toml` pins 1.99.0 (with llvm-tools and both
+targets) and CI installs from it. `tools/fw_size.sh <crate> <margin>` prints
+sections, flash and RAM and fails below the margin; every firmware job runs
+it with 2 KB: about one compiler release of drift (1.97 → 1.99 moved this
+image 1 KB) plus one modest feature, so CI goes red while there is still a
+choice of what to cut.
+
+**RAM (F302).** 12 748 bytes static (the 8 KB burst buffer is 8 192 of it),
+3 636 left for the stack. A static estimate from the disassembly (frame
+sizes along the deepest call path, no recursion): thread side ≈ 1.35 KB (the
+RX task poll has a 1.2 KB frame), ADC1 ≈ 0.6 KB plus a 104-byte FPU
+exception frame; all interrupts share the default priority, so none nest.
+Worst case ≈ 2.05 KB, ~1.6 KB spare; indirect calls (wakers, DMA callbacks)
+are small but not counted, so a stack-painting check on the bench should
+confirm it. The burst buffer stays at 2 048 f32s: the R/L probe records
+until the buffer is full (1 024 pairs, 102 ms at 10 kHz), the HFI sweep
+needs 106, and halving it would cut the probe's data to free stack that is
+not needed yet.
+
+**Tried and not taken:** opt-level "s" for the whole image (49 776, −10 KB,
+but it puts the tick at "s": the reserve if flash runs out again, after
+measuring the ISR on the bench); "z" for the dependencies (larger than "s"
+here); opt-level 3 (62 504); shrinking the burst buffer.
+`panic = "abort"`, LTO and one codegen unit were already in effect, and
+`debug = 2` does not reach flash.
+
 ## 2026-10-08 — session 37: review fixes — panel origin, flying-start gaps
 
 From a code review of `main` at `d58cf8d`. **F302 fw 21, G474 fw 26**

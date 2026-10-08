@@ -1,0 +1,10 @@
+# One compiler for CI and the bench. The F302 image is within a few KB of its
+# flash, and code size moves by hundreds of bytes between rustc releases
+# (1.97 → 1.99: −1 KB on the same source), so a floating `stable` could fail
+# or pass the build on its own. Bump deliberately and note the F302 size
+# change in the commit (tools/fw_size.sh prints it).
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy", "llvm-tools"]
+targets = ["thumbv7em-none-eabihf", "thumbv6m-none-eabi"]
+profile = "minimal"

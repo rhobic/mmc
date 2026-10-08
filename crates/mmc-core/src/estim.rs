@@ -137,8 +137,8 @@ impl RpsiEstimator {
     /// 1-σ uncertainty of `R` [Ω] and `ψ` [Wb].
     pub fn sigma(&self) -> (f32, f32) {
         (
-            libm::sqrtf(self.p[0][0]),
-            libm::sqrtf(self.p[1][1]) / PSI_SCALE,
+            crate::math::sqrt(self.p[0][0]),
+            crate::math::sqrt(self.p[1][1]) / PSI_SCALE,
         )
     }
 

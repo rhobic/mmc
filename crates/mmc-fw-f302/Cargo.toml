@@ -30,3 +30,22 @@ lto = true
 codegen-units = 1
 opt-level = 2
 debug = 2
+
+# Size over speed for what runs outside the control interrupt: boot, the
+# executor, the serial link and the protocol codec (~420 bytes). The control
+# tick is mmc-drive's `Engine::tick`, instantiated in this crate (opt-level 2
+# above), calling into mmc-core and libm, so those stay at 2. embassy-stm32
+# does too: its GPIO and timer accessors inline into the board's
+# `MotorBoard` impl, and at "s" they shifted the tick's inlining (`Pi::update`
+# and `TrapRef::update` became calls). With this set, every function the ADC1
+# handler reaches is the same size as in an all-opt-level-2 build.
+[profile.release.package."*"]
+opt-level = "s"
+[profile.release.package.mmc-core]
+opt-level = 2
+[profile.release.package.mmc-drive]
+opt-level = 2
+[profile.release.package.libm]
+opt-level = 2
+[profile.release.package.embassy-stm32]
+opt-level = 2
