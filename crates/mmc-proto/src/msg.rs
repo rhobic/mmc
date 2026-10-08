@@ -182,7 +182,14 @@ pub mod param {
     /// Saliency ratio (Lq − Ld)/(Lq + Ld) the HFI loop gains are scaled by
     /// (`mmc-host hfi` + `tools/hfi_fit.py` measure it).
     pub const HFI_XI: u8 = 50;
-    pub const COUNT: usize = 51;
+    /// HFI cross-saturation correction [rad el per A of i_q]: q current
+    /// turns the saliency axis the tracker reads; the drive's angle is the
+    /// tracker's plus this × i_q (motor 3: ≈ +0.44).
+    pub const HFI_XSAT: u8 = 51;
+    /// Coulomb friction feed-forward [A] in the sensorless speed loops (HFI
+    /// and observer), signed with the speed reference; 0 = off.
+    pub const SL_FRIC: u8 = 52;
+    pub const COUNT: usize = 53;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -235,6 +242,8 @@ pub mod param {
         "hfi_v",
         "hfi_bw",
         "hfi_xi",
+        "hfi_xsat",
+        "sl_fric",
     ];
 }
 

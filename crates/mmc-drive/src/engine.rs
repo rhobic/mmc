@@ -62,6 +62,15 @@ const HFI_POL_SETTLE_S: f32 = 0.008;
 const HFI_POL_PAIRS: u32 = 3;
 
 const HFI_POL_A: f32 = 0.6;
+/// HFI lock-up: q current at 90 % of its limit for this long with the
+/// tracker below a fifth of the reference trips a stall. Cross-saturation
+/// drags the HFI angle with q current (motor 3: about −25° el/A, running
+/// away past ~0.6 A); far enough off, q current makes no torque and the speed
+/// loop winds to its limit holding a stopped rotor (session 39).
+const HFI_STUCK_S: f32 = 0.5;
+/// Speed [rad/s el] over which the friction feed-forward (`sl_fric`) fades
+/// in from zero, so it changes sign smoothly through a zero crossing.
+const FRIC_OMEGA: f32 = 5.0;
 
 /// Phases of the HFI sensorless start.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -170,6 +179,7 @@ pub struct Engine {
     /// hand over to the flux observer. `None` once handed over.
     hfi_start: Option<HfiStart>,
     hfi_edge_err: f32,
+    hfi_stuck: u32,
     hall_state_prev: Option<u8>,
     /// Measured stator current of the last tick, αβ: a flying start reads
     /// the torque current the rotor was carrying in the rotor's own frame
@@ -250,6 +260,7 @@ impl Engine {
             hfi: None,
             hfi_start: None,
             hfi_edge_err: 0.0,
+            hfi_stuck: 0,
             hall_state_prev: None,
             i_ab_last: AlphaBeta {
                 alpha: 0.0,
@@ -808,7 +819,6 @@ impl Engine {
                 // the injection hook below), the start sequence the d-axis
                 // current, the speed loop q once running.
                 let tr = *self.hfi.as_ref().unwrap();
-                let th = wrap_angle(tr.theta() + tr.omega() * dt);
                 let w = tr.omega();
                 let st = self.hfi_start.as_mut().unwrap();
                 st.ticks += 1;
@@ -861,11 +871,17 @@ impl Engine {
                         let accel = p(param::OMEGA_ACCEL);
                         let d = (omega_target - self.omega_ref_cur).clamp(-accel * dt, accel * dt);
                         self.omega_ref_cur += d;
-                        iq_cmd = self
+                        let lim = p(param::IQ_LIMIT);
+                        iq_cmd = (self
                             .speed
                             .as_mut()
                             .unwrap()
-                            .update(self.omega_ref_cur, w, dt);
+                            .update(self.omega_ref_cur, w, dt)
+                            + fric_ff(p(param::SL_FRIC), self.omega_ref_cur))
+                        .clamp(-lim, lim);
+                        let stuck = iq_cmd.abs() >= 0.9 * lim
+                            && w.abs() < 0.2 * self.omega_ref_cur.abs().max(FRIC_OMEGA);
+                        self.hfi_stuck = if stuck { self.hfi_stuck + 1 } else { 0 };
                         // Fast enough for the flux observer, which has been
                         // integrating all along: hand over, stop injecting.
                         if w.abs() >= p(param::SL_HANDOFF) && w * omega_target > 0.0 {
@@ -879,6 +895,10 @@ impl Engine {
                     }
                 };
                 iq_ref = iq_cmd;
+                // Cross-saturation: q current turns the saliency axis the
+                // tracker locks onto; the rotor's d axis is that plus
+                // `hfi_xsat`·i_q. The carrier stays on the tracker's own axis.
+                let th = wrap_angle(tr.theta() + w * dt + p(param::HFI_XSAT) * iq_cmd);
                 // Locking and polarity happen on a rotor meant to stand
                 // still: the tracker's speed is noise there, and fed to the
                 // FOC's back-EMF and cross-coupling feedforward it becomes q
@@ -935,7 +955,10 @@ impl Engine {
                         let accel = p(param::OMEGA_ACCEL);
                         let d = (omega_target - self.omega_ref_cur).clamp(-accel * dt, accel * dt);
                         self.omega_ref_cur += d;
-                        speed.update(self.omega_ref_cur, seq_out.omega, dt)
+                        let lim = p(param::IQ_LIMIT);
+                        (speed.update(self.omega_ref_cur, seq_out.omega, dt)
+                            + fric_ff(p(param::SL_FRIC), self.omega_ref_cur))
+                        .clamp(-lim, lim)
                     }
                 };
                 // Closed loop: the observer was last updated on the previous
@@ -1103,6 +1126,10 @@ impl Engine {
                     }
                 } else {
                     self.stall_strikes = 0;
+                }
+                if self.hfi_stuck >= cfg.ticks(HFI_STUCK_S) {
+                    self.hfi_stuck = 0;
+                    self.trip(sh, b, ST_STALL);
                 }
             }
         }
@@ -1487,6 +1514,7 @@ impl Engine {
         self.v_applied = AlphaBeta::default();
         self.v_applied2 = AlphaBeta::default();
         self.stall_strikes = 0;
+        self.hfi_stuck = 0;
         self.probe_ticks = 0;
         let (rs, ls) = (p(param::R), p(param::L));
         let gains = current_pi_gains(rs, ls, p(param::CUR_BW));
@@ -1907,5 +1935,27 @@ fn hall_map(p: &impl Fn(u8) -> f32) -> HallMap {
         dir: if p(param::HALL_DIR) < 0.0 { -1.0 } else { 1.0 },
         hyst: p(param::HALL_HYST),
         widths: HallMap::normalized_widths(w),
+    }
+}
+
+/// Coulomb friction feed-forward [A] for the sensorless speed loops: `sl_fric`
+/// in the direction of the speed reference, faded in over ±[`FRIC_OMEGA`].
+/// It supplies the breakaway current a stuck rotor would otherwise wait for
+/// the integrator to wind up (the low-speed stick-slip, session 39).
+fn fric_ff(i_fric: f32, omega_ref: f32) -> f32 {
+    i_fric * (omega_ref / FRIC_OMEGA).clamp(-1.0, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn friction_feedforward_follows_the_reference_and_fades_through_zero() {
+        assert_eq!(fric_ff(0.2, 100.0), 0.2);
+        assert_eq!(fric_ff(0.2, -100.0), -0.2);
+        assert_eq!(fric_ff(0.2, 0.0), 0.0);
+        assert!((fric_ff(0.2, 0.5 * FRIC_OMEGA) - 0.1).abs() < 1e-6);
+        assert_eq!(fric_ff(0.0, 50.0), 0.0);
     }
 }
