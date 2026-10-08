@@ -12,9 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      # rust-toolchain.toml pins the compiler, components and targets.
+      - run: rustup toolchain install
       # mmc-host depends on serialport, which links libudev on Linux.
       - run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - run: cargo fmt --all --check
@@ -25,9 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: thumbv7em-none-eabihf,thumbv6m-none-eabi
+      - run: rustup toolchain install
       # G474 (M4F) and the M0+ scaling floor: both stay green from day one.
       - run: cargo build --target thumbv7em-none-eabihf -p mmc-core -p mmc-hal -p mmc-proto -p mmc-drive
       - run: cargo build --target thumbv6m-none-eabi -p mmc-core -p mmc-hal -p mmc-proto
@@ -38,9 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: thumbv6m-none-eabi
+      - run: rustup toolchain install
       - run: cargo build -p mmc-core --no-default-features --features foc
       - run: cargo build -p mmc-core --no-default-features --features sixstep
       - run: cargo build -p mmc-core --no-default-features --features sixstep --target thumbv6m-none-eabi
@@ -49,28 +44,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: thumbv6m-none-eabi
+      - run: rustup toolchain install
       - run: cargo build --release
         working-directory: crates/mmc-fw-g0b1
+      - run: tools/fw_size.sh crates/mmc-fw-g0b1 2048
 
   firmware-g474:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: thumbv7em-none-eabihf
+      - run: rustup toolchain install
       - run: cargo build --release
         working-directory: crates/mmc-fw-g474
+      - run: tools/fw_size.sh crates/mmc-fw-g474 2048
 
+  # The F302 is the tight one (62 KB of flash for the image). The check fails
+  # below 2 KB free: about one rustc release's worth of code-size drift (the
+  # 1.97 → 1.99 step moved it 1 KB) plus one modest feature, so the build
+  # goes red while there is still room to decide what to cut, not at the
+  # linker overflow. The other boards print their sizes under the same rule.
   firmware-f302:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: thumbv7em-none-eabihf
+      - run: rustup toolchain install
       - run: cargo build --release
         working-directory: crates/mmc-fw-f302
+      - run: tools/fw_size.sh crates/mmc-fw-f302 2048
