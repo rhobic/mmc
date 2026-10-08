@@ -289,6 +289,7 @@ fn handle_conn(
     let target = parts.next().unwrap_or("").to_string();
 
     let mut content_len = 0usize;
+    let (mut host, mut origin, mut content_type) = (None, None, None);
     loop {
         let mut line = String::new();
         reader.read_line(&mut line)?;
@@ -296,12 +297,16 @@ fn handle_conn(
         if line.is_empty() {
             break;
         }
-        if let Some(v) = line
-            .to_ascii_lowercase()
-            .strip_prefix("content-length:")
-            .map(str::trim)
-        {
-            content_len = v.parse().unwrap_or(0);
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().to_string();
+        match name.trim().to_ascii_lowercase().as_str() {
+            "content-length" => content_len = value.parse().unwrap_or(0),
+            "host" => host = Some(value),
+            "origin" => origin = Some(value),
+            "content-type" => content_type = Some(value),
+            _ => {}
         }
     }
     let mut body = vec![0u8; content_len.min(64 * 1024)];
@@ -309,6 +314,19 @@ fn handle_conn(
         reader.read_exact(&mut body)?;
     }
     let mut conn = reader.into_inner();
+
+    // The panel drives a live power stage, so a request from any other web
+    // page in the same browser must not reach it: a DNS-rebinding page
+    // arrives with its own name as Host, and a cross-site POST carries its
+    // own Origin (and, without a CORS preflight, cannot send JSON).
+    if !host_allowed(host.as_deref()) {
+        return respond(&mut conn, 403, "text/plain", b"forbidden host");
+    }
+    if method == "POST"
+        && !post_allowed(host.as_deref(), origin.as_deref(), content_type.as_deref())
+    {
+        return respond(&mut conn, 403, "text/plain", b"forbidden origin");
+    }
 
     match (method.as_str(), target.split('?').next().unwrap_or("")) {
         ("GET", "/") => respond(
@@ -587,6 +605,7 @@ fn respond(
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        403 => "Forbidden",
         _ => "Not Found",
     };
     write!(
@@ -596,4 +615,76 @@ fn respond(
     )?;
     conn.write_all(body)?;
     conn.flush()
+}
+
+/// `Host` names the panel can be reached by: `localhost` or an IP literal
+/// (so binding it to a LAN address on purpose still works). A rebinding
+/// attacker's page can only arrive under its own DNS name.
+fn host_allowed(host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    let name = match host.strip_prefix('[') {
+        // [v6]:port
+        Some(rest) => match rest.split_once(']') {
+            Some((v6, _)) => return v6.parse::<std::net::Ipv6Addr>().is_ok(),
+            None => return false,
+        },
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    name.eq_ignore_ascii_case("localhost") || name.parse::<std::net::Ipv4Addr>().is_ok()
+}
+
+/// A command POST must be JSON (a cross-site page cannot send that without a
+/// CORS preflight, which this server never grants) and, when the browser
+/// says where it came from, from the panel's own origin.
+fn post_allowed(host: Option<&str>, origin: Option<&str>, content_type: Option<&str>) -> bool {
+    let json = content_type.is_some_and(|ct| {
+        ct.split(';')
+            .next()
+            .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"))
+    });
+    let same_origin = match (origin, host) {
+        (None, _) => true,
+        (Some(o), Some(h)) => o.eq_ignore_ascii_case(&format!("http://{h}")),
+        (Some(_), None) => false,
+    };
+    json && same_origin
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hosts_by_address_or_localhost_only() {
+        assert!(host_allowed(Some("127.0.0.1:8484")));
+        assert!(host_allowed(Some("localhost:8484")));
+        assert!(host_allowed(Some("192.168.1.20:8484")));
+        assert!(host_allowed(Some("[::1]:8484")));
+        assert!(!host_allowed(Some("evil.example:8484")));
+        assert!(!host_allowed(Some("127.0.0.1.evil.example:8484")));
+        assert!(!host_allowed(None));
+    }
+
+    #[test]
+    fn commands_only_as_same_origin_json() {
+        let h = Some("127.0.0.1:8484");
+        let json = Some("application/json");
+        assert!(post_allowed(h, Some("http://127.0.0.1:8484"), json));
+        assert!(post_allowed(
+            h,
+            None,
+            Some("application/json; charset=utf-8")
+        ));
+        // The cross-site "simple request" a page can send without a preflight.
+        assert!(!post_allowed(
+            h,
+            Some("https://evil.example"),
+            Some("text/plain")
+        ));
+        assert!(!post_allowed(h, None, Some("text/plain;charset=UTF-8")));
+        assert!(!post_allowed(h, Some("https://evil.example"), json));
+        assert!(!post_allowed(h, None, None));
+    }
 }

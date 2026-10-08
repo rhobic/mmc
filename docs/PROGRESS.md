@@ -3,6 +3,43 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-08 — session 37: review fixes — panel origin, flying-start gaps
+
+From a code review of `main` at `d58cf8d`. **F302 fw 21, G474 fw 26**
+(nvparam unchanged).
+
+- **The panel only takes commands from itself.** `POST /cmd` accepted any
+  body from anywhere, and a browser sends a cross-site `text/plain` POST
+  without a preflight — so any web page open while `mmc-host panel` ran
+  could drive the bridge. Now every request needs a `Host` of `localhost`
+  or an IP literal (DNS rebinding arrives under its own name), and a POST
+  needs `Content-Type: application/json` plus, when present, a matching
+  `Origin`. The page sends the header. Tests in `panel.rs`.
+- **The first drive after boot catches a turning rotor.** The hall angle
+  was only built by the first drive start, so before any drive the flying
+  start had no halls to read and started from rest under a turning rotor
+  (an MCU reset while it coasts). It is now built on the first tick after
+  calibration, sharing the hall map with the cogging identification —
+  which also left the F302 image 120 bytes *smaller* (62 760 of 63 488;
+  a first version built it at the end of calibration and overflowed by 48).
+  Test `first_start_after_boot_catches_a_turning_rotor`: slowest 395 of
+  400 rad/s el (before: reversed to −87).
+- **Flying entry into I-f in reverse.** The hang angle leaned the current
+  toward −d at negative speed — the unstable equilibrium, full current
+  against the magnet. Steady I-f holds the rotor's d axis on the current in
+  both directions. Test `flying_if_entry_mirrors_in_reverse`: −400 rad/s el
+  sensorless → I-f now mirrors the forward case (before: swung to +54).
+- **The test board's stage-off is open, not shorted.** `sim_board.rs`
+  applied 0 V with the stage off, which brakes a coasting rotor through its
+  own windings; a start from Off on a turning rotor could not be tested.
+
+**Still open from the review:** a flying entry into I-f at high speed on
+motor 3 can still trip the 1.5 A overcurrent (the sim rig trips at 2.5 A,
+so its tests have headroom the boards do not); the host `serve` sim's
+hand-copied param ranges have drifted from the firmware's; the G474's
+receive task still uses plain DMA reads rather than `mmc_drive::link`;
+firmware still panics into `panic_halt` with PWM live.
+
 ## 2026-10-08 — session 36: zero-speed position by high-frequency injection
 
 - Motor 3 is salient: ξ = (Lq − Ld)/(Lq + Ld) = 0.055 from standstill

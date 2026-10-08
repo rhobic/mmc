@@ -215,7 +215,9 @@ let columns = [], buf = [], lastT = -1;
 let lastFrames = -1, frameStamp = Date.now();  // telemetry-stall detector
 const ci = n => columns.indexOf(n);
 
-function post(o) { fetch("/cmd", { method: "POST", body: JSON.stringify(o) }); }
+function post(o) {
+  fetch("/cmd", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) });
+}
 function stop() { post({ cmd: "drive", mode: "off" }); }
 document.getElementById("stop").onclick = stop;
 window.addEventListener("keydown", e => { if (e.code === "Space") { e.preventDefault(); stop(); } });

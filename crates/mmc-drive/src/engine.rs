@@ -362,9 +362,18 @@ impl Engine {
         let kt = 1.5 * p(param::POLE_PAIRS) * p(param::FLUX);
         if spec.has_halls {
             let pp = p(param::POLE_PAIRS).max(1.0) as u8;
-            let cog = self
-                .cog
-                .get_or_insert_with(|| CogComp::new(&hall_map(&p), pp));
+            let cog = match self.cog {
+                Some(ref mut cog) => cog,
+                None => {
+                    // First tick after calibration. The hall angle is tracked
+                    // from here on, not from the first drive build: a first
+                    // start on a rotor that is already turning (a reset while
+                    // it coasts) needs it to catch the rotor.
+                    let map = hall_map(&p);
+                    self.hall_angle = Some(HallAngle::new(map));
+                    self.cog.insert(CogComp::new(&map, pp))
+                }
+            };
             // Collect torque samples only in steady hall FOC: the energy
             // balance needs a speed loop holding the rotor near a setpoint.
             // Gated on the setpoint, not the measured speed: a hunting rotor
@@ -1322,7 +1331,10 @@ impl Engine {
                 // of the frame before the current can hold it.
                 let amp = f32::from_bits(sh.cmd_amp.load(Ordering::Relaxed));
                 let frac = (iq_rotor / amp.abs().max(1e-3)).clamp(-1.0, 1.0);
-                let lean = mmc_core::math::sqrt(1.0 - frac * frac) * w.signum();
+                // Along +d in either direction of travel: that is the stable
+                // hang (the rotor's d axis follows the current vector); −d
+                // would put the full current against the magnet.
+                let lean = mmc_core::math::sqrt(1.0 - frac * frac);
                 // Current angle in the rotor frame, then the forced frame
                 // whose q axis carries it.
                 let phi = mmc_core::math::atan2(frac, lean);
@@ -1611,12 +1623,11 @@ impl Engine {
         // Every drive on a board with halls carries the calibrated hall
         // angle: the hall modes run on it, the rest are scored against it.
         let map = hall_map(&p);
-        match self.hall_angle.as_mut() {
-            // Keep the speed and angle the halls have been tracking (they
-            // run in every mode): a drive started on a turning rotor needs
-            // them from the first tick.
-            Some(h) => h.retune(map),
-            None => self.hall_angle = spec.has_halls.then(|| HallAngle::new(map)),
+        // Keep the speed and angle the halls have been tracking (they run in
+        // every mode, from boot): a drive started on a turning rotor needs
+        // them from its first tick.
+        if let Some(h) = self.hall_angle.as_mut() {
+            h.retune(map);
         }
         self.hall.widths = map.widths;
         if let Some(c) = self.cog.as_mut() {

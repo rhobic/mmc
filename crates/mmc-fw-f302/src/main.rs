@@ -177,7 +177,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardF302,
-        fw_version: 20,
+        fw_version: 21,
         name: "mmc-f302",
         defaults: DEFAULTS,
     },

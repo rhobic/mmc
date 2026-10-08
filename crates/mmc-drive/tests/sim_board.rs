@@ -6,7 +6,7 @@
 //! a board choice now and nothing in the drive may assume one.
 
 use mmc_core::math::sin_cos;
-use mmc_core::transforms::{clarke, inverse_clarke, inverse_park, Abc};
+use mmc_core::transforms::{clarke, inverse_clarke, inverse_park, Abc, Dq};
 use mmc_core::tuning::speed_pi_gains;
 use mmc_drive::{nvparam, BurstBuffer, DriveConfig, Engine, ParamStore, Shared, ST_OFF, ST_RUN};
 use mmc_hal::{BoardSpec, MotorBoard, Sample};
@@ -43,7 +43,9 @@ impl SimBoard {
     }
 
     /// Advance the plant one control period under the latched duties. A
-    /// stage that is off applies no voltage (freewheel diodes ignored). With
+    /// stage that is off is open: no phase current, the rotor coasts (on
+    /// hardware the body diodes only conduct once the back-EMF tops the bus,
+    /// which none of these tests reach). With
     /// one phase floating (six-step) the dq plant has no open terminal, so
     /// the floating phase is held at the driven pair's midpoint — close to
     /// the zero-current voltage it would float to.
@@ -64,6 +66,25 @@ impl SimBoard {
                     b: d[1] * VBUS,
                     c: d[2] * VBUS,
                 })
+            }
+            0 => {
+                // Open circuit: drive the winding with its own back-EMF so
+                // no current builds, and clear what the explicit step leaves.
+                for _ in 0..SUBSTEPS {
+                    let flux = self.motor.params.flux;
+                    let e = inverse_park(
+                        Dq {
+                            d: 0.0,
+                            q: self.motor.omega_e() * flux,
+                        },
+                        sin_cos(self.motor.theta_e()),
+                    );
+                    self.motor.i_dq = Dq::default();
+                    self.motor.step(e, 0.0, self.dt_plant);
+                    self.motor.i_dq = Dq::default();
+                    self.theta_m_total += self.motor.omega_m * self.dt_plant;
+                }
+                return;
             }
             _ => Default::default(),
         };
@@ -746,6 +767,68 @@ fn a_live_switch_catches_the_turning_rotor() {
             );
         }
     }
+}
+
+/// A flying start into I-f lands on the stable hang (current along the
+/// rotor's +d) in both directions of travel: reversed, the same switch
+/// mirrors the forward one. Before the fix, −400 rad/s el put the full
+/// current on −d and the rotor reversed.
+#[test]
+fn flying_if_entry_mirrors_in_reverse() {
+    let mut ranges = [(0.0f32, 0.0f32); 2];
+    for (k, dir) in [1.0f32, -1.0].into_iter().enumerate() {
+        let mut rig = Rig::new(10_000);
+        rig.send(&Message::SetDrive(DriveMode::Sensorless {
+            amps: 0.5,
+            omega_e: 400.0 * dir,
+        }));
+        rig.run(2.0);
+        let w0 = rig.board.motor.omega_e();
+        assert!(w0 * dir > 300.0, "{dir}: only {w0:.0} before the switch");
+        rig.send(&Message::SetDrive(DriveMode::IfCurrent {
+            amps: 0.5,
+            omega_e: 400.0 * dir,
+        }));
+        let (lo, hi) = rig.run_speed_range(0.5);
+        println!("sensorless -> I-f at {w0:.0}: {lo:.0}..{hi:.0}");
+        assert_eq!(rig.sh.state(), ST_RUN, "{dir}: faulted");
+        ranges[k] = if dir > 0.0 { (lo, hi) } else { (-hi, -lo) };
+        assert!(
+            ranges[k].0 > 0.6 * 400.0,
+            "{dir}: speed {lo:.0}..{hi:.0} after the switch from {w0:.0}"
+        );
+    }
+    let (fwd, rev) = (ranges[0], ranges[1]);
+    assert!(
+        (fwd.0 - rev.0).abs() < 20.0 && (fwd.1 - rev.1).abs() < 20.0,
+        "forward {fwd:?} vs reverse (mirrored) {rev:?}"
+    );
+}
+
+/// The first drive after boot catches a rotor that is already turning (a
+/// reset while it coasts): the halls are tracked from calibration on, not
+/// from the first drive build.
+#[test]
+fn first_start_after_boot_catches_a_turning_rotor() {
+    let mut rig = Rig::new(10_000);
+    let pp = rig.board.motor.params.pole_pairs as f32;
+    // An external load keeps the rotor at 400 rad/s el for 50 ms with the
+    // stage off: hall edges accumulate, nothing has been built yet. (This
+    // sim board's stage-off shorts the windings, so a free coast would
+    // brake; holding the speed stands in for the coast.)
+    for _ in 0..500 {
+        rig.board.motor.omega_m = 400.0 / pp;
+        rig.run(1e-4);
+    }
+    let w0 = rig.board.motor.omega_e();
+    rig.send(&Message::SetDrive(DriveMode::HallFoc {
+        amps: 1.0,
+        omega_e: 400.0,
+    }));
+    let (lo, _) = rig.run_speed_range(0.5);
+    println!("first start at {w0:.0} rad/s el: slowest {lo:.0}");
+    assert_eq!(rig.sh.state(), ST_RUN);
+    assert!(lo > 0.7 * w0, "dipped to {lo:.0} from {w0:.0}");
 }
 
 /// Hall FOC re-entered on a turning rotor ramps from the rotor's speed
