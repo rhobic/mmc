@@ -186,8 +186,9 @@ pub mod param {
     /// turns the saliency axis the tracker reads; the drive's angle is the
     /// tracker's plus this × i_q (motor 3: ≈ +0.44).
     pub const HFI_XSAT: u8 = 51;
-    /// Coulomb friction feed-forward [A] in the sensorless speed loops (HFI
-    /// and observer), signed with the speed reference; 0 = off.
+    /// Coulomb friction feed-forward [A] in the HFI speed loop, signed with
+    /// the speed reference; 0 = off. (On the observer it made low speed
+    /// worse, session 39.)
     pub const SL_FRIC: u8 = 52;
     pub const COUNT: usize = 53;
     pub const NAMES: [&str; COUNT] = [
