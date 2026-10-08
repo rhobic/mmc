@@ -313,6 +313,21 @@ sync — normal for motor control in any language.
   the probe doubles as the INFORM measurement primitive if pursued. Design
   notes: `~/.claude/plans/back-to-motor-control-enumerated-hejlsberg.md`.
 
+- **Flying start / live mode switch — investigate, then do properly.** A
+  change of drive mode while running is a clean start: θ, ω and amp reset to
+  0 and the new mode's blocks are rebuilt with the bridge still live and the
+  rotor still turning (the one exception is the live sensorless-FOC →
+  six-step handover). Open-loop at speed → I-f or sensorless then applies a
+  stationary current vector against full back-EMF (current spike, OC trip or
+  hard braking); into sensorless the I-f sequencer restarts from standstill
+  under a spinning rotor and can trip the stall fault. The sim's `set_drive`
+  does the same, so it will not flag it. Wanted: catch a spinning rotor and
+  start the new mode at its speed and angle — seed θ/ω from the outgoing
+  mode's angle or the observer, or measure them on entry (coast + BEMF
+  zero-cross, or a short zero-vector current burst) — with the PI
+  integrators preloaded for a bumpless transfer. Also covers starting into
+  an already-coasting motor from Off. Until then, go through Off between
+  modes. *(From a review on origin `5bc16cd`.)*
 - **Online calibration on halls** *(2026-10-06/07, see
   [CALIBRATION.md](CALIBRATION.md))*: hall sector widths (fw 16), the
   online R/ψ estimator in firmware with i_d injection and dither (fw 17–18),

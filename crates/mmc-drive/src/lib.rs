@@ -408,6 +408,10 @@ impl<const N: usize> Shared<N> {
                     DriveMode::SixStepHall { duty, omega_e } => (mode::SS_HALL, duty, omega_e),
                     DriveMode::HallPosition { amps, theta_m } => (mode::HALL_POS, amps, theta_m),
                 };
+                // `clamp` passes NaN through; never let one reach the loop.
+                if !amp.is_finite() || !omega.is_finite() {
+                    return nak(1);
+                }
                 if matches!(m, mode::HALL_FOC | mode::SS_HALL | mode::HALL_POS)
                     && !self.cfg.spec.has_halls
                 {
@@ -439,7 +443,7 @@ impl<const N: usize> Shared<N> {
                     test::L_THETA => N >= probe::SAL_HDR + probe::SAL_TICKS * 2,
                     _ => false,
                 };
-                if !fits {
+                if !fits || !a.is_finite() || !b.is_finite() {
                     return nak(1);
                 }
                 let state = self.state();
@@ -514,6 +518,9 @@ impl<const N: usize> Shared<N> {
             }
             // Adjust the I-f current target on the fly; otherwise ignored.
             Message::SetIqRef { iq } => {
+                if !iq.is_finite() {
+                    return nak(1);
+                }
                 if self.cmd_mode.load(Ordering::Relaxed) == mode::IF {
                     let lim = self.param(param::IQ_LIMIT);
                     self.cmd_amp

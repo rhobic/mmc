@@ -1051,6 +1051,12 @@ impl Engine {
                 // rather than leave it owned by the ISR.
                 sh.burst_abort();
             }
+            // Only a start from Off clears the overcurrent debounce: a live
+            // switch keeps a pending strike, so the 2-strike debounce spans
+            // the switch transient (review follow-up, origin `5bc16cd`).
+            if self.mode == mode::OFF {
+                self.oc_strikes = 0;
+            }
             self.clean_start(sh, mode);
         }
         self.mode = mode;
@@ -1067,7 +1073,6 @@ impl Engine {
         self.amp = 0.0;
         self.v_applied = AlphaBeta::default();
         self.v_applied2 = AlphaBeta::default();
-        self.oc_strikes = 0;
         self.stall_strikes = 0;
         self.probe_ticks = 0;
         let (rs, ls) = (p(param::R), p(param::L));

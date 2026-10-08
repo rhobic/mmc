@@ -410,7 +410,7 @@ fn parse_cmd(v: &serde_json::Value) -> Option<Cmd> {
                 tuning.rl_volts = rv;
             }
             if let Some(points) = v.get("sweep").and_then(|x| x.as_array()) {
-                let parsed: Vec<_> = points.iter().filter_map(&pair).collect();
+                let parsed: Vec<_> = points.iter().filter_map(pair).collect();
                 if !parsed.is_empty() {
                     tuning.sweep = parsed;
                 }

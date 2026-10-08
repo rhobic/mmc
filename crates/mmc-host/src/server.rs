@@ -286,6 +286,11 @@ impl SimControl {
         if !fresh {
             return;
         }
+        // Leaving a probe mid-recording hands back the partial buffer, as
+        // the firmware does.
+        if self.burst_state == 1 {
+            self.burst_state = 2;
+        }
         self.theta = 0.0;
         self.omega = 0.0;
         self.amp = 0.0;

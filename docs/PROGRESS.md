@@ -3,6 +3,22 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-08 — session 35: review follow-ups merged
+
+Ported from origin `claude/charming-feynman-a57o83` (`5bc16cd`, written
+against the pre-HAL G474 firmware) into `mmc-drive`, so both boards get it:
+
+- **Overcurrent debounce kept across a live mode switch**: only a start
+  from Off clears `oc_strikes` now, so a pending strike survives the switch
+  transient.
+- **Non-finite commands are NAKed** (err 1) in `SetDrive`, `SetIqRef` and
+  `RunTest`; `f32::clamp` passes NaN through to the loop. Test
+  `non_finite_commands_are_refused`.
+- **Sim parity**: the sim's `set_drive` hands back a probe's partial buffer
+  when switching straight to another running mode. (Its speed loop already
+  read `speed_kp`/`speed_ki` from the param table.)
+- Flying start / live mode switch added to the PLAN backlog.
+
 ## 2026-10-07 — session 34: cancelling the position torque
 
 - `mmc_core::cogging`: hall states counted from power-up, the pole pair

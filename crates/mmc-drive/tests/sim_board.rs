@@ -606,3 +606,32 @@ fn hall_position_tracks_a_slow_move() {
     let speed = (b - a) / 4.0;
     assert!((speed - 5.0).abs() < 0.5, "average {speed} rad/s el for 5");
 }
+
+/// `f32::clamp` passes NaN through, so a non-finite command must be refused
+/// at the door rather than reach a control loop (review follow-up, origin
+/// `5bc16cd`).
+#[test]
+fn non_finite_commands_are_refused() {
+    let mut rig = Rig::new(RATES[0]);
+    rig.run(0.5); // past the zero-current calibration
+    for msg in [
+        Message::SetDrive(DriveMode::IfCurrent {
+            amps: f32::NAN,
+            omega_e: 100.0,
+        }),
+        Message::SetDrive(DriveMode::Sensorless {
+            amps: 0.5,
+            omega_e: f32::INFINITY,
+        }),
+        Message::SetIqRef { iq: f32::NAN },
+        Message::RunTest {
+            kind: test::RL_STEP,
+            a: f32::NAN,
+            b: 1.0,
+        },
+    ] {
+        let reply = rig.send(&msg);
+        assert!(matches!(reply, Message::Nak { err: 1, .. }), "{msg:?}: {reply:?}");
+    }
+    assert_eq!(rig.telem(channel::STATE) as u8, ST_OFF, "nothing started");
+}
