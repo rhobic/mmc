@@ -104,8 +104,7 @@ need them; it needs saliency, which motor 3 has.
 ## Limits and next steps
 
 - **Polarity margin** is thin: the contrast is 1.5–22 %, comparable to the
-  saliency term, and the pulses jerk the rotor. 18/18 on the bench, 11/12 on
-  the twin. Options for a motor with less d-axis saturation: read the
+  saliency term, and the pulses jerk the rotor. Options for a motor with less d-axis saturation: read the
   contrast from the first current rise rather than the averaged ripple, or a
   short q-current nudge read on the tracker.
 - **20–100 rad/s el** with heavy hunting: the tracker needs the known torque
