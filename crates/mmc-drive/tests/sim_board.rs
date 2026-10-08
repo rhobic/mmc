@@ -415,6 +415,33 @@ fn params_persist_and_restore() {
     assert_eq!(fresh.sh.param(param::FLUX), 0.0123);
 }
 
+/// The 32-bit period arithmetic equals the 64-bit definition across the
+/// whole divider range, including rates that do not divide a second.
+#[test]
+fn telemetry_period_is_exact() {
+    let motor = PmsmParams::small_bldc();
+    for hz in [10_000, 20_000, 16_000, 7_000, 23_456, 65_536] {
+        let burst: &'static BurstBuffer<2048> = Box::leak(Box::default());
+        let sh = Box::new(Shared::new(config(hz, &motor), burst));
+        let mut store = RamStore([0xFF; nvparam::BYTES]);
+        for divider in [0, 1, 2, 3, 7, 20, 999, 4_295, 65_534, 65_535] {
+            sh.handle(
+                &Message::SetTelemetry {
+                    divider,
+                    mask: channel::ALL,
+                },
+                &mut store,
+            );
+            let d = divider.max(1) as u64;
+            assert_eq!(
+                sh.telemetry_period_us(),
+                d * 1_000_000 / hz as u64,
+                "hz {hz} divider {divider}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_small_burst_buffer_refuses_the_saliency_sweep() {
     let motor = PmsmParams::small_bldc();

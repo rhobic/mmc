@@ -40,9 +40,41 @@ pub fn sin_cos(angle: f32) -> (f32, f32) {
     (s, c * cos_sign)
 }
 
+/// Square root, correctly rounded (IEEE 754), NaN below zero.
+///
+/// On hard-float Arm (Cortex-M4F/M7/M33: every `eabihf` target) this is the
+/// `VSQRT.F32` instruction, 14 cycles. `libm::sqrtf` has no Arm
+/// specialisation and lowers to a ~220-byte software routine plus a 256-byte
+/// table, called from the control tick. Same result bit for bit: both are
+/// correctly rounded.
 #[inline]
 pub fn sqrt(x: f32) -> f32 {
-    libm::sqrtf(x)
+    #[cfg(all(target_arch = "arm", target_abi = "eabihf"))]
+    {
+        // Rust only allows `sreg` operands with `vfp2`, which implies a
+        // double-precision FPU the M4F lacks, so the value goes through a
+        // core register and `s0` is borrowed and restored around the op.
+        let bits: u32;
+        // SAFETY: register arithmetic only; `s0` is saved and restored on
+        // the stack (8 bytes, balanced) and the flags are untouched.
+        unsafe {
+            core::arch::asm!(
+                "vpush {{s0}}",
+                "vmov s0, {x}",
+                "vsqrt.f32 s0, s0",
+                "vmov {r}, s0",
+                "vpop {{s0}}",
+                x = in(reg) x.to_bits(),
+                r = lateout(reg) bits,
+                options(pure, nomem, preserves_flags),
+            );
+        }
+        f32::from_bits(bits)
+    }
+    #[cfg(not(all(target_arch = "arm", target_abi = "eabihf")))]
+    {
+        libm::sqrtf(x)
+    }
 }
 
 /// `atan2(y, x)` [rad]. `libm`'s single-precision routine: fine for a

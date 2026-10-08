@@ -4,8 +4,7 @@
 //! Positions here are in whatever angular unit the caller uses consistently
 //! (the drive uses electrical radians internally).
 
-use crate::math::wrap_angle;
-use libm::sqrtf;
+use crate::math::{sqrt as sqrtf, wrap_angle};
 
 /// Trapezoidal motion reference: accelerates at `accel` toward the target,
 /// cruises at `vmax`, and decelerates so as to arrive with zero velocity.

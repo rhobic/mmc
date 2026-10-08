@@ -59,16 +59,37 @@ pub trait ParamStore {
     fn erase(&mut self) -> bool;
 }
 
-fn crc32(words: &[u32]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &word in words {
-        crc ^= word;
-        for _ in 0..32 {
+/// CRC-32 (IEEE, reflected), four bits per step from a 16-entry table built
+/// at compile time: 64 bytes of flash. LLVM 23 (rustc 1.99) turns the plain
+/// bit-at-a-time loop into a 1 KB byte-wise table, for a function that runs
+/// at boot and on a parameter save.
+const CRC32_NIBBLE: [u32; 16] = {
+    let mut t = [0u32; 16];
+    let mut i = 0;
+    while i < 16 {
+        let mut crc = i as u32;
+        let mut bit = 0;
+        while bit < 4 {
             crc = if crc & 1 != 0 {
                 (crc >> 1) ^ 0xEDB8_8320
             } else {
                 crc >> 1
             };
+            bit += 1;
+        }
+        t[i] = crc;
+        i += 1;
+    }
+    t
+};
+
+#[inline(never)]
+fn crc32(words: &[u32]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &word in words {
+        crc ^= word;
+        for _ in 0..8 {
+            crc = (crc >> 4) ^ CRC32_NIBBLE[(crc & 0xF) as usize];
         }
     }
     !crc
@@ -128,5 +149,31 @@ mod tests {
         blob[9] ^= 1;
         assert_eq!(decode(&blob), None);
         assert_eq!(decode(&[0xFF; BYTES]), None, "erased flash is blank");
+    }
+
+    /// The table form is the same CRC as the bit-at-a-time definition, so
+    /// blobs saved by earlier firmware still validate.
+    #[test]
+    fn crc32_matches_bitwise() {
+        fn bitwise(words: &[u32]) -> u32 {
+            let mut crc = 0xFFFF_FFFFu32;
+            for &word in words {
+                crc ^= word;
+                for _ in 0..32 {
+                    crc = if crc & 1 != 0 {
+                        (crc >> 1) ^ 0xEDB8_8320
+                    } else {
+                        crc >> 1
+                    };
+                }
+            }
+            !crc
+        }
+        // Little-endian words make this the byte-wise CRC-32 of "12345678".
+        let check = [u32::from_le_bytes(*b"1234"), u32::from_le_bytes(*b"5678")];
+        assert_eq!(crc32(&check), 0x9AE0_DAAF);
+        let words: [u32; 64] = core::array::from_fn(|i| (i as u32).wrapping_mul(0x9E37_79B9));
+        assert_eq!(crc32(&words), bitwise(&words));
+        assert_eq!(crc32(&[]), bitwise(&[]));
     }
 }
