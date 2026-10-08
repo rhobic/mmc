@@ -4,7 +4,9 @@ Window: from `--settle` s after the drive reached its final target (the 60 %
 retarget when the capture had one, else the drive start) to 0.2 s before the
 drive stopped. True mean speed comes from counting hall steps (exact at any
 speed, unlike the edge-timed `omega_hall`); its spread from `omega_hall`
-over the window; the longest gap between hall edges flags a stall.
+over the window; the longest gap between hall edges flags a stall; the
+peak-to-peak of hall position about its own mean-speed line (+-30 deg of sector
+quantisation included) measures stick-slip directly.
 
     python tools/lowspeed_eval.py testresults/motor3-hfi-vs-obs/*.csv
 """
@@ -50,6 +52,13 @@ def score(p, settle):
         steps += s
         edges.append(tw[k])
     edges.append(tw[-1])
+    w_true = steps * (math.pi / 3) / (tw[-1] - tw[0])
+    # Stick-slip: counted hall position about its mean-speed line.
+    pos = np.zeros(len(h))
+    for k in range(1, len(h)):
+        a, b = h[k - 1], h[k]
+        pos[k] = pos[k - 1] + (0 if a is None or b is None else (b - a + 3) % 6 - 3)
+    perr = np.degrees(pos * math.pi / 3 - w_true * (tw - tw[0]))
     span = tw[-1] - tw[0]
     w_true = steps * (math.pi / 3) / span
     gap = float(np.max(np.diff(edges)))
@@ -66,16 +75,17 @@ def score(p, settle):
         err_sd=float(np.std(err)),
         iq_rms=float(np.sqrt(np.mean(iq**2))),
         max_gap=gap,
+        pos_pp=float(np.ptp(perr)),
         states=sorted({int(x) for x in st[w]}),
     )
 
 
 def main(a):
     rows = [score(p, a.settle) for p in a.captures]
-    print(f"{'file':28} {'target':>7} {'true':>7} {'sd_hall':>7} {'est':>7} {'th_err':>7} {'sd_th':>6} {'iq_rms':>7} {'gap s':>6}  states")
+    print(f"{'file':28} {'target':>7} {'true':>7} {'sd_hall':>7} {'est':>7} {'th_err':>7} {'sd_th':>6} {'iq_rms':>7} {'gap s':>6} {'pos_pp':>7}  states")
     for r in rows:
         print(f"{r['file']:28} {r['target']:7.0f} {r['w_true']:7.1f} {r['w_hall_sd']:7.1f} {r['w_est']:7.1f}"
-              f" {r['err_mean']:+7.1f} {r['err_sd']:6.1f} {r['iq_rms']:7.3f} {r['max_gap']:6.2f}  {r['states']}")
+              f" {r['err_mean']:+7.1f} {r['err_sd']:6.1f} {r['iq_rms']:7.3f} {r['max_gap']:6.2f} {r['pos_pp']:7.0f}  {r['states']}")
     if a.json:
         json.dump(rows, open(a.json, "w"), indent=1)
 

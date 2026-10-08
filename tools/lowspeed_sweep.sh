@@ -1,23 +1,27 @@
 #!/usr/bin/env bash
-# Low-speed floor: closed-loop observer FOC (I-f spin-up to sl_handoff, then
-# stepped down at 60 %) vs HFI (sensorless from rest straight to the target).
-# Motor 3 on bench 2. Score with tools/lowspeed_eval.py.
-#   tools/lowspeed_sweep.sh <out dir> obs|hfi <w1> <w2> ...   (rad/s el)
+# Low-speed floor: closed-loop observer FOC (I-f spin-up to ±sl_handoff, then
+# retargeted at 60 %) vs HFI (sensorless from rest to the target). Motor 3
+# on bench 2. Score with tools/lowspeed_eval.py.
+#   tools/lowspeed_sweep.sh <out dir> obs|hfi[:<profile>] <run> ...
+# <run> is a target `w` [rad/s el], or `a:b` to start at a and retarget live
+# to b at 60 % (a zero crossing when the signs differ). <profile> names
+# <out dir>/<profile>.json (default: the kind) and prefixes the file names.
 set -euo pipefail
-out=$1; kind=$2; shift 2
+out=$1; spec=$2; shift 2
+kind=${spec%%:*}; prof=${spec#*:}; [[ $prof == "$spec" ]] && prof=$kind
 H=target/release/mmc-host.exe
+hz() { python -c "import math; print($1 / (2 * math.pi))"; }
 mkdir -p "$out"
-$H apply --serial COM9 --profile "$out/$kind.json" | tail -1
-for w in "$@"; do
-    hz=$(python -c "import math; print($w / (2 * math.pi))")
-    if [[ $kind == obs ]]; then
-        $H capture --serial COM9 --baud 1000000 --divider 5 --duration 10 --drive sl --amp 0.5 \
-            --hz 55.704 --step-hz "$hz" --out "$out/obs_w$w.csv" \
-            --title "Observer FOC 350 -> $w rad/s el" | tail -1
-    else
-        $H capture --serial COM9 --baud 1000000 --divider 5 --duration 8 --drive sl --amp 0.5 \
-            --hz "$hz" --out "$out/hfi_w$w.csv" \
-            --title "HFI sensorless from rest to $w rad/s el" | tail -1
-    fi
+$H apply --serial COM9 --profile "$out/$prof.json" | tail -1
+for run in "$@"; do
+    if [[ $run == *:* ]]; then a=${run%%:*}; b=${run#*:}
+    elif [[ $kind == obs ]]; then a=$(python -c "print(350 if $run > 0 else -350)"); b=$run
+    else a=$run; b=; fi
+    name="${prof}_w${run/:/_to_}"
+    args=(--drive sl --amp 0.5 --hz="$(hz "$a")" --duration 10)
+    title="$kind ($prof) $a rad/s el"
+    if [[ -n $b ]]; then args+=(--step-hz="$(hz "$b")"); title+=" -> $b"; fi
+    $H capture --serial COM9 --baud 1000000 --divider 5 "${args[@]}" \
+        --out "$out/$name.csv" --title "$title" | tail -1
     python -c "import time; time.sleep(2)"
 done

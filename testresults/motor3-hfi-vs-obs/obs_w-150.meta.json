@@ -7,11 +7,11 @@
   "order": 100,
   "params": {
     "divider": 5,
-    "drive": "Sensorless { amps: 0.5, omega_e: 350.00003 }",
-    "drive_step": "Sensorless { amps: 0.5, omega_e: 200.0 }",
+    "drive": "Sensorless { amps: 0.5, omega_e: -350.00003 }",
+    "drive_step": "Sensorless { amps: 0.5, omega_e: -150.0 }",
     "duration_s": 10.0,
     "iq_A": null
   },
-  "title": "obs (obs) 350 rad/s el -> 200",
-  "unix_time": 1791502428
+  "title": "obs (obs) -350 rad/s el -> -150",
+  "unix_time": 1791502037
 }

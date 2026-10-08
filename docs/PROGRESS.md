@@ -13,9 +13,19 @@ Bench 2, motor 3, 18 V, fw 20 (HFI and observer code as on `main`).
   angle (±60°), 40 and below trips the stall detector.
 - **HFI holds 20–30 rad/s el** with the angle to ±5–11° throughout (≈4×
   lower); 10 averages 8.8 in bursts, 5 never breaks away.
-- Below ~75 both stick-slip: cogging against the speed loop, not the
-  estimate. Next: reverse, zero crossing, and whether more current
-  authority (speed-loop gain) beats the cogging.
+- Below ~75 both stick-slip: stiction against the speed loop, not the
+  estimate (period ~1 s, slip ≈ breakaway current / k_i ≈ 2000° el).
+- Reverse mirrors it (HFI to −20). Zero crossing: the observer stall-trips,
+  HFI crosses (200 and 100 clean, ±50 with stick-slip).
+- **Speed-loop gain ×4 cuts the slip 4×** (1870° → 505° el), but at −20 it
+  locked up: **q current shifts the HFI angle (cross-saturation, ≈ −25° el/A,
+  runaway past ~0.6 A)** — the estimate walked 85° off and held 1.2 A on a
+  stalled rotor. Next: cross-saturation compensation + an HFI stall trip,
+  then the ×4 gains; friction feed-forward in the sensorless speed loop.
+- 4/34 HFI starts tripped overcurrent in the polarity pulses (3 of them
+  with `hfi_bw` 300).
+- `lowspeed_sweep.sh`: negative targets need `--hz=` (clap read `-31.8` as
+  a flag).
 
 ## 2026-10-08 — session 38: F302 flash headroom, pinned toolchain, size check
 

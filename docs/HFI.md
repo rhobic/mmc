@@ -121,6 +121,48 @@ stick-slip (hall speed σ 50–95): that is the speed loop against cogging, as
 in hall FOC (session 30c), not the estimate. The shadow result (lost at
 20–100) did not repeat with HFI in control.
 
+**Reverse.** Observer: −100 holds (±20°); −75 and −50 average close to
+target but on a lost angle (±56–69°). HFI holds −200 … −20 (−20.1, ±8°);
+−10 averages −6.2.
+
+**Zero crossing** (live retarget at 60 %, `a_to_b` files). The observer
+stall-trips as the speed passes zero (350 → −100, 350 → −200). HFI
+crosses: 200 → −200 clean; 100 → −100 clean but sticks ~1 s at zero before
+breaking away; ±50 → ∓50 crosses and runs at 38–40 (stick-slip).
+
+**Stick-slip is the speed loop's stiffness against stiction.** Binned true
+speed shows the cycle: stuck while the integrator winds i_q from ~0.15 to
+~0.33 A (breakaway), lurch to ~150, stick again, period 0.75–1 s. A PI speed
+loop is a spring on position error with stiffness k_i, so the slip is about
+i_break / k_i = 0.3 / 8.1e-3 ≈ 37 rad el ≈ 2100° el — measured ~1900°
+(peak-to-peak hall position about its mean line, `pos_pp`). Scaling both
+gains at ±20 and ±50 rad/s el:
+
+| gains | +20 | +50 | −20 | −50 | mean pos_pp |
+|---|---|---|---|---|---|
+| ×1 | 17.0 / 2251° | 48.0 / 2269° | −20.1 / 1413° | −50.7 / 1543° | 1870° |
+| ×2 | 20.7 / 1167° | 49.8 / 912° | −20.1 / 721° | −50.4 / 795° | 900° |
+| ×4 | 20.5 / 652° | 49.7 / 531° | **lock-up** | −50.1 / 332° | 505° |
+| ×4, `hfi_bw` 300 | 19.7 / 582° | OC at start | OC at start | OC at start | |
+
+(true speed / pos_pp). The 1/k_i prediction holds (935°, 470°).
+
+**More current moves the HFI angle (cross-saturation).** The ×4 lock-up at
+−20: the rotor stuck, the integrator wound i_q to the 1.2 A limit, and the
+tracker angle walked from inside the hall sector to +85° off the rotor —
+no torque from q current, so more current, so more error: a self-locking
+runaway, held at full current with no stall trip. Over every stuck
+interval in these runs (rotor still, hall state unchanged > 0.15 s; 49 k
+samples), the estimate moves ≈ −25° el per A of q current at small
+currents (r = −0.88 overall) and runs away past ~0.6 A. So "more current
+beats cogging" is capped by HFI itself: q current shifts the saliency axis
+the tracker reads.
+
+**Start overcurrent.** 4 of 34 HFI starts this session tripped the 1.5 A
+limit during the polarity pulses (i_d at −0.75…−0.8 A while the rotor
+jerks): 1 of 30 at `hfi_bw` 150, 3 of 4 at 300. Session 36's 18/18 was a
+small sample; the ±0.6 A pulses have little margin.
+
 ## Is back-EMF sensing needed?
 
 The terminal voltage dividers (back-EMF sensing) are used by: sensorless
@@ -139,6 +181,15 @@ need them; it needs saliency, which motor 3 has.
   saliency term, and the pulses jerk the rotor. Options for a motor with less d-axis saturation: read the
   contrast from the first current rise rather than the averaged ripple, or a
   short q-current nudge read on the tracker.
+- **Cross-saturation compensation**: correct the tracker angle by
+  ≈ +25° el/A × i_q (fit the slope properly, it is not linear past ~0.6 A),
+  and trip on i_q at its limit with no hall/HFI motion. That unlocks the
+  stiffer speed loop (×4) at low speed, which is what beats the stiction.
+- **Friction feed-forward** (`i_fric`·sign ω_ref, as in hall position
+  mode) in the sensorless speed loop: supplies the breakaway current without
+  winding the integrator through a whole stick.
+- **Polarity pulses**: smaller or slower-edged pulses to keep the start off
+  the overcurrent limit.
 - **20–100 rad/s el** with heavy hunting (in shadow; under HFI control the
   tracker holds, see the low-speed floor above): the tracker needs the known torque
   (an acceleration feed-forward into its PLL) or the cogging feed-forward
