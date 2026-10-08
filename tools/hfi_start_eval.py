@@ -35,17 +35,20 @@ def main(a):
         on = np.flatnonzero(st != 0)
         t0 = t[on[0]]
         hall_th = np.array([cen.get(int(h), np.nan) for h in d["hall"]])
-        k = np.flatnonzero((t > t0 + a.pol_t - 0.02) & (t < t0 + a.pol_t + 0.01))
+        # At rest after the pulses, before the speed loop breaks the rotor
+        # away: at the end of the last pulse the flip has not happened yet.
+        k = np.flatnonzero((t > t0 + a.pol_t + 0.05) & (t < t0 + a.pol_t + 0.17))
         e = np.degrees(np.angle(np.exp(1j * (d["theta_est"][k] - hall_th[k]))))
         e_pol = float(np.nanmedian(e)) if len(k) else float("nan")
         w = d["omega_hall"]
-        early = (t > t0 + 0.45) & (t < t0 + 1.5)
+        # The pulses jerk the rotor across hall edges (speed spikes): skip them.
+        early = (t > t0 + a.pol_t + 0.15) & (t < t0 + 1.5)
         end = (t > t[on[-1]] - 0.6) & (t < t[on[-1]] - 0.1)
         rows.append((p, e_pol, float(w[early].min()), float(w[end].mean())))
-        print(f"{p}: estimate − hall sector after polarity {e_pol:+7.1f}°  -> polarity {'RIGHT' if abs(e_pol) < 90 else 'WRONG'};"
+        print(f"{p}: estimate − hall sector after polarity {e_pol:+7.1f}°  -> polarity {'RIGHT' if abs(e_pol) < 60 else 'WRONG'};"
               f"  slowest early {w[early].min():+6.0f}, end {w[end].mean():+6.0f} rad/s el")
-    right = sum(abs(x[1]) < 90 for x in rows)
-    reached = sum(abs(x[3]) > 0 and x[3] > 0.8 * max(abs(r[3]) for r in rows) for x in rows)
+    right = sum(abs(x[1]) < 60 for x in rows)
+    reached = sum(abs(x[3]) > 0.8 * max(abs(r[3]) for r in rows) for x in rows)
     print(f"polarity right {right}/{len(rows)}; reached speed forward {reached}/{len(rows)}")
 
 

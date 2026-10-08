@@ -15,7 +15,8 @@ what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
   (48–50), telemetry `hfi_d` (28): **F302 fw 20, G474 fw 25, nvparam v11**.
 - Sensorless start from standstill on HFI: lock, polarity pulses, run on the
   tracker, handover to the flux observer. Bench: **18/18 starts reached
-  target** (+300, +600 through handover, −300); polarity right 13/18.
+  target** (+300, +600 through handover, −300), polarity right in all 18
+  (read at rest after the pulses; an earlier 13/18 sampled mid-pulse).
 - Back-EMF sensing is not needed for low-speed FOC; HFI uses the shunts only.
 - Details and limits: [HFI.md](HFI.md).
 

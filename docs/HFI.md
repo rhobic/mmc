@@ -77,8 +77,12 @@ hunts hardest without its cogging feed-forward (speed swinging 0–250).
 **Sensorless start from standstill** (no hall input to the drive; halls as
 truth only): **18 of 18 starts reached their target** — 12 to +300 rad/s el
 from 12 rest positions, 3 to +600 (through the handover to the flux
-observer), 3 to −300. Polarity came out right in **13 of 18**; the starts
-where it did not ran briefly backwards (to −300 rad/s el) and recovered.
+observer), 3 to −300. **Polarity came out right in all 18**: read at rest
+after the pulses, the estimate sits within the hall sector of the rotor, and
+every start broke away in the commanded direction with no backwards run.
+(An earlier count of 13/18 sampled the estimate during the last pulse, before
+the flip is applied, and took the pulses' hall chatter for backwards runs;
+`tools/hfi_start_eval.py` now reads after the sequence.)
 Stronger polarity pulses (±0.75 A) trip the 1.5 A overcurrent limit.
 
 **Interrupt time** (F302, 7200 cycles per period): HFI start 6173–6265;
@@ -99,11 +103,11 @@ need them; it needs saliency, which motor 3 has.
 
 ## Limits and next steps
 
-- **Polarity** is right 72 % of the time. The contrast (2–20 %) competes with
-  the saliency term (5.5 % per cos 2Δ) whenever the rotor moves during the
-  pulses. Options: pulses timed against the carrier's own response
-  (current rise, not the averaged ripple), a short q-current nudge read on
-  the tracker, or a higher current limit.
+- **Polarity margin** is thin: the contrast is 1.5–22 %, comparable to the
+  saliency term, and the pulses jerk the rotor. 18/18 on the bench, 11/12 on
+  the twin. Options for a motor with less d-axis saturation: read the
+  contrast from the first current rise rather than the averaged ripple, or a
+  short q-current nudge read on the tracker.
 - **20–100 rad/s el** with heavy hunting: the tracker needs the known torque
   (an acceleration feed-forward into its PLL) or the cogging feed-forward
   running alongside (which the interrupt budget only allows without the
