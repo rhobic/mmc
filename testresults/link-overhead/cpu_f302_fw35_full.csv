@@ -1,0 +1,5 @@
+scenario,isr_pct,link_pct,idle_pct,other_pct,frames_per_s,states
+quiet,14.7,0.0,83.4,1.9,,
+off_d20,14.7,7.9,75.4,2.0,500,0
+off_d5,14.7,10.5,72.9,1.8,689,0
+hfi20_d20,67.3,9.4,22.4,0.8,500,0 6

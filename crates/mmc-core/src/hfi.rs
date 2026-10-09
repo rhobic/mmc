@@ -216,6 +216,16 @@ impl Tracker {
         }
     }
 
+    /// Carrier amplitude [V]. Changing it is safe if slow next to the
+    /// normaliser's ~2 ms: the error is the cross response over the d one.
+    pub fn set_amplitude(&mut self, v_h: f32) {
+        self.v_h = v_h;
+    }
+
+    pub fn amplitude(&self) -> f32 {
+        self.v_h
+    }
+
     /// Spread the carrier ([`CarrierSeq`]): 0 fixed `++−−`, 1 random frame
     /// polarity, 2 random polarity and length.
     pub fn with_spread(mut self, spread: u8) -> Self {

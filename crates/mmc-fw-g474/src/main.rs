@@ -134,45 +134,54 @@ const SPEC: BoardSpec = BoardSpec {
 /// compensation stays 0 until `profile --only vdead` has run on the rig: an
 /// over-compensated bridge is worse than an uncompensated one.
 const DEFAULTS: [f32; param::COUNT] = [
-    1.0,                        // R
-    0.1e-3,                     // L
-    0.894e-3,                   // FLUX
-    1000.0,                     // CUR_BW
-    2.0e-4,                     // SPEED_KP
-    2.0e-3,                     // SPEED_KI
-    7.0,                        // POLE_PAIRS
-    150.0,                      // SL_HANDOFF
-    500.0,                      // OMEGA_ACCEL
-    0.8,                        // IQ_LIMIT
-    ONTIME_CCR5_DEFAULT as f32, // ONTIME_CCR5
-    2.0e-4,                     // SS_KP
-    5.0e-4,                     // SS_KI
-    0.0,                        // V_DEAD
-    0.5,                        // I_THRESH (FOC ripple amplitude, 30 µH at 40 kHz)
-    0.0,                        // HALL_OFFSET (unused: no halls)
-    1.0,                        // HALL_DIR
-    0.0,                        // HALL_HYST
-    0.0,                        // POS_KP (no halls: position mode unavailable)
-    0.0,                        // POS_KI
-    0.0,                        // POS_KD
-    200.0,                      // POS_VMAX
-    1.75e-6,                    // INERTIA (motor 1 fit)
-    0.0,                        // I_FRIC
-    120.0,                      // SS_CONDUCTION [deg el]
-    0.0,                        // ID_INJECT [A]
+    1.0,                          // R
+    0.1e-3,                       // L
+    0.894e-3,                     // FLUX
+    1000.0,                       // CUR_BW
+    2.0e-4,                       // SPEED_KP
+    2.0e-3,                       // SPEED_KI
+    7.0,                          // POLE_PAIRS
+    150.0,                        // SL_HANDOFF
+    500.0,                        // OMEGA_ACCEL
+    0.8,                          // IQ_LIMIT
+    ONTIME_CCR5_DEFAULT as f32,   // ONTIME_CCR5
+    2.0e-4,                       // SS_KP
+    5.0e-4,                       // SS_KI
+    0.0,                          // V_DEAD
+    0.5,                          // I_THRESH (FOC ripple amplitude, 30 µH at 40 kHz)
+    0.0,                          // HALL_OFFSET (unused: no halls)
+    1.0,                          // HALL_DIR
+    0.0,                          // HALL_HYST
+    0.0,                          // POS_KP (no halls: position mode unavailable)
+    0.0,                          // POS_KI
+    0.0,                          // POS_KD
+    200.0,                        // POS_VMAX
+    1.75e-6,                      // INERTIA (motor 1 fit)
+    0.0,                          // I_FRIC
+    120.0,                        // SS_CONDUCTION [deg el]
+    0.0,                          // ID_INJECT [A]
     core::f32::consts::FRAC_PI_3, // HALL_W0..5 [rad el] (no halls: unused)
     core::f32::consts::FRAC_PI_3,
     core::f32::consts::FRAC_PI_3,
     core::f32::consts::FRAC_PI_3,
     core::f32::consts::FRAC_PI_3,
     core::f32::consts::FRAC_PI_3,
-    0.0,                        // ID_DITHER [A] (off)
-    0.5,                        // ID_DITHER_PERIOD [s]
-    0.0, // COG_FF (off)
+    0.0,  // ID_DITHER [A] (off)
+    0.5,  // ID_DITHER_PERIOD [s]
+    0.0,  // COG_FF (off)
     -1.0, // COG_SHIFT (identify)
-    0.0, 0.0, 0.0, 0.0, // COG_N0..3 (no series until measured)
-    0.0, 0.0, 0.0, 0.0, // COG_A0..3 [N·m]
-    0.0, 0.0, 0.0, 0.0, // COG_P0..3 [rad]
+    0.0,
+    0.0,
+    0.0,
+    0.0, // COG_N0..3 (no series until measured)
+    0.0,
+    0.0,
+    0.0,
+    0.0, // COG_A0..3 [N·m]
+    0.0,
+    0.0,
+    0.0,
+    0.0,   // COG_P0..3 [rad]
     0.0,   // HFI_V [V] (off)
     300.0, // HFI_BW [rad/s]
     0.05,  // HFI_XI
@@ -183,18 +192,24 @@ const DEFAULTS: [f32; param::COUNT] = [
     0.006, // HFI_POL_S [s]
     8.0,   // HFI_POL_N
     0.0,   // HFI_SPREAD (fixed ++--)
+    0.5,   // HFI_ID [A]
+    0.0,   // HFI_V_HI [V] (0: constant hfi_v)
 ];
 
 /// f32 capacity of the probe burst buffer: the saliency sweep's full
 /// schedule (the R/L probe uses the same buffer).
-const BURST: usize = mmc_core::probe::SAL_HDR + mmc_core::probe::SAL_TICKS * 2;
+const BURST: usize = if cfg!(feature = "burst") {
+    mmc_core::probe::SAL_HDR + mmc_core::probe::SAL_TICKS * 2
+} else {
+    0
+};
 
 static BURST_BUF: BurstBuffer<BURST> = BurstBuffer::new();
 static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardG474,
-        fw_version: 35,
+        fw_version: 40,
         name: "mmc-g474",
         defaults: DEFAULTS,
     },

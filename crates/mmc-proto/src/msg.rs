@@ -203,7 +203,16 @@ pub mod param {
     /// quarter of the control rate, 1 random frame polarity, 2 random
     /// polarity and frame length (a quarter or a sixth of the rate).
     pub const HFI_SPREAD: u8 = 57;
-    pub const COUNT: usize = 58;
+    /// d-axis bias [A] while HFI drives (lock and run): keeps the phase
+    /// currents off zero, where the dead time flips with the carrier and
+    /// swamps it. Without it the bench HFI start fails outright (session
+    /// 42). Was `id_inject`, which is also the hall FOC d reference.
+    pub const HFI_ID: u8 = 58;
+    /// Full HFI carrier amplitude [V] for the start, ramps, reversals and
+    /// load; `hfi_v` is then the quiet amplitude used only while running
+    /// steady and slow. 0 (or ≤ `hfi_v`): a constant `hfi_v`.
+    pub const HFI_V_HI: u8 = 59;
+    pub const COUNT: usize = 60;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -263,6 +272,8 @@ pub mod param {
         "hfi_pol_s",
         "hfi_pol_n",
         "hfi_spread",
+        "hfi_id",
+        "hfi_v_hi",
     ];
 }
 

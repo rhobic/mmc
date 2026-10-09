@@ -47,7 +47,13 @@ const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
 /// 53 → 57 params.
 ///
 /// v14 (2026-10-08): added `hfi_spread`, 57 → 58 params.
-const VERSION: u32 = 14;
+///
+/// v15 (2026-10-09): added `hfi_id` (HFI's own d bias, was `id_inject`),
+/// 58 → 59 params.
+///
+/// v16 (2026-10-09): added `hfi_v_hi` (scheduled carrier amplitude),
+/// 59 → 60 params.
+const VERSION: u32 = 16;
 const HDR: usize = 2; // magic + version
 const CRC_IDX: usize = HDR + param::COUNT;
 const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, round up to even

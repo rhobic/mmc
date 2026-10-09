@@ -53,7 +53,7 @@ differencing cancels.
 |---|---|
 | Standstill sweep: 24 test angles, response demodulated and accumulated on the device | `RunTest HFI_SWEEP` (`mmc_core::hfi`), `mmc-host hfi`, `tools/hfi_fit.py` |
 | Real-time tracker | `mmc_core::hfi::Tracker`; params `hfi_v` (carrier [V], 0 = off), `hfi_bw` [rad/s], `hfi_xi` |
-| Shadow under hall FOC, scored at hall edges | `hfi_v` > 0 in hall FOC: tracker angle on `theta_est`, its error at the last hall edge on `theta_err`, d response on `hfi_d` (channel 28) |
+| Shadow under hall FOC, scored at hall edges | cargo feature `hfi-shadow` (off by default since session 43; ~1 160 cycles a tick on the F302) and `hfi_v` > 0 in hall FOC: tracker angle on `theta_est`, its error at the last hall edge on `theta_err`, d response on `hfi_d` (channel 28) |
 | Sensorless start from standstill | `hfi_v` > 0 in sensorless mode: lock (0.3 s), polarity (`hfi_pol_n` × ±0.6 A pulse pairs of `hfi_pol_s` each, default 8 × 6 ms), run on the tracker, hand over to the flux observer at `sl_handoff` |
 | HFI speed gains | `hfi_kp`/`hfi_ki` while on the tracker (0 = `speed_kp`/`speed_ki`), back to the shared gains at the handover (motor 3: 8× the shared, persisted on bench 2) |
 | Cross-saturation correction | `hfi_xsat` [rad el/A]: the drive's angle is the tracker's + `hfi_xsat`·i_q (motor 3: 0.44, persisted on bench 2) |
@@ -61,6 +61,8 @@ differencing cancels.
 | Friction feed-forward | `sl_fric` [A], HFI speed loop only, faded in over ±5 rad/s el (measured no benefit on motor 3; off) |
 | Hand-back | on the observer below 0.6 × `sl_handoff` → HFI run, from the observer's angle and speed |
 | Carrier spreading | `hfi_spread` 0 fixed `++−−` / 1 random frame polarity / 2 random polarity and length |
+| HFI d bias | `hfi_id` [A] (lock and run); was `id_inject`, which stays the hall FOC d reference |
+| Scheduled amplitude | `hfi_v_hi` [V] through the start, ramps, reversals and load; `hfi_v` only while steady, slow and lightly loaded (0 = constant `hfi_v`) |
 
 Firmware: F302 fw 20, G474 fw 25, **nvparam v11** (`hfi_v`, `hfi_bw`,
 `hfi_xi`, ids 48–50). Correction, trip and `sl_fric` (ids 51–52): F302
@@ -319,6 +321,35 @@ something to read in the sim; the test config now carries the firmware's
 luck with the fixed carrier, and failed when the spread carrier re-rolled
 it). `hfi_polarity_reads_saturation_from_any_angle`: 16 starts from 8
 angles, both ways — all right with saturation, 2 wrong without.
+
+## The quiet carrier (session 42)
+
+*F302 fw 30–32, `testresults/motor3-hfi-v03/`, `motor3-hfi-sched/`.*
+
+By ear, the 0.3 V fixed carrier was the best of 1 V / 0.5 V / 0.3 V fixed and
+1 V spread. What it took to make it the default:
+
+- **A bias of its own.** HFI needs its d bias even with dead-time
+  compensation on (0.3 V with no bias: 10/10 starts tripped), but
+  `id_inject` is also hall FOC's d reference. `hfi_id` (58) now carries the
+  HFI bias; hall FOC runs at i_d ≈ 0 again.
+- **Scheduled amplitude.** A constant 0.3 V failed 2 of 8 retargets on the
+  hand-back (−300 → +300 tripped, 600 → 100 locked up) and, at 1000 rad/s²,
+  starts to +600 locked up at the current limit. `hfi_v_hi` (59) gives the
+  full 1 V through the start, ramps, reversals and load, and the quiet
+  `hfi_v` only while the reference has settled below half `sl_handoff` with
+  i_q under half its limit, slewed 2 V/s. Steady-state d response measured
+  0.30 of the lock's: the quiet carrier is what runs when you hear it.
+  Result: 8/8 retargets (±1200, ±600, ±300, 100 ↔ 600), ±600 from rest,
+  10/10 starts.
+- **Handover gated on the reference too.** At 0.3 V a spike in the
+  tracker's speed handed over at a true 250 rad/s el, and the observer
+  handed straight back. Handover now needs estimate and reference ≥
+  `sl_handoff`, hand-back both < 0.45 × it (was 0.6), and a handed-back
+  tracker starts with the last tracker's d response instead of zero.
+
+Bench 2 defaults (persisted): `hfi_v` 0.3, `hfi_v_hi` 1.0, `hfi_id` 0.5,
+`id_inject` 0, `hfi_spread` 0, `sl_handoff` 350, `omega_accel` 300.
 
 ## Is back-EMF sensing needed?
 

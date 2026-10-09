@@ -522,6 +522,7 @@ fn hall_foc_closes_the_speed_loop_from_rest_both_ways() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "sixstep"), ignore = "needs feature sixstep")]
 fn hall_six_step_spins_both_ways() {
     for hz in RATES {
         for target in [250.0f32, -250.0] {
@@ -543,6 +544,7 @@ fn hall_six_step_spins_both_ways() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "sixstep"), ignore = "needs feature sixstep")]
 fn hall_six_step_at_180_degrees_spins_both_ways() {
     for hz in RATES {
         for target in [250.0f32, -250.0] {
@@ -646,6 +648,7 @@ fn a_board_without_halls_refuses_the_hall_modes() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "sixstep"), ignore = "needs feature sixstep")]
 fn switching_modes_while_running_rebuilds_the_drive() {
     // Straight from one running mode to another, no Off in between: each
     // mode's control blocks must be built for it (a stale set panicked the
@@ -684,6 +687,7 @@ fn switching_modes_while_running_rebuilds_the_drive() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "hall-pos"), ignore = "needs feature hall-pos")]
 fn hall_position_moves_and_holds_both_ways() {
     for hz in RATES {
         for target_deg in [90.0f32, -360.0] {
@@ -727,6 +731,7 @@ fn hall_position_moves_and_holds_both_ways() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "hall-pos"), ignore = "needs feature hall-pos")]
 fn hall_position_tracks_a_slow_move() {
     // A far target at a slow cruise speed is the low-speed mode: here 5 rad/s
     // el, which the hall speed loop cannot hold.
@@ -958,7 +963,7 @@ fn hfi_starts_a_salient_motor_from_standstill() {
         (param::HFI_V, 1.0),
         (param::HFI_XI, 0.11),
         (param::HFI_BW, 150.0),
-        (param::ID_INJECT, 0.3),
+        (param::HFI_ID, 0.3),
         (param::SL_HANDOFF, 1000.0), // stay on HFI throughout
     ] {
         assert!(matches!(
@@ -996,7 +1001,7 @@ fn hfi_hands_back_and_reverses_through_zero() {
         (param::HFI_V, 1.0),
         (param::HFI_XI, 0.11),
         (param::HFI_BW, 150.0),
-        (param::ID_INJECT, 0.3),
+        (param::HFI_ID, 0.3),
         (param::SL_HANDOFF, 350.0),
         (param::OMEGA_ACCEL, 600.0),
     ] {
@@ -1055,7 +1060,7 @@ fn hfi_starts_with_a_spread_carrier() {
         (param::HFI_V, 1.0),
         (param::HFI_XI, 0.11),
         (param::HFI_BW, 150.0),
-        (param::ID_INJECT, 0.3),
+        (param::HFI_ID, 0.3),
         (param::HFI_SPREAD, 2.0),
         (param::SL_HANDOFF, 1000.0),
     ] {
@@ -1095,7 +1100,7 @@ fn hfi_polarity_reads_saturation_from_any_angle() {
                 (param::HFI_V, 1.0),
                 (param::HFI_XI, 0.11),
                 (param::HFI_BW, 150.0),
-                (param::ID_INJECT, 0.3),
+                (param::HFI_ID, 0.3),
                 (param::HFI_SPREAD, 2.0),
                 (param::SL_HANDOFF, 1000.0),
             ] {
@@ -1129,4 +1134,57 @@ fn hfi_polarity_reads_saturation_from_any_angle() {
         wrong.is_empty(),
         "wrong-way or failed starts (angle, dir, backwards, end): {wrong:?}"
     );
+}
+
+/// A drive mode left out of the build is refused, not run half-built.
+#[test]
+#[cfg(not(feature = "sixstep"))]
+fn a_mode_not_built_in_is_refused() {
+    let mut rig = Rig::build(10_000, PmsmParams::small_bldc(), true);
+    for drive in [
+        DriveMode::SixStepForced {
+            duty: 0.2,
+            omega_e: 100.0,
+        },
+        DriveMode::SixStepHall {
+            duty: 0.2,
+            omega_e: 100.0,
+        },
+        DriveMode::SixStepSensorless {
+            duty: 0.2,
+            omega_handoff: 300.0,
+        },
+    ] {
+        assert!(
+            matches!(rig.send(&Message::SetDrive(drive)), Message::Nak { .. }),
+            "{drive:?} accepted"
+        );
+    }
+    assert_eq!(rig.sh.state(), ST_OFF);
+}
+
+/// Without the `telemetry` and `burst` build options the link refuses their
+/// messages instead of half-running them.
+#[test]
+#[cfg(not(any(feature = "telemetry", feature = "burst")))]
+fn link_options_not_built_in_are_refused() {
+    let mut rig = Rig::build(10_000, PmsmParams::small_bldc(), false);
+    for msg in [
+        Message::Stream { enable: true },
+        Message::SetTelemetry {
+            divider: 10,
+            mask: 0xF,
+        },
+        Message::RunTest {
+            kind: mmc_proto::test::RL_STEP,
+            a: 0.5,
+            b: 1.0,
+        },
+        Message::ReadBurst { offset: 0 },
+    ] {
+        assert!(
+            matches!(rig.send(&msg), Message::Nak { .. }),
+            "{msg:?} accepted"
+        );
+    }
 }

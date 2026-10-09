@@ -3,7 +3,7 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
-## 2026-10-09 — session 42: driver faults through the timer's break input
+## 2026-10-09 — session 46: driver faults through the timer's break input
 
 - **The gap:** the boards read the driver's fault line once per control
   tick. The L6230 (IHM07M1) recovers from an overcurrent by itself: the
@@ -18,7 +18,7 @@ what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
   already follows), so a fault is never cleared under a live stage. If the
   line is still low the latch sets again and the drive trips on the same
   tick. Test `a_latched_driver_fault_trips_and_rearms_only_from_off`.
-- **F302 fw 30:** PA6 (DIAG/EN) is TIM1_BKIN (AF6). **G474 fw 35:** PB12 is
+- **F302 fw 36:** PA6 (DIAG/EN) is TIM1_BKIN (AF6). **G474 fw 40:** PB12 is
   TIM1_BKIN (AF6) and PA11 is TIM1_BKIN2 (AF12), the shield's two EN_FAULT
   routes, both armed (the unfitted one sits high on its pull-up). Both
   boards: active low, 8-sample filter at the timer clock (111 / 47 ns),
@@ -26,9 +26,88 @@ what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
   and the channels drive low, never float (a floating IN with EN high drove
   the bridge into overcurrent at bring-up); BIF / B2IF latch it; re-arming
   clears the flags and sets MOE again.
-- Cost: F302 +40 bytes (61 216 of 63 488, 2 272 free, above CI's 2 KB
-  margin). **Not yet run on hardware:** confirm on the bench that a stall
-  trips `ST_FAULT_DRV` and that a normal start re-arms.
+- Cost: F302 +72 bytes (49 776 of 63 488). **Not yet run on hardware:**
+  confirm on the bench that a stall trips `ST_FAULT_DRV` and that a normal
+  start re-arms. (The H743 build-test board has no power stage; its
+  `driver_fault` stays a constant.)
+## 2026-10-09 — session 44: what the host link costs; link as build options
+
+Report section: [mmc Footprint Report](https://claude.ai/artifact/HZRe2D5rGvoNbRqypkjjgJ)
+("The host link"); data in `testresults/link-overhead/`. **F302 fw 35, G474
+fw 39** (nvparam v16).
+
+- **CPU accounting in the firmware**: `Shared::isr_sum_cycles`,
+  `link_cycles` (`link::Metered` around the link loops), `idle_cycles`
+  (`Shared::meter_idle` in the boards' own executor loop), `encode_cycles`;
+  `tools/cpu_profile.sh` / `tools/link_cost.sh` read them twice over OpenOCD
+  without halting.
+- **F302 results**: commands and parameters ~0 %; telemetry ~0.017 % of the
+  CPU per frame/s (500 frames/s ≈ 8 %, the 1 Mbaud link saturates near 680
+  frames/s ≈ 10.5–11.6 %). A 29-channel frame costs 10.2–12.2 k cycles to
+  snapshot and encode (CRC ~2.95 k of it), DMA write ~1.2 k. The per-tick
+  snapshot inside the control interrupt costs 245–580 cycles (3–8 %), whether
+  or not anyone listens. HFI 20 with full telemetry: 22 % idle; lean: 40 %.
+- **Build options** `telemetry` and `burst` (mmc-drive, default on; boards
+  pass them through and size their burst buffer from `burst`). F302 lean
+  (link + hall-pos): −5.3 KB flash, −8.2 KB RAM; H743 lean RAM 38.4 → 5.6 KB.
+  Their messages are NAKed when not built (test
+  `link_options_not_built_in_are_refused`); `mmc-host capture` drives a
+  telemetry-less device without recording.
+- **Idle wake-ups fixed**: not streaming, the send loop checks the stream
+  switch every 100 ms instead of waking each telemetry period (0.8 % → 0 %).
+- F302 builds the codec (`mmc-proto`) at opt-level 2 (+0.6 KB). Next if
+  telemetry must get cheaper: a single-pass encoder, a byte-table or
+  hardware CRC, or 16-bit channel encoding.
+
+## 2026-10-09 — session 43: footprint report; H743 build test; HFI shadow opt-in
+
+Report: [mmc Footprint Report](https://claude.ai/artifact/HZRe2D5rGvoNbRqypkjjgJ)
+(source `testresults/feature-report/report.html`, data beside it).
+**F302 fw 33, G474 fw 38** (nvparam v16 unchanged).
+
+- **Memory per feature** (`tools/feature_sizes.sh`; firmware crates now pass
+  every mmc-drive feature through): sixstep +3.8–5.2 KB, cogging +4.2–5.7,
+  estim +1.4–1.6, hall-pos ≈ 0–1, fixq +6.8–7.9. F302 shipped set 49.5 KB
+  (14.0 KB free); all features 61.9 KB (under the 2 KB floor); all + fixq
+  does not fit.
+- **ISR per mode on the F302** (`tools/isr_profile.sh`, 7 200-cycle budget):
+  idle 1 106, I-f 3 734, hall FOC 3 861, hall position 3 953, observer
+  4 081–4 085, HFI hold 4 685, HFI 20 rad/s el 5 230; all-features build:
+  six-step 2 682–3 098, observer 5 112, HFI 5 758, hall FOC 6 012, + cogging
+  FF 6 298.
+- **HFI shadow is now the opt-in feature `hfi-shadow`**: with session 42's
+  quiet-HFI default it ran in every hall FOC drive (+1 160 cycles), and in
+  an all-features build it overran the interrupt (serial starved, the 2 s
+  deadman turned the drive off). Hall FOC 5 016 → 3 861 cycles.
+- **probe-rs memory access halts the core**: at 600 rad/s el the frozen PWM
+  tripped overcurrent. `isr_profile.sh` reads/clears through OpenOCD, which
+  does not halt.
+- **`crates/mmc-fw-h743`**: Nucleo-H743ZI skeleton (480 MHz, all features,
+  USART3 link, stub power stage): 63.9 KB of 2 MB flash, 38.4 KB of 512 KB
+  RAM; tick estimated 3.5–5.0 k of 24 000 cycles at 20 kHz. CI builds it.
+
+## 2026-10-09 — session 42: the quiet carrier; subsystems as build options
+
+**F302 fw 32, G474 fw 37, nvparam v16** (re-applied and persisted on bench 2).
+
+- **Quiet HFI by default on bench 2**: 0.3 V carrier (chosen by ear) with
+  `hfi_v_hi` 1 V through starts, ramps, reversals and load; `hfi_id` (HFI's
+  own d bias, split from hall FOC's `id_inject`). Handover/hand-back gated
+  on the reference as well as the estimate; hand-back 0.45 × `sl_handoff`.
+  8/8 retargets, 10/10 starts. [HFI.md](HFI.md#the-quiet-carrier-session-42).
+- **mmc-drive subsystems are cargo features** — `sixstep`, `estim` (online
+  R/ψ + i_d dither), `cogging` (position-torque FF + identification),
+  `hall-pos` — default on; boards and applications pick their set. A mode
+  not built in is NAKed at SetDrive (test `a_mode_not_built_in_is_refused`);
+  the parameter table is the same in every build. Sim tests needing a
+  feature skip without it; CI tests the minimal and the F302 sets.
+- **F302 builds `link` + `hall-pos` only**: 49.7 KB, **13.8 KB free** (was
+  1.8 KB, under the 2 KB floor). The `fixq` variant now fits at opt-level 2
+  (7 KB free). Whole-image opt-level "s" was measured and rejected: HFI ISR
+  7 231 of 7 200 cycles.
+- Cogging FF is out of the F302 build: it worked in hall FOC (session 34)
+  but runs only there, was off (`cog_ff` 0), and cannot share the ISR with
+  HFI's shadow. One feature flag brings it back.
 
 ## 2026-10-08 — session 41: HFI full speed both ways, dead time, the whine
 

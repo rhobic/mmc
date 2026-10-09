@@ -9,9 +9,22 @@ description = "STM32G474RE + STSPIN830 shield: the MotorBoard under the mmc-driv
 # (see .cargo/config.toml).
 [workspace]
 
+[features]
+# Every subsystem (512 KB of flash). Each passes through to mmc-drive, so
+# `--no-default-features --features …` builds any set (tools/feature_sizes.sh).
+default = ["sixstep", "estim", "cogging", "hall-pos", "telemetry", "burst"]
+sixstep = ["mmc-drive/sixstep"]
+estim = ["mmc-drive/estim"]
+cogging = ["mmc-drive/cogging"]
+hall-pos = ["mmc-drive/hall-pos"]
+hfi-shadow = ["mmc-drive/hfi-shadow"]
+telemetry = ["mmc-drive/telemetry"]
+burst = ["mmc-drive/burst"]
+fixq = ["mmc-drive/fixq"]
+
 [dependencies]
 mmc-core = { path = "../mmc-core" }
-mmc-drive = { path = "../mmc-drive" }
+mmc-drive = { path = "../mmc-drive", default-features = false }
 mmc-hal = { path = "../mmc-hal" }
 mmc-proto = { path = "../mmc-proto" }
 

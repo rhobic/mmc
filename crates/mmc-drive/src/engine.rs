@@ -80,10 +80,14 @@ const HFI_POL_A: f32 = 0.6;
 /// away past ~0.6 A); far enough off, q current makes no torque and the speed
 /// loop winds to its limit holding a stopped rotor (session 39).
 const HFI_STUCK_S: f32 = 0.5;
-/// Below this fraction of `sl_handoff` a sensorless drive running on the
-/// flux observer hands back to HFI (`hfi_v` > 0); hysteresis against the
-/// handover at `sl_handoff`.
-const HFI_HANDBACK: f32 = 0.6;
+/// Below this fraction of `sl_handoff` (estimate and reference both) a
+/// sensorless drive running on the flux observer hands back to HFI
+/// (`hfi_v` > 0); hysteresis against the handover at `sl_handoff`. Low:
+/// HFI's angle degrades with speed, and at 0.3 V a hand-back at 0.6 (210
+/// rad/s el on motor 3) tripped; the observer holds well to ~150 there.
+const HFI_HANDBACK: f32 = 0.45;
+/// Slew of the scheduled carrier amplitude [V/s] (`hfi_v` ↔ `hfi_v_hi`).
+const HFI_V_SLEW: f32 = 2.0;
 /// Speed [rad/s el] over which the friction feed-forward (`sl_fric`) fades
 /// in from zero, so it changes sign smoothly through a zero crossing.
 const FRIC_OMEGA: f32 = 5.0;
@@ -196,6 +200,9 @@ pub struct Engine {
     hfi_start: Option<HfiStart>,
     hfi_edge_err: f32,
     hfi_stuck: u32,
+    /// The last tracker's d response, to start a handed-back one calibrated
+    /// (a fresh one starts at 0 and its first errors are noise over nothing).
+    hfi_d_amp: f32,
     /// The integer HFI drive (feature `fixq`), replacing the float HFI path.
     #[cfg(feature = "fixq")]
     fixq: Option<(FixHfi, FixParams)>,
@@ -280,6 +287,7 @@ impl Engine {
             hfi_start: None,
             hfi_edge_err: 0.0,
             hfi_stuck: 0,
+            hfi_d_amp: 0.0,
             #[cfg(feature = "fixq")]
             fixq: None,
             hall_state_prev: None,
@@ -392,19 +400,18 @@ impl Engine {
         self.hall_last = hall_ref;
         let cog_terms = cog_terms(&p);
         let kt = 1.5 * p(param::POLE_PAIRS) * p(param::FLUX);
-        if spec.has_halls {
+        if spec.has_halls && self.hall_angle.is_none() {
+            // First tick after calibration. The hall angle is tracked from
+            // here on, not from the first drive build: a first start on a
+            // rotor that is already turning (a reset while it coasts) needs
+            // it to catch the rotor.
+            self.hall_angle = Some(HallAngle::new(hall_map(&p)));
+        }
+        if cfg!(feature = "cogging") && spec.has_halls {
             let pp = p(param::POLE_PAIRS).max(1.0) as u8;
             let cog = match self.cog {
                 Some(ref mut cog) => cog,
-                None => {
-                    // First tick after calibration. The hall angle is tracked
-                    // from here on, not from the first drive build: a first
-                    // start on a rotor that is already turning (a reset while
-                    // it coasts) needs it to catch the rotor.
-                    let map = hall_map(&p);
-                    self.hall_angle = Some(HallAngle::new(map));
-                    self.cog.insert(CogComp::new(&map, pp))
-                }
+                None => self.cog.insert(CogComp::new(&hall_map(&p), pp)),
             };
             // Collect torque samples only in steady hall FOC: the energy
             // balance needs a speed loop holding the rotor near a setpoint.
@@ -453,7 +460,11 @@ impl Engine {
             self.epoch_seen = epoch;
             self.command(sh, b);
         }
-        let (cog_now, cog_unit) = self.cog_unit(&p, &cog_terms, kt, dt);
+        let (cog_now, cog_unit) = if cfg!(feature = "cogging") {
+            self.cog_unit(&p, &cog_terms, kt, dt)
+        } else {
+            (0.0, 0.0)
+        };
 
         // --- protection trips (only meaningful once running).
         if self.mode != mode::OFF {
@@ -505,9 +516,8 @@ impl Engine {
             let i_ab = clarke(i_abc);
             let vbus = self.vbus_filt.max(1.0);
 
-            let mut v_ab = if self.mode == mode::PROBE
-                && sh.probe_kind.load(Ordering::Relaxed) == test::HFI_SWEEP
-            {
+            let probe = cfg!(feature = "burst") && self.mode == mode::PROBE;
+            let mut v_ab = if probe && sh.probe_kind.load(Ordering::Relaxed) == test::HFI_SWEEP {
                 // HFI sweep (`mmc_core::hfi`): optional align, a short
                 // release, then a ±V_h carrier along each test angle, the
                 // response demodulated and accumulated into the burst.
@@ -588,9 +598,7 @@ impl Engine {
                         v_ab
                     }
                 }
-            } else if self.mode == mode::PROBE
-                && sh.probe_kind.load(Ordering::Relaxed) == test::L_THETA
-            {
+            } else if probe && sh.probe_kind.load(Ordering::Relaxed) == test::L_THETA {
                 // Saliency sweep: align at v_low on θ = 0 (parks a free
                 // rotor; a clamped one just stays put and the fit recovers its
                 // angle), then run the shared `mmc_core::probe` schedule —
@@ -643,7 +651,7 @@ impl Engine {
                     duties = svpwm(v_ab, vbus);
                     v_ab
                 }
-            } else if self.mode == mode::PROBE {
+            } else if probe {
                 // Locked-rotor R/L probe: θ held at 0 (rotor aligned during
                 // the first phase), then unslewed square-wave v_d between the
                 // two levels, recording (i_d, v_d) per tick into the burst
@@ -701,7 +709,7 @@ impl Engine {
                 }
                 if self.mode == mode::OFF {
                     AlphaBeta::default()
-                } else if self.mode == mode::HALL_POS {
+                } else if cfg!(feature = "hall-pos") && self.mode == mode::HALL_POS {
                     // Position loop on the hall tracker: every hall edge is
                     // an exact position update, and between edges the
                     // rotor is predicted from the commanded torque and the
@@ -799,7 +807,10 @@ impl Engine {
                     let lim = p(param::IQ_LIMIT);
                     let mut id_ref = p(param::ID_INJECT);
                     let dither = p(param::ID_DITHER);
-                    if dither != 0.0 && self.omega.abs() >= ESTIM_OMEGA_MIN {
+                    if cfg!(feature = "estim")
+                        && dither != 0.0
+                        && self.omega.abs() >= ESTIM_OMEGA_MIN
+                    {
                         let half = 0.5 * p(param::ID_DITHER_PERIOD);
                         self.dither_t += dt;
                         if self.dither_t >= half {
@@ -829,9 +840,12 @@ impl Engine {
                     v_dq = out.v_dq;
                     i_dq = out.i_dq;
                     out.v_ab
-                } else {
+                } else if cfg!(feature = "sixstep") {
                     duties = self.sixstep_hall(sh, b, omega_target, amp_target);
                     i_dq = park(i_ab, sin_cos(self.theta));
+                    AlphaBeta::default()
+                } else {
+                    // A mode this build refuses at SetDrive.
                     AlphaBeta::default()
                 }
             } else if self.mode == mode::SENSORLESS && self.fixq_active() {
@@ -859,13 +873,13 @@ impl Engine {
                             st.phase = HfiPhase::PolPos;
                             st.ticks = 0;
                         }
-                        // The d bias (`id_inject`) keeps the phase currents
+                        // The d bias (`hfi_id`) keeps the phase currents
                         // off zero, where the dead time would flip with the
                         // carrier and swamp it. Off the axis it is torque,
                         // so the rotor turns a little toward the estimate as
                         // the estimate turns onto the rotor; ramped, so it
                         // settles rather than runs away (HFI_LOCK_RAMP_S).
-                        p(param::ID_INJECT)
+                        p(param::HFI_ID)
                             * (st.ticks as f32 / cfg.ticks(HFI_LOCK_RAMP_S).max(1) as f32).min(1.0)
                     }
                     HfiPhase::PolPos | HfiPhase::PolNeg => {
@@ -920,10 +934,19 @@ impl Engine {
                         };
                         // Fast enough for the flux observer, which has been
                         // integrating all along: hand over, stop injecting.
-                        if w.abs() >= p(param::SL_HANDOFF) && w * omega_target > 0.0 {
+                        // Both the estimate and the reference: at a low
+                        // carrier the tracker's speed is noisy enough to
+                        // cross the line on a spike (session 42: handed over
+                        // at a true 250 rad/s el, then straight back).
+                        let handoff = p(param::SL_HANDOFF);
+                        if w.abs() >= handoff
+                            && self.omega_ref_cur.abs() >= handoff
+                            && w * omega_target > 0.0
+                        {
                             if let Some(q) = self.seq.as_mut() {
                                 q.start_closed();
                             }
+                            self.hfi_d_amp = tr.d_amp;
                             self.speed.as_mut().unwrap().set_gains(PiGains {
                                 kp: p(param::SPEED_KP),
                                 ki: p(param::SPEED_KI),
@@ -931,10 +954,11 @@ impl Engine {
                             self.hfi_start = None;
                             self.hfi = None;
                         }
-                        p(param::ID_INJECT)
+                        p(param::HFI_ID)
                     }
                 };
                 iq_ref = iq_cmd;
+                self.hfi_schedule(&p, omega_target, iq_cmd, dt);
                 // Cross-saturation: q current turns the saliency axis the
                 // tracker locks onto; the rotor's d axis is that plus
                 // `hfi_xsat`·i_q. The carrier stays on the tracker's own axis.
@@ -1026,6 +1050,7 @@ impl Engine {
                     && p(param::HFI_V) > 0.0
                     && !self.fixq_active()
                     && seq_out.omega.abs() < HFI_HANDBACK * p(param::SL_HANDOFF)
+                    && self.omega_ref_cur.abs() < HFI_HANDBACK * p(param::SL_HANDOFF)
                 {
                     self.hfi_handback(&p, self.theta, self.omega, iq_ref);
                 }
@@ -1056,10 +1081,10 @@ impl Engine {
                     let v_ab = inverse_park(v_dq, sc);
                     duties = svpwm(v_ab, vbus);
                     v_ab
-                } else if self.mode == mode::SS_SENSORLESS {
+                } else if cfg!(feature = "sixstep") && self.mode == mode::SS_SENSORLESS {
                     duties = self.sixstep_sensorless(sh, b, vt);
                     AlphaBeta::default()
-                } else if self.mode == mode::SS_FORCED {
+                } else if cfg!(feature = "sixstep") && self.mode == mode::SS_FORCED {
                     // Forced six-step commutation: two phases conduct, the
                     // third is Hi-Z. `amp` is the high-side duty (0..1), not
                     // volts. Sector advances with the forced angle, so the
@@ -1099,7 +1124,8 @@ impl Engine {
             // High-frequency injection: track the rotor's axis from its
             // saliency, the carrier riding on whatever the mode applied. In
             // the hall modes this is a shadow, scored at hall edges.
-            let hfi_mode = matches!(self.mode, mode::HALL_FOC | mode::HALL_POS)
+            let hfi_mode = (cfg!(feature = "hfi-shadow")
+                && matches!(self.mode, mode::HALL_FOC | mode::HALL_POS))
                 || (self.mode == mode::SENSORLESS && self.hfi_start.is_some());
             if let Some(tr) = self.hfi.as_mut().filter(|_| hfi_mode) {
                 let (th, w) = tr.update(i_ab, dt);
@@ -1210,15 +1236,23 @@ impl Engine {
             }
         }
 
-        // --- telemetry snapshot (seqlock).
+        // --- telemetry snapshot (seqlock). Without `telemetry` the stores
+        // compile away, and with them whatever only fed them; the state
+        // updated along the way (estimator, last currents) stays.
         let seq = sh.telem_seq.load(Ordering::Relaxed);
-        sh.telem_seq.store(seq.wrapping_add(1), Ordering::Release);
-        let put = |id: u8, v: f32| sh.telem[id as usize].store(v.to_bits(), Ordering::Relaxed);
+        if cfg!(feature = "telemetry") {
+            sh.telem_seq.store(seq.wrapping_add(1), Ordering::Release);
+        }
+        let put = |id: u8, v: f32| {
+            if cfg!(feature = "telemetry") {
+                sh.telem[id as usize].store(v.to_bits(), Ordering::Relaxed)
+            }
+        };
         put(channel::IQ_REF, iq_ref);
         put(channel::I_D, i_dq.d);
         put(channel::I_Q, i_dq.q);
         put(channel::V_D, v_dq.d);
-        if let Some(e) = self.rpsi.as_mut() {
+        if let Some(e) = self.rpsi.as_mut().filter(|_| cfg!(feature = "estim")) {
             let running = sh.state.load(Ordering::Relaxed) == ST_RUN
                 && matches!(self.mode, mode::HALL_FOC | mode::SENSORLESS);
             e.push(v_dq, i_dq, self.omega, cfg.dt(), running);
@@ -1311,10 +1345,13 @@ impl Engine {
         );
         put(channel::HALL, hall_state.unwrap_or(0) as f32);
         put(channel::OMEGA_HALL, self.hall.omega());
-        sh.telem_seq.store(seq.wrapping_add(2), Ordering::Release);
+        if cfg!(feature = "telemetry") {
+            sh.telem_seq.store(seq.wrapping_add(2), Ordering::Release);
+        }
 
         let dur = b.cycles().wrapping_sub(t0);
         sh.isr_max_cycles.fetch_max(dur, Ordering::Relaxed);
+        sh.isr_sum_cycles.fetch_add(dur, Ordering::Relaxed);
     }
 
     /// The i_q [A] that cancels the position torque at the tracker's angle,
@@ -1496,7 +1533,8 @@ impl Engine {
             sh.state.store(ST_FAULT_VBUS, Ordering::Relaxed);
             return;
         }
-        if self.mode == mode::SENSORLESS
+        if cfg!(feature = "sixstep")
+            && self.mode == mode::SENSORLESS
             && mode == mode::SS_SENSORLESS
             && matches!(self.seq.as_ref().map(|q| q.phase()), Some(Phase::Closed))
             && self.omega > 40.0
@@ -1605,7 +1643,7 @@ impl Engine {
         self.ss_ramp = None;
         self.ss_speed = None;
         self.ss_target = 0.0;
-        if mode == mode::SS_SENSORLESS {
+        if cfg!(feature = "sixstep") && mode == mode::SS_SENSORLESS {
             // Blanking has to clear the freewheel of the phase that just
             // opened. Handoff speed comes from the command.
             self.ss_zc = Some(ZeroCross::new(ZcCfg {
@@ -1738,7 +1776,7 @@ impl Engine {
             h.retune(map);
         }
         self.hall.widths = map.widths;
-        if let Some(c) = self.cog.as_mut() {
+        if let Some(c) = self.cog.as_mut().filter(|_| cfg!(feature = "cogging")) {
             c.retune(&map, p(param::POLE_PAIRS).max(1.0) as u8);
         }
         self.ff_theta = None;
@@ -1749,11 +1787,17 @@ impl Engine {
                 .seq
                 .as_ref()
                 .is_some_and(|q| q.phase() != Phase::Closed);
-        let hfi_on =
-            p(param::HFI_V) > 0.0 && (matches!(mode, mode::HALL_FOC | mode::HALL_POS) || sl_hfi);
+        // The hall-mode shadow (HFI scored against the halls) is a
+        // diagnostic, built only with `hfi-shadow`: with HFI the sensorless
+        // default it otherwise ran in every hall FOC drive, ~1 160 cycles a
+        // tick on the F302, and with the estimator and cogging built in it
+        // overran the interrupt (session 43).
+        let shadow =
+            cfg!(feature = "hfi-shadow") && matches!(mode, mode::HALL_FOC | mode::HALL_POS);
+        let hfi_on = p(param::HFI_V) > 0.0 && (shadow || sl_hfi);
         self.hfi = hfi_on.then(|| {
             HfiTracker::new(
-                p(param::HFI_V),
+                p(param::HFI_V_HI).max(p(param::HFI_V)),
                 p(param::HFI_XI),
                 p(param::HFI_BW),
                 self.hall_last.filter(|_| !sl_hfi).unwrap_or(0.0),
@@ -1812,7 +1856,7 @@ impl Engine {
                     hfi_bw: p(param::HFI_BW),
                     hfi_xsat: p(param::HFI_XSAT),
                     hfi_spread: p(param::HFI_SPREAD) as u8,
-                    id_inject: p(param::ID_INJECT),
+                    id_inject: p(param::HFI_ID),
                     pol_a: HFI_POL_A.min(0.5 * spec.i_trip),
                     pol_s: p(param::HFI_POL_S),
                     pol_n: p(param::HFI_POL_N) as u32,
@@ -1829,7 +1873,7 @@ impl Engine {
                 self.hfi = None;
             }
         }
-        if mode == mode::HALL_FOC && spec.has_halls {
+        if cfg!(feature = "cogging") && mode == mode::HALL_FOC && spec.has_halls {
             // Hall FOC keeps the hall angle for its FOC; the tracker only
             // places the position-torque feed-forward.
             let pp = p(param::POLE_PAIRS).max(1.0);
@@ -1840,25 +1884,26 @@ impl Engine {
         // Online R/ψ in the closed-loop FOC modes, starting from the
         // profile. Tuned per 50 ms block, as the host estimator is
         // (docs/CALIBRATION.md): R may drift ~1 %/s, ψ ~0.1 %/s.
-        self.rpsi = matches!(mode, mode::HALL_FOC | mode::SENSORLESS).then(|| {
-            let l = p(param::L);
-            let cfg = RpsiCfg {
-                ld: l,
-                lq: l,
-                q_r: 1e-5,
-                q_psi: 2e-12,
-                q_bias: 1e-6,
-                noise: 1e-4,
-                omega_min: ESTIM_OMEGA_MIN,
-                i_min: 0.1,
-                use_derivative: false,
-                p0: 1.0,
-            };
-            RpsiAverager::new(RpsiEstimator::new(cfg, p(param::R), p(param::FLUX)), 0.05)
-        });
+        self.rpsi = (cfg!(feature = "estim") && matches!(mode, mode::HALL_FOC | mode::SENSORLESS))
+            .then(|| {
+                let l = p(param::L);
+                let cfg = RpsiCfg {
+                    ld: l,
+                    lq: l,
+                    q_r: 1e-5,
+                    q_psi: 2e-12,
+                    q_bias: 1e-6,
+                    noise: 1e-4,
+                    omega_min: ESTIM_OMEGA_MIN,
+                    i_min: 0.1,
+                    use_derivative: false,
+                    p0: 1.0,
+                };
+                RpsiAverager::new(RpsiEstimator::new(cfg, p(param::R), p(param::FLUX)), 0.05)
+            });
         self.dither_t = 0.0;
         self.dither_hi = false;
-        if mode == mode::SS_HALL {
+        if cfg!(feature = "sixstep") && mode == mode::SS_HALL {
             // Duty per rad/s el, preloaded with the duty that drives the
             // current ceiling through two windings at standstill (the
             // breakaway duty), so the loop does not integrate up to it.
@@ -2081,17 +2126,40 @@ impl Engine {
     /// cross-saturation offset the tracker will see at this q current) and
     /// speed, straight into the run phase; the speed loop keeps its
     /// integrator and takes the HFI gains.
+    /// Carrier amplitude: quiet (`hfi_v`) only while running steady, slow
+    /// and lightly loaded; full (`hfi_v_hi`) through the start, ramps,
+    /// reversals and load, where a weak carrier lost the rotor (session
+    /// 42). Slewed.
+    #[inline(never)]
+    fn hfi_schedule(&mut self, p: &impl Fn(u8) -> f32, omega_target: f32, iq_cmd: f32, dt: f32) {
+        let v_lo = p(param::HFI_V);
+        let v_hi = p(param::HFI_V_HI).max(v_lo);
+        let quiet = self
+            .hfi_start
+            .as_ref()
+            .is_some_and(|s| s.phase == HfiPhase::Run)
+            && (omega_target - self.omega_ref_cur).abs() < 1.0
+            && self.omega_ref_cur.abs() < 0.5 * p(param::SL_HANDOFF)
+            && iq_cmd.abs() < 0.5 * p(param::IQ_LIMIT);
+        let want = if quiet { v_lo } else { v_hi };
+        if let Some(h) = self.hfi.as_mut() {
+            let v = h.amplitude();
+            h.set_amplitude(v + (want - v).clamp(-HFI_V_SLEW * dt, HFI_V_SLEW * dt));
+        }
+    }
+
     #[cold]
     #[inline(never)]
     fn hfi_handback(&mut self, p: &impl Fn(u8) -> f32, theta: f32, omega: f32, iq: f32) {
         let mut tr = HfiTracker::new(
-            p(param::HFI_V),
+            p(param::HFI_V_HI).max(p(param::HFI_V)),
             p(param::HFI_XI),
             p(param::HFI_BW),
             theta - p(param::HFI_XSAT) * iq,
         )
         .with_spread(p(param::HFI_SPREAD) as u8);
         tr.set_omega(omega);
+        tr.d_amp = self.hfi_d_amp;
         self.hfi = Some(tr);
         self.hfi_start = Some(HfiStart {
             phase: HfiPhase::Run,

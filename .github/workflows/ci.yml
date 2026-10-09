@@ -22,6 +22,14 @@ jobs:
       # The integer HFI path (mmc_core::fixq) in the drive, sim tests included.
       - run: cargo clippy -p mmc-drive --features fixq --all-targets -- -D warnings
       - run: cargo test -p mmc-drive --features fixq
+      # Subsystems are build options: the minimal drive and the F302's set
+      # must build, lint and pass on their own (feature tests skip). The sim
+      # tests observe the drive through telemetry, so those runs keep it.
+      - run: cargo clippy -p mmc-drive --no-default-features --all-targets -- -D warnings
+      - run: cargo clippy -p mmc-drive --no-default-features --features link --all-targets -- -D warnings
+      - run: cargo test -p mmc-drive --no-default-features --test sim_board link_options_not_built_in_are_refused
+      - run: cargo test -p mmc-drive --no-default-features --features telemetry,burst
+      - run: cargo test -p mmc-drive --no-default-features --features telemetry,burst,hall-pos
 
   no-std:
     runs-on: ubuntu-latest
@@ -76,7 +84,17 @@ jobs:
       - run: cargo build --release
         working-directory: crates/mmc-fw-f302
       - run: tools/fw_size.sh crates/mmc-fw-f302 2048
-      # The integer-HFI variant (feature fixq) only fits at opt-level "s" for
-      # the firmware crate; keep it linking.
-      - run: cargo build --release --features fixq --config 'profile.release.opt-level="s"' --config 'profile.release.package.mmc-drive.opt-level="s"'
+      # The integer-HFI variant (feature fixq); keep it linking.
+      - run: cargo build --release --features fixq
         working-directory: crates/mmc-fw-f302
+
+  # The H743 skeleton (Cortex-M7): the full application must keep building
+  # for it; its size is printed under the same rule as the other boards.
+  firmware-h743:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - run: cargo build --release
+        working-directory: crates/mmc-fw-h743
+      - run: tools/fw_size.sh crates/mmc-fw-h743 2048

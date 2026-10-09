@@ -25,7 +25,7 @@ def main(a):
     print(f"{'batch':8} {'starts':>6} {'OC':>3} {'pol ok':>7} {'reached':>8} {'edges med/max':>14} {'|id| med/max':>13}")
     for prof in a.profiles:
         cfg = json.load(open(os.path.join(a.dir, prof + ".json")))
-        pulses = 2 * cfg["hfi_pol_n"] * cfg["hfi_pol_s"]
+        pulses = 2 * cfg.get("hfi_pol_n", 8) * cfg.get("hfi_pol_s", 0.006)
         files = sorted(glob.glob(os.path.join(a.dir, f"{prof}_s*.csv")))
         oc = pol = reached = 0
         edges, idpk = [], []

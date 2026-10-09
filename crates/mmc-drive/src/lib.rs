@@ -167,6 +167,8 @@ impl DriveConfig {
             param::HFI_POL_S => (0.002, 0.05),
             param::HFI_POL_N => (1.0, 20.0),
             param::HFI_SPREAD => (0.0, 2.0),
+            param::HFI_ID => (0.0, 0.5 * self.spec.i_trip),
+            param::HFI_V_HI => (0.0, V_AMP_MAX),
             // A sector between 30° and 90°: anything outside is a broken
             // sensor or a bad fit, not a placement tolerance.
             id if (param::HALL_W0..param::HALL_W0 + 6).contains(&id) => {
@@ -224,6 +226,18 @@ pub struct Shared<const N: usize> {
     /// live via the debug probe; this is how the libm f64-soft-float stall
     /// was found.
     pub isr_max_cycles: AtomicU32,
+    /// CPU accounting, wrapping cycle sums (read twice a known time apart
+    /// over the debug probe, as `tools/cpu_profile.sh` does): the control
+    /// tick, the host link's own code (`link::Metered`, control-tick time
+    /// inside it excluded), and sleep (`Shared::meter_idle`, likewise).
+    /// Whatever the three leave of the elapsed cycles is the executor and
+    /// the other interrupts (USART, DMA, the time driver).
+    pub isr_sum_cycles: AtomicU32,
+    pub link_cycles: AtomicU32,
+    pub idle_cycles: AtomicU32,
+    /// Of `link_cycles`: snapshotting and encoding telemetry frames (the
+    /// rest is replies, the receive side and the DMA writes).
+    pub encode_cycles: AtomicU32,
     pub(crate) state: AtomicU8,
     pub(crate) sixstep_sector: AtomicU8,
     pub(crate) telem_seq: AtomicU32,
@@ -273,6 +287,10 @@ impl<const N: usize> Shared<N> {
             last_rx_tick: AtomicU32::new(0),
             control_ticks: AtomicU32::new(0),
             isr_max_cycles: AtomicU32::new(0),
+            isr_sum_cycles: AtomicU32::new(0),
+            link_cycles: AtomicU32::new(0),
+            idle_cycles: AtomicU32::new(0),
+            encode_cycles: AtomicU32::new(0),
             state: AtomicU8::new(ST_CAL),
             sixstep_sector: AtomicU8::new(0),
             telem_seq: AtomicU32::new(0),
@@ -293,6 +311,18 @@ impl<const N: usize> Shared<N> {
 
     pub fn config(&self) -> &DriveConfig {
         &self.cfg
+    }
+
+    /// Run `sleep` (the executor's WFE) and book its duration as idle,
+    /// less any control ticks that ran inside it. `cycles` is the board's
+    /// free-running cycle counter.
+    pub fn meter_idle(&self, cycles: impl Fn() -> u32, sleep: impl FnOnce()) {
+        let (t0, i0) = (cycles(), self.isr_sum_cycles.load(Ordering::Relaxed));
+        sleep();
+        let dt = cycles().wrapping_sub(t0);
+        let di = self.isr_sum_cycles.load(Ordering::Relaxed).wrapping_sub(i0);
+        self.idle_cycles
+            .fetch_add(dt.wrapping_sub(di), Ordering::Relaxed);
     }
 
     pub fn param(&self, id: u8) -> f32 {
@@ -393,6 +423,11 @@ impl<const N: usize> Shared<N> {
         match *msg {
             Message::Ping { nonce } => Message::Pong { nonce },
             Message::GetInfo => Message::Info(self.info()),
+            Message::SetTelemetry { .. } | Message::Stream { .. }
+                if !cfg!(feature = "telemetry") =>
+            {
+                nak(1) // not built into this firmware
+            }
             Message::SetTelemetry { divider, mask } => {
                 self.divider.store(divider.max(1) as u32, Ordering::Relaxed);
                 self.mask.store(mask & channel::ALL, Ordering::Relaxed);
@@ -427,6 +462,12 @@ impl<const N: usize> Shared<N> {
                 {
                     return nak(1); // this board has no hall inputs
                 }
+                if (matches!(m, mode::SS_FORCED | mode::SS_SENSORLESS | mode::SS_HALL)
+                    && !cfg!(feature = "sixstep"))
+                    || (m == mode::HALL_POS && !cfg!(feature = "hall-pos"))
+                {
+                    return nak(1); // not built into this firmware
+                }
                 if m != mode::OFF {
                     if state == ST_CAL {
                         return nak(3); // still calibrating
@@ -445,6 +486,9 @@ impl<const N: usize> Shared<N> {
                 self.cmd_mode.store(m, Ordering::Relaxed);
                 self.cmd_epoch.fetch_add(1, Ordering::Release);
                 ack
+            }
+            Message::RunTest { .. } | Message::ReadBurst { .. } if !cfg!(feature = "burst") => {
+                nak(1) // not built into this firmware
             }
             Message::RunTest { kind, a, b } => {
                 let fits = match kind {
@@ -568,7 +612,7 @@ impl<const N: usize> Shared<N> {
     /// A consistent snapshot of the selected channels, or `None` while not
     /// streaming. Seqlock read: retries while the ISR is mid-update.
     pub fn telemetry(&self) -> Option<Message> {
-        if !self.streaming.load(Ordering::Relaxed) {
+        if !self.streaming() {
             return None;
         }
         let mask = self.mask.load(Ordering::Relaxed);
@@ -593,6 +637,11 @@ impl<const N: usize> Shared<N> {
             }
         };
         TelemetryFrame::new(t_us, mask, &values[..n]).map(Message::Telemetry)
+    }
+
+    /// Telemetry is built in and the host has it switched on.
+    pub fn streaming(&self) -> bool {
+        cfg!(feature = "telemetry") && self.streaming.load(Ordering::Relaxed)
     }
 
     /// A drive abort with a probe in flight still hands the (partial) buffer

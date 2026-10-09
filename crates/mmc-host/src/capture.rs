@@ -72,9 +72,21 @@ pub fn run(link: &mut Link, cfg: &CaptureCfg, out: &Path) -> std::io::Result<Cap
         divider: cfg.divider,
         mask: cfg.mask & channel::ALL,
     };
-    link.request(&set, ack(&set), t)?;
-    let start_stream = Message::Stream { enable: true };
-    link.request(&start_stream, ack(&start_stream), t)?;
+    // A firmware built without `telemetry` refuses the stream: drive it
+    // anyway (commands, keep-alives, the safe stop) and say so.
+    let ty = set.wire_type();
+    let reply = link.request(
+        &set,
+        move |m: &Message| matches!(m, Message::Ack { of } | Message::Nak { of, .. } if *of == ty),
+        t,
+    )?;
+    let telemetry = matches!(reply, Message::Ack { .. });
+    if telemetry {
+        let start_stream = Message::Stream { enable: true };
+        link.request(&start_stream, ack(&start_stream), t)?;
+    } else {
+        println!("device has no telemetry (built without it): driving without recording");
+    }
 
     // Collect. The step/drive command (if any) goes out 10% into the capture.
     let step_msg = match (cfg.iq, cfg.drive) {
@@ -114,7 +126,9 @@ pub fn run(link: &mut Link, cfg: &CaptureCfg, out: &Path) -> std::io::Result<Cap
     if cfg.drive.is_some() {
         link.send(&Message::SetDrive(DriveMode::Off))?;
     }
-    link.send(&Message::Stream { enable: false })?;
+    if telemetry {
+        link.send(&Message::Stream { enable: false })?;
+    }
     if cfg.iq.is_some() {
         link.send(&Message::SetIqRef { iq: 0.0 })?;
     }
@@ -126,6 +140,12 @@ pub fn run(link: &mut Link, cfg: &CaptureCfg, out: &Path) -> std::io::Result<Cap
         }
     }
 
+    if !telemetry {
+        return Ok(CaptureSummary {
+            frames: 0,
+            frame_errors: link.frame_errors,
+        });
+    }
     if frames.is_empty() {
         return Err(std::io::Error::other("no telemetry received"));
     }

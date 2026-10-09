@@ -11,7 +11,7 @@ members = [
 # Firmware binaries build for their MCU target only (own .cargo/config.toml),
 # so they stay out of the host workspace.
 # `twin/` is an optional submodule with its own workspace.
-exclude = ["crates/mmc-fw-g0b1", "crates/mmc-fixq-bench", "twin"]
+exclude = ["crates/mmc-fw-g0b1", "crates/mmc-fw-h743", "crates/mmc-fixq-bench", "twin"]
 
 [workspace.package]
 version = "0.1.0"
