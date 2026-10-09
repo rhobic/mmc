@@ -45,7 +45,9 @@ const MAGIC: u32 = 0x4D4D_4350; // "MMCP"
 ///
 /// v13 (2026-10-08): added `hfi_kp`, `hfi_ki`, `hfi_pol_s`, `hfi_pol_n`,
 /// 53 → 57 params.
-const VERSION: u32 = 13;
+///
+/// v14 (2026-10-08): added `hfi_spread`, 57 → 58 params.
+const VERSION: u32 = 14;
 const HDR: usize = 2; // magic + version
 const CRC_IDX: usize = HDR + param::COUNT;
 const WORDS: usize = (CRC_IDX + 1 + 1) & !1; // +crc, round up to even

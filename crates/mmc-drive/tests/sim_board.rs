@@ -176,6 +176,9 @@ fn config(ctrl_hz: u32, motor: &PmsmParams) -> DriveConfig {
     defaults[param::POS_VMAX as usize] = 200.0;
     defaults[param::INERTIA as usize] = motor.inertia;
     defaults[param::SS_CONDUCTION as usize] = 120.0;
+    // The firmware's HFI start pulses (6 ms × 8 pairs).
+    defaults[param::HFI_POL_S as usize] = 0.006;
+    defaults[param::HFI_POL_N as usize] = 8.0;
     for k in 0..6 {
         defaults[(param::HALL_W0 + k) as usize] = std::f32::consts::FRAC_PI_3;
     }
@@ -883,14 +886,14 @@ fn hall_foc_resumes_at_speed() {
 }
 
 /// Sensorless from standstill on high-frequency injection (`hfi_v` > 0) on
-/// a salient motor: lock, polarity test, run on the tracker. The sim has no
-/// saturation, so the polarity test can read either way; a start must still
-/// end at the commanded speed and direction without a fault.
+/// a salient, saturating motor: lock, polarity test, run on the tracker,
+/// ending at the commanded speed and direction without a fault.
 #[test]
 fn hfi_starts_a_salient_motor_from_standstill() {
     let mut motor = PmsmParams::small_bldc();
     motor.lq = 1.25 * motor.ld;
     let mut rig = Rig::build(10_000, motor, false);
+    rig.board.motor.ld_sat = 0.15;
     for (id, v) in [
         (param::HFI_V, 1.0),
         (param::HFI_XI, 0.11),
@@ -928,6 +931,7 @@ fn hfi_hands_back_and_reverses_through_zero() {
     let mut motor = PmsmParams::small_bldc();
     motor.lq = 1.25 * motor.ld;
     let mut rig = Rig::build(10_000, motor, false);
+    rig.board.motor.ld_sat = 0.15;
     for (id, v) in [
         (param::HFI_V, 1.0),
         (param::HFI_XI, 0.11),
@@ -977,4 +981,92 @@ fn hfi_hands_back_and_reverses_through_zero() {
     );
     assert!((w_fwd - 600.0).abs() < 60.0, "forward ended at {w_fwd:.0}");
     assert!((w + 600.0).abs() < 60.0, "reverse ended at {w:.0}");
+}
+
+/// The spread carrier (`hfi_spread` 2: random frame polarity and length)
+/// tracks as the fixed one does: the same start reaches its speed.
+#[test]
+fn hfi_starts_with_a_spread_carrier() {
+    let mut motor = PmsmParams::small_bldc();
+    motor.lq = 1.25 * motor.ld;
+    let mut rig = Rig::build(10_000, motor, false);
+    rig.board.motor.ld_sat = 0.15;
+    for (id, v) in [
+        (param::HFI_V, 1.0),
+        (param::HFI_XI, 0.11),
+        (param::HFI_BW, 150.0),
+        (param::ID_INJECT, 0.3),
+        (param::HFI_SPREAD, 2.0),
+        (param::SL_HANDOFF, 1000.0),
+    ] {
+        assert!(matches!(
+            rig.send(&Message::SetParam { id, value: v }),
+            Message::Ack { .. }
+        ));
+    }
+    rig.send(&Message::SetDrive(DriveMode::Sensorless {
+        amps: 0.5,
+        omega_e: -200.0,
+    }));
+    rig.run(3.0);
+    let w = rig.board.motor.omega_e();
+    println!("spread HFI start: {w:.0} rad/s el after 3 s");
+    assert!(rig.sh.state() != mmc_drive::ST_FAULT_OC, "tripped");
+    assert!((w + 200.0).abs() < 40.0, "ended at {w:.0} rad/s el");
+}
+
+/// The polarity test reads the d-axis saturation: from eight rotor angles,
+/// both directions, with the spread carrier, every start breaks away the
+/// commanded way. Without saturation (`ld_sat` 0) the test has nothing to
+/// read and about half go backwards first (session 41 found the old sim
+/// passing on a one-sample "polarity test" that happened to land right).
+#[test]
+fn hfi_polarity_reads_saturation_from_any_angle() {
+    let mut wrong = Vec::new();
+    for k in 0..8 {
+        for dir in [1.0f32, -1.0] {
+            let mut motor = PmsmParams::small_bldc();
+            motor.lq = 1.25 * motor.ld;
+            let mut rig = Rig::build(10_000, motor, false);
+            rig.board.motor.ld_sat = 0.15;
+            rig.board.motor.theta_m =
+                k as f32 * std::f32::consts::TAU / 8.0 / motor.pole_pairs as f32;
+            for (id, v) in [
+                (param::HFI_V, 1.0),
+                (param::HFI_XI, 0.11),
+                (param::HFI_BW, 150.0),
+                (param::ID_INJECT, 0.3),
+                (param::HFI_SPREAD, 2.0),
+                (param::SL_HANDOFF, 1000.0),
+            ] {
+                assert!(matches!(
+                    rig.send(&Message::SetParam { id, value: v }),
+                    Message::Ack { .. }
+                ));
+            }
+            rig.send(&Message::SetDrive(DriveMode::Sensorless {
+                amps: 0.5,
+                omega_e: 150.0 * dir,
+            }));
+            // Through the lock and pulses (0.4 s), then the breakaway.
+            rig.run(0.4);
+            let mut backwards = 0.0f32;
+            for _ in 0..20 {
+                rig.run(0.02);
+                backwards = backwards.max(-dir * rig.board.motor.omega_e());
+            }
+            rig.run(1.0);
+            let w = rig.board.motor.omega_e();
+            if backwards > 20.0
+                || (w - 150.0 * dir).abs() > 30.0
+                || rig.sh.state() == mmc_drive::ST_FAULT_OC
+            {
+                wrong.push((k, dir, backwards, w));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "wrong-way or failed starts (angle, dir, backwards, end): {wrong:?}"
+    );
 }

@@ -1756,6 +1756,7 @@ impl Engine {
                 p(param::HFI_BW),
                 self.hall_last.filter(|_| !sl_hfi).unwrap_or(0.0),
             )
+            .with_spread(p(param::HFI_SPREAD) as u8)
         });
         self.hfi_start = (hfi_on && sl_hfi).then_some(HfiStart {
             phase: HfiPhase::Lock,
@@ -1808,6 +1809,7 @@ impl Engine {
                     hfi_xi: p(param::HFI_XI),
                     hfi_bw: p(param::HFI_BW),
                     hfi_xsat: p(param::HFI_XSAT),
+                    hfi_spread: p(param::HFI_SPREAD) as u8,
                     id_inject: p(param::ID_INJECT),
                     pol_a: HFI_POL_A.min(0.5 * spec.i_trip),
                     pol_s: p(param::HFI_POL_S),
@@ -2083,7 +2085,8 @@ impl Engine {
             p(param::HFI_XI),
             p(param::HFI_BW),
             theta - p(param::HFI_XSAT) * iq,
-        );
+        )
+        .with_spread(p(param::HFI_SPREAD) as u8);
         tr.set_omega(omega);
         self.hfi = Some(tr);
         self.hfi_start = Some(HfiStart {

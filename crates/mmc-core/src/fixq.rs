@@ -179,7 +179,7 @@ pub struct FixTracker {
     /// Speed [angle units per tick × 2^W_FRAC].
     pub omega_f: i32,
     omega_max_f: i32,
-    phase: u8,
+    seq: crate::hfi::CarrierSeq,
     c1: i32,
     c2: i32,
     prev: Option<(i32, i32)>,
@@ -188,16 +188,6 @@ pub struct FixTracker {
     /// This tick's unfiltered d response, when it refreshed.
     pub d_fresh: Option<i32>,
     pub err: i32,
-}
-
-/// `++−−` at a quarter of the control rate.
-#[inline]
-fn carrier(phase: u8) -> i32 {
-    if phase < 2 {
-        1
-    } else {
-        -1
-    }
 }
 
 impl FixTracker {
@@ -219,7 +209,7 @@ impl FixTracker {
             theta: 0,
             omega_f: 0,
             omega_max_f: (omega_max * dt * UNITS_PER_RAD * wf).min(i32::MAX as f32 / 2.0) as i32,
-            phase: 0,
+            seq: crate::hfi::CarrierSeq::new(0),
             c1: 0,
             c2: 0,
             prev: None,
@@ -227,6 +217,12 @@ impl FixTracker {
             d_fresh: None,
             err: 0,
         }
+    }
+
+    /// Spread the carrier (see [`crate::hfi::CarrierSeq`]).
+    pub fn with_spread(mut self, spread: u8) -> Self {
+        self.seq = crate::hfi::CarrierSeq::new(spread);
+        self
     }
 
     /// Carrier voltage to add along the tracker's d axis now [Q15 V].
@@ -268,9 +264,8 @@ impl FixTracker {
             .theta
             .wrapping_add(((self.omega_f >> W_FRAC) + self.kp * self.err) as u32);
         self.prev = Some(i_ab);
-        self.phase = (self.phase + 1) % 4;
         self.c2 = self.c1;
-        self.c1 = carrier(self.phase);
+        self.c1 = self.seq.advance() as i32;
     }
 
     /// Turn the estimate onto the other pole.
@@ -333,6 +328,8 @@ pub struct FixParams {
     pub hfi_xi: f32,
     pub hfi_bw: f32,
     pub hfi_xsat: f32,
+    /// Carrier spreading, 0..=2 (`hfi_spread`).
+    pub hfi_spread: u8,
     pub id_inject: f32,
     pub pol_a: f32,
     pub pol_s: f32,
@@ -418,7 +415,8 @@ impl FixHfi {
         let (kp_c, ki_c) = (p.l * p.cur_bw, p.r * p.cur_bw);
         let cv = vq / iq;
         Self {
-            tracker: FixTracker::new((p.hfi_v * vq) as i32, p.hfi_xi, p.hfi_bw, p.dt, p.omega_max),
+            tracker: FixTracker::new((p.hfi_v * vq) as i32, p.hfi_xi, p.hfi_bw, p.dt, p.omega_max)
+                .with_spread(p.hfi_spread),
             pi_d: Pi::new(kp_c * cv, ki_c * p.dt * cv),
             pi_q: Pi::new(kp_c * cv, ki_c * p.dt * cv),
             speed: Pi::new(

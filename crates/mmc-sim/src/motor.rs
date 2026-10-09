@@ -87,6 +87,11 @@ pub struct PmsmModel {
     pub omega_m: f32,
     /// Hold the rotor at standstill (locked-rotor test bench).
     pub locked: bool,
+    /// d-axis saturation [1/A]: the incremental d inductance is
+    /// `ld·(1 − ld_sat·i_d)` (clamped to [0.5, 1.5]·ld), lower with current
+    /// along the magnet's north. What HFI's polarity test reads; motor 3
+    /// shows ~0.02–0.3 at ±0.7 A. 0 (the default) is the linear motor.
+    pub ld_sat: f32,
 }
 
 impl PmsmModel {
@@ -97,6 +102,7 @@ impl PmsmModel {
             theta_m: 0.0,
             omega_m: 0.0,
             locked: false,
+            ld_sat: 0.0,
         }
     }
 
@@ -133,7 +139,8 @@ impl PmsmModel {
         let we = self.omega_e();
 
         // dq voltage equations (motor convention).
-        let did = (v.d - p.rs * self.i_dq.d + we * p.lq * self.i_dq.q) / p.ld;
+        let ld_inc = p.ld * (1.0 - self.ld_sat * self.i_dq.d).clamp(0.5, 1.5);
+        let did = (v.d - p.rs * self.i_dq.d + we * p.lq * self.i_dq.q) / ld_inc;
         let diq = (v.q - p.rs * self.i_dq.q - we * (p.ld * self.i_dq.d + p.flux)) / p.lq;
         self.i_dq.d += did * dt;
         self.i_dq.q += diq * dt;

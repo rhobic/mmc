@@ -119,8 +119,7 @@ pub struct Tracker {
     ki: f32,
     theta: f32,
     omega: f32,
-    /// Carrier phase (0..4, `++−−`) and the last two carriers commanded.
-    phase: usize,
+    /// The last two carriers commanded.
     c1: f32,
     c2: f32,
     prev: Option<AlphaBeta>,
@@ -133,6 +132,64 @@ pub struct Tracker {
     pub d_fresh: Option<f32>,
     /// Last normalised error (≈ 2ξ·(θr − θ̂) when small).
     pub err: f32,
+    /// Carrier spreading ([`Spread`]) and its frame state.
+    seq: CarrierSeq,
+}
+
+/// Carrier frame sequencer. Fixed (`spread` 0): `++−−` forever, one tone at
+/// a quarter of the control rate. Spread: each frame's polarity is random
+/// (1: `++−−` or `−−++`), and also its length (2: half-frames of 2 or 3
+/// periods, a quarter or a sixth of the control rate), which smears the
+/// carrier's acoustic line into a band. Every sign is still held at least
+/// two periods, which the F302's mid-period duty load needs (see
+/// [`carrier`]), and the demodulation weights by the carriers actually
+/// commanded, so it is unchanged. Each frame is zero-mean, so the ripple
+/// stays bounded.
+#[derive(Copy, Clone, Debug)]
+pub struct CarrierSeq {
+    spread: u8,
+    rng: u32,
+    tick: u8,
+    half: u8,
+    pol: i8,
+}
+
+impl CarrierSeq {
+    pub fn new(spread: u8) -> Self {
+        Self {
+            spread,
+            rng: 0x2545_F491,
+            tick: 0,
+            half: 2,
+            pol: 1,
+        }
+    }
+
+    /// This period's carrier sign, then advance.
+    pub fn advance(&mut self) -> i8 {
+        if self.tick == 2 * self.half {
+            self.tick = 0;
+            if self.spread > 0 {
+                // xorshift32: one draw a frame.
+                self.rng ^= self.rng << 13;
+                self.rng ^= self.rng >> 17;
+                self.rng ^= self.rng << 5;
+                self.pol = if self.rng & 1 == 0 { 1 } else { -1 };
+                self.half = if self.spread >= 2 && self.rng & 2 != 0 {
+                    3
+                } else {
+                    2
+                };
+            }
+        }
+        let c = if self.tick < self.half {
+            self.pol
+        } else {
+            -self.pol
+        };
+        self.tick += 1;
+        c
+    }
 }
 
 impl Tracker {
@@ -146,20 +203,26 @@ impl Tracker {
             ki: bandwidth * bandwidth / g,
             theta: wrap_angle(theta0),
             omega: 0.0,
-            phase: 0,
             c1: 0.0,
             c2: 0.0,
             prev: None,
             d_amp: 0.0,
             d_fresh: None,
             err: 0.0,
+            seq: CarrierSeq::new(0),
         }
     }
 
-    /// The carrier voltage to add along the estimate's d axis this period
-    /// (`++−−` at a quarter of the control rate, see [`carrier`]).
+    /// Spread the carrier ([`CarrierSeq`]): 0 fixed `++−−`, 1 random frame
+    /// polarity, 2 random polarity and length.
+    pub fn with_spread(mut self, spread: u8) -> Self {
+        self.seq = CarrierSeq::new(spread);
+        self
+    }
+
+    /// The carrier voltage to add along the estimate's d axis this period.
     pub fn carrier(&self) -> f32 {
-        carrier(self.phase) * self.v_h
+        self.c1 * self.v_h
     }
 
     /// Feed this period's measured current (it answers the carriers of the
@@ -188,9 +251,8 @@ impl Tracker {
         self.omega += 2.0 * self.ki * self.err * dt;
         self.theta = wrap_angle(self.theta + (self.omega + 2.0 * self.kp * self.err) * dt);
         self.prev = Some(i_ab);
-        self.phase = (self.phase + 1) % 4;
         self.c2 = self.c1;
-        self.c1 = carrier(self.phase);
+        self.c1 = self.seq.advance() as f32;
         (self.theta, self.omega)
     }
 
@@ -284,5 +346,45 @@ mod tests {
             sum.iter().all(|&s| s == 0.0),
             "carrier mean per angle: {sum:?}"
         );
+    }
+
+    #[test]
+    fn spread_carrier_keeps_two_period_holds_and_zero_mean() {
+        for spread in 0..=2u8 {
+            let mut q = CarrierSeq::new(spread);
+            let mut c = [0i8; 6000];
+            for x in c.iter_mut() {
+                *x = q.advance();
+            }
+            // Every run of one sign lasts at least two periods.
+            let mut run = 1;
+            for k in 1..c.len() {
+                if c[k] == c[k - 1] {
+                    run += 1;
+                } else {
+                    assert!(run >= 2, "spread {spread}: a {run}-period hold at {k}");
+                    run = 1;
+                }
+            }
+            // Zero mean (each frame is), and bounded drift.
+            let mut sum = 0i32;
+            let mut worst = 0;
+            for &x in &c {
+                sum += x as i32;
+                worst = worst.max(sum.abs());
+            }
+            assert!(
+                worst <= 3,
+                "spread {spread}: carrier integral reached {worst}"
+            );
+            let flips = c.windows(2).filter(|w| w[0] != w[1]).count();
+            match spread {
+                0 => assert_eq!(flips, 2999, "fixed ++-- flips every two periods"),
+                // Random frame polarity merges some half-frames.
+                1 => assert!(flips < 2900 && flips > 2000, "{flips}"),
+                // Mixed 2- and 3-period halves: fewer flips still.
+                _ => assert!(flips < 2500, "{flips}"),
+            }
+        }
     }
 }

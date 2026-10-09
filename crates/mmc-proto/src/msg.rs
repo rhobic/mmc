@@ -199,7 +199,11 @@ pub mod param {
     /// number of +d/−d pulse pairs.
     pub const HFI_POL_S: u8 = 55;
     pub const HFI_POL_N: u8 = 56;
-    pub const COUNT: usize = 57;
+    /// HFI carrier spreading against its whine: 0 a fixed `++−−` tone at a
+    /// quarter of the control rate, 1 random frame polarity, 2 random
+    /// polarity and frame length (a quarter or a sixth of the rate).
+    pub const HFI_SPREAD: u8 = 57;
+    pub const COUNT: usize = 58;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -258,6 +262,7 @@ pub mod param {
         "hfi_ki",
         "hfi_pol_s",
         "hfi_pol_n",
+        "hfi_spread",
     ];
 }
 

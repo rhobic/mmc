@@ -645,6 +645,7 @@ fn default_params(cfg: &ServeCfg) -> [f32; param::COUNT] {
         0.0,   // hfi_ki
         0.006, // hfi_pol_s
         8.0,   // hfi_pol_n
+        0.0,   // hfi_spread
     ]
 }
 
@@ -972,6 +973,7 @@ fn sim_param_range(id: u8) -> Option<(f32, f32)> {
         param::HFI_KI => (0.0, 10.0),
         param::HFI_POL_S => (0.002, 0.05),
         param::HFI_POL_N => (1.0, 20.0),
+        param::HFI_SPREAD => (0.0, 2.0),
         id if (param::HALL_W0..param::HALL_W0 + 6).contains(&id) => {
             (std::f32::consts::FRAC_PI_6, std::f32::consts::FRAC_PI_2)
         }

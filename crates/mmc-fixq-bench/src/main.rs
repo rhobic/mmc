@@ -32,6 +32,7 @@ fn params() -> FixParams {
         hfi_xi: 0.055,
         hfi_bw: 150.0,
         hfi_xsat: 0.44,
+        hfi_spread: 0,
         id_inject: 0.5,
         pol_a: 0.6,
         pol_s: 0.006,
