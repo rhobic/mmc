@@ -45,7 +45,7 @@ def main(a):
             e = np.degrees(np.angle(np.exp(1j * (d["theta_est"][k] - hall_th))))
             pol += bool(len(e)) and abs(float(np.nanmedian(e))) < 60
             end = (t > t0 + 1.5) & (st == 6)
-            reached += bool(end.any()) and float(d["omega_hall"][end].mean()) > 0.5 * a.target
+            reached += bool(end.any()) and float(d["omega_hall"][end].mean()) * math.copysign(1, a.target) > 0.5 * abs(a.target)
         print(f"{prof:8} {len(files):6} {oc:3} {pol:4}/{len(files) - oc:<2} {reached:5}/{len(files) - oc:<2}"
               f" {int(np.median(edges)):6}/{max(edges):<6} {np.median(idpk):6.2f}/{max(idpk):.2f}")
 

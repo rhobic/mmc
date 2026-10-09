@@ -1,0 +1,17 @@
+{
+  "command": "mmc-host capture --serial COM9 --baud 1000000 --divider 5 --duration 3",
+  "description": "Ad-hoc telemetry capture.",
+  "notes": [
+    "Captured live from mmc-f302 (BoardF302) over mmc-proto; 1680 frames."
+  ],
+  "order": 100,
+  "params": {
+    "divider": 5,
+    "drive": "Sensorless { amps: 0.5, omega_e: 20.0 }",
+    "drive_step": null,
+    "duration_s": 3.0,
+    "iq_A": null
+  },
+  "title": "HFI start 12 (p25x3) to 20 rad/s el",
+  "unix_time": 1791505504
+}

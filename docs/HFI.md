@@ -54,14 +54,16 @@ differencing cancels.
 | Standstill sweep: 24 test angles, response demodulated and accumulated on the device | `RunTest HFI_SWEEP` (`mmc_core::hfi`), `mmc-host hfi`, `tools/hfi_fit.py` |
 | Real-time tracker | `mmc_core::hfi::Tracker`; params `hfi_v` (carrier [V], 0 = off), `hfi_bw` [rad/s], `hfi_xi` |
 | Shadow under hall FOC, scored at hall edges | `hfi_v` > 0 in hall FOC: tracker angle on `theta_est`, its error at the last hall edge on `theta_err`, d response on `hfi_d` (channel 28) |
-| Sensorless start from standstill | `hfi_v` > 0 in sensorless mode: lock (0.3 s), polarity (3 × ±0.6 A pairs), run on the tracker, hand over to the flux observer at `sl_handoff` |
+| Sensorless start from standstill | `hfi_v` > 0 in sensorless mode: lock (0.3 s), polarity (`hfi_pol_n` × ±0.6 A pulse pairs of `hfi_pol_s` each, default 8 × 6 ms), run on the tracker, hand over to the flux observer at `sl_handoff` |
+| HFI speed gains | `hfi_kp`/`hfi_ki` while on the tracker (0 = `speed_kp`/`speed_ki`), back to the shared gains at the handover (motor 3: 8× the shared, persisted on bench 2) |
 | Cross-saturation correction | `hfi_xsat` [rad el/A]: the drive's angle is the tracker's + `hfi_xsat`·i_q (motor 3: 0.44, persisted on bench 2) |
 | Lock-up trip | HFI speed loop at ≥ 90 % of `iq_limit` with the tracker under half the reference, net 0.5 s → stall fault |
 | Friction feed-forward | `sl_fric` [A], HFI speed loop only, faded in over ±5 rad/s el (measured no benefit on motor 3; off) |
 
 Firmware: F302 fw 20, G474 fw 25, **nvparam v11** (`hfi_v`, `hfi_bw`,
 `hfi_xi`, ids 48–50). Correction, trip and `sl_fric` (ids 51–52): F302
-fw 24, G474 fw 29, **nvparam v12**.
+fw 24, G474 fw 29, **nvparam v12**. HFI gains and the pulse params (ids
+53–56): F302 fw 25, G474 fw 30, **nvparam v13**.
 
 ## Results on motor 3
 
@@ -202,6 +204,36 @@ revolutions (10–21 hall edges in 0.2 s, up to ±90 rad/s el): the pulses
 throw the rotor, the tracker frame slips under the current loop, and the
 phase peaks reach the trip. Session 36's 18/18 was a small sample.
 
+### Start fixed: short polarity pulses (fw 25, `testresults/motor3-hfi-start/`)
+
+Why the pulses threw the rotor: the start's d bias (`id_inject`) aligns the
+magnet's north with the tracker's +d during the lock, so the −d pulse
+pushes against the magnet — an unstable equilibrium. Offsets from it grow
+with τ = 1/√(1.5·p²·ψ·i/J) ≈ 4 ms at 0.6 A on motor 3; a 25 ms pulse is six
+of those, enough to turn the rotor half a revolution, and the next +d pulse
+turns it back. Pulses of a few τ cannot. The pulse length and count are now
+params, and the polarity is read from the unfiltered response (`d_amp`'s
+~2 ms filter would carry the previous pulse into a short one). 15 starts
+each to +20 rad/s el, from wherever the last one left the rotor:
+
+| pulses | overcurrent | polarity right | reached | hall edges during pulses (median / max) | peak \|i_d\| (median / max) |
+|---|---|---|---|---|---|
+| 25 ms × 3 (old) | 0 | 15/15 | 15/15 | 4 / 19 | 0.83 / 1.43 A |
+| 6 ms × 8 | 0 | 15/15 | 15/15 | 0 / 0 | 0.79 / 0.80 A |
+| 4 ms × 12 | 0 | 15/15 | 15/15 | 0 / 1 | 0.73 / 0.80 A |
+
+6 ms × 8 (96 ms, was 150) is the default. Then 15 more starts to −20
+(clean, rotor still) and 3 to 600 rad/s el through the handover (smooth,
+i_q ≤ 0.35 A): **63 of 63 starts with the short pulses clean**. Peak i_d
+is the pulse plus the carrier ripple; the old pulses reached 1.43 A, a
+sample-rate's worth under the trip, which is where the ~10 % came from.
+(The old shape happened not to trip in these 15.)
+
+With the HFI gains on their own params (8× the shared, persisted) and
+`hfi_xsat` = 0.44, on fw 25: ±5 → 5.2 / −5.0 rad/s el (stick-slip 318° /
+222°), ±10 → 10.0 / −10.1 (283° / 213°), 50 → −50 crossing clean; the
+observer at ±200 unaffected (shared gains).
+
 ## Is back-EMF sensing needed?
 
 The terminal voltage dividers (back-EMF sensing) are used by: sensorless
@@ -220,13 +252,11 @@ need them; it needs saliency, which motor 3 has.
   saliency term, and the pulses jerk the rotor. Options for a motor with less d-axis saturation: read the
   contrast from the first current rise rather than the averaged ripple, or a
   short q-current nudge read on the tracker.
-- **Start trips (~10 %)**: the polarity pulses spin the rotor. Hold it
-  while pulsing (a q-axis hold current on the tracker, or pulses short
-  enough that the rotor cannot follow), or smaller pulses with more pairs —
-  then re-measure polarity reliability, which smaller pulses put at risk.
-- **Separate HFI speed-loop gains**: the ×8 gains that suit HFI at low
-  speed are shared with the observer and hall modes; a pair of HFI gains
-  would let them be persisted.
+- **Polarity is read on a rotor the lock bias has already aligned**, so
+  the pulses mostly confirm what the bias set up. A motor with less static
+  friction or a heavier load may not align during the lock; the polarity
+  read is then doing real work, and 63/63 here says little about it.
+- **F302 flash**: 2.97 KB left (CI floor 2 KB).
 - **Cross-saturation is linear only to ~0.6 A**: a table or quadratic
   `hfi_xsat` for loaded operation (motor 3 never needs more than ~0.3 A
   unloaded).

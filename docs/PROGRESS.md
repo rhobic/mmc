@@ -44,6 +44,20 @@ persisted on bench 2, plus `hfi_xsat` = 0.44):
   separate HFI gains, and a start that holds the rotor through the pulses.
   Details: [HFI.md](HFI.md#with-the-correction-fw-2224-testresultsmotor3-hfi-fix).
 
+**Both open items closed (F302 fw 25, G474 fw 30, nvparam v13)** — params
+re-applied and persisted on bench 2, HFI gains 8× and the short pulses:
+
+- **Start trips**: the −d polarity pulse pushes against the magnet the lock
+  bias aligned — an unstable equilibrium with τ ≈ 4 ms; 25 ms pulses flipped
+  the rotor (up to 19 hall edges, i_d to 1.43 A). Pulses are params now
+  (`hfi_pol_s`, `hfi_pol_n`, default 6 ms × 8) read from the unfiltered
+  response: **63/63 starts clean**, rotor still during the pulses, i_d ≤ 0.81 A.
+- **HFI speed gains** `hfi_kp`/`hfi_ki` (0 = shared), back to `speed_kp`/
+  `speed_ki` at the observer handover (smooth at 600 rad/s el). ±5 and ±10
+  hold with 213–318° el stick-slip; the observer is untouched.
+- `tools/hfi_start_batch.sh`, `tools/hfi_start_score.py`.
+  [HFI.md](HFI.md#start-fixed-short-polarity-pulses-fw-25-testresultsmotor3-hfi-start).
+
 ## 2026-10-08 — session 38: F302 flash headroom, pinned toolchain, size check
 
 The F302 image had 608 bytes of its 62 KB left on rustc 1.99 and overflowed
