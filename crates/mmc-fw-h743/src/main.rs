@@ -92,7 +92,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::Unknown(4),
-        fw_version: 1,
+        fw_version: 2,
         name: "mmc-h743",
         defaults: DEFAULTS,
     },
