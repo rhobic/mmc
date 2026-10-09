@@ -202,6 +202,12 @@ impl Tracker {
         self.omega
     }
 
+    /// Take over a known speed (a handover from another estimator), so the
+    /// PLL does not have to acquire it.
+    pub fn set_omega(&mut self, omega: f32) {
+        self.omega = omega;
+    }
+
     /// Turn the estimate by π (after a polarity check said it locked onto
     /// the magnet's south).
     pub fn flip(&mut self) {

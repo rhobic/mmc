@@ -73,6 +73,10 @@ const HFI_POL_A: f32 = 0.6;
 /// away past ~0.6 A); far enough off, q current makes no torque and the speed
 /// loop winds to its limit holding a stopped rotor (session 39).
 const HFI_STUCK_S: f32 = 0.5;
+/// Below this fraction of `sl_handoff` a sensorless drive running on the
+/// flux observer hands back to HFI (`hfi_v` > 0); hysteresis against the
+/// handover at `sl_handoff`.
+const HFI_HANDBACK: f32 = 0.6;
 /// Speed [rad/s el] over which the friction feed-forward (`sl_fric`) fades
 /// in from zero, so it changes sign smoothly through a zero crossing.
 const FRIC_OMEGA: f32 = 5.0;
@@ -1005,6 +1009,17 @@ impl Engine {
                 duties = out.duties;
                 v_dq = out.v_dq;
                 i_dq = out.i_dq;
+                // Slow enough that the observer is losing the rotor: hand
+                // back to HFI (from next tick), starting the tracker on the
+                // observer's angle and speed — the polarity is known, so no
+                // lock and no pulses. Hysteresis against the handover.
+                if seq_out.phase == Phase::Closed
+                    && p(param::HFI_V) > 0.0
+                    && !self.fixq_active()
+                    && seq_out.omega.abs() < HFI_HANDBACK * p(param::SL_HANDOFF)
+                {
+                    self.hfi_handback(&p, self.theta, self.omega, iq_ref);
+                }
                 out.v_ab
             } else {
                 // Forced-frame modes: ramp the electrical frequency + amplitude.
@@ -1090,7 +1105,22 @@ impl Engine {
                     alpha: v_ab.alpha + inj.alpha,
                     beta: v_ab.beta + inj.beta,
                 };
-                duties = svpwm(v_ab, vbus);
+                // Re-modulating here must keep the FOC's dead-time
+                // compensation, which its duties carried and `v_ab` (the
+                // voltage that lands, for the observer) does not. Until
+                // session 41 it was dropped whenever HFI ran.
+                let mut v_mod = v_ab;
+                if let Some(m) = self
+                    .foc
+                    .as_ref()
+                    .and_then(|f| f.deadtime)
+                    .filter(|m| !m.is_ideal())
+                {
+                    let c = m.error_ab(i_abc);
+                    v_mod.alpha += c.alpha;
+                    v_mod.beta += c.beta;
+                }
+                duties = svpwm(v_mod, vbus);
                 hfi_out = Some((th, w));
             }
             if self.mode != mode::OFF {
@@ -1139,6 +1169,7 @@ impl Engine {
                 // `flux_mag()` is leak-compensated, so this threshold means
                 // the same thing at every speed.
                 let closed = self.mode == mode::SENSORLESS
+                    && self.hfi_start.is_none()
                     && self
                         .seq
                         .as_ref()
@@ -1188,6 +1219,8 @@ impl Engine {
         put(channel::I_C, i_abc.c);
         // While sensorless runs, the state channel reports the startup phase.
         let state_telem = match (self.mode, self.seq.as_ref().map(|q| q.phase())) {
+            // On HFI (its start, or handed back from the observer).
+            (mode::SENSORLESS, _) if self.hfi_start.is_some() => ST_SL_RAMP,
             (mode::SENSORLESS, Some(Phase::Ramp)) => ST_SL_RAMP,
             (mode::SENSORLESS, Some(Phase::Blend)) => ST_SL_BLEND,
             // Six-step: distinguish the forced ramp, confident sensing, and
@@ -2014,6 +2047,38 @@ fn hall_map(p: &impl Fn(u8) -> f32) -> HallMap {
         dir: if p(param::HALL_DIR) < 0.0 { -1.0 } else { 1.0 },
         hyst: p(param::HALL_HYST),
         widths: HallMap::normalized_widths(w),
+    }
+}
+
+impl Engine {
+    /// Observer → HFI: the tracker starts on the observer's angle (less the
+    /// cross-saturation offset the tracker will see at this q current) and
+    /// speed, straight into the run phase; the speed loop keeps its
+    /// integrator and takes the HFI gains.
+    fn hfi_handback(&mut self, p: &impl Fn(u8) -> f32, theta: f32, omega: f32, iq: f32) {
+        let mut tr = HfiTracker::new(
+            p(param::HFI_V),
+            p(param::HFI_XI),
+            p(param::HFI_BW),
+            theta - p(param::HFI_XSAT) * iq,
+        );
+        tr.set_omega(omega);
+        self.hfi = Some(tr);
+        self.hfi_start = Some(HfiStart {
+            phase: HfiPhase::Run,
+            ticks: 0,
+            acc: [0.0; 2],
+            n: [0; 2],
+            pairs: 0,
+        });
+        if p(param::HFI_KP) > 0.0 {
+            if let Some(s) = self.speed.as_mut() {
+                s.set_gains(PiGains {
+                    kp: p(param::HFI_KP),
+                    ki: p(param::HFI_KI),
+                });
+            }
+        }
     }
 }
 

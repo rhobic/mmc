@@ -913,3 +913,65 @@ fn hfi_starts_a_salient_motor_from_standstill() {
     assert!(rig.sh.state() != mmc_drive::ST_FAULT_OC, "tripped");
     assert!((w - 200.0).abs() < 40.0, "ended at {w:.0} rad/s el");
 }
+
+/// Full-range reversal on a salient motor: HFI start, handover to the flux
+/// observer at `sl_handoff`, then a live retarget to the opposite speed.
+/// Slowing through 0.6·`sl_handoff` hands back to HFI, which carries the
+/// rotor through zero; past `sl_handoff` the other way the observer takes
+/// over again. Without the hand-back the observer stall-tripped at zero.
+#[test]
+#[cfg_attr(feature = "fixq", ignore = "the integer HFI path has no observer handover")]
+fn hfi_hands_back_and_reverses_through_zero() {
+    let mut motor = PmsmParams::small_bldc();
+    motor.lq = 1.25 * motor.ld;
+    let mut rig = Rig::build(10_000, motor, false);
+    for (id, v) in [
+        (param::HFI_V, 1.0),
+        (param::HFI_XI, 0.11),
+        (param::HFI_BW, 150.0),
+        (param::ID_INJECT, 0.3),
+        (param::SL_HANDOFF, 350.0),
+        (param::OMEGA_ACCEL, 600.0),
+    ] {
+        assert!(matches!(
+            rig.send(&Message::SetParam { id, value: v }),
+            Message::Ack { .. }
+        ));
+    }
+    rig.send(&Message::SetDrive(DriveMode::Sensorless {
+        amps: 0.5,
+        omega_e: 600.0,
+    }));
+    rig.run(2.5);
+    let w_fwd = rig.board.motor.omega_e();
+    rig.send(&Message::SetDrive(DriveMode::Sensorless {
+        amps: 0.5,
+        omega_e: -600.0,
+    }));
+    assert_eq!(
+        rig.telem(channel::STATE) as u8,
+        mmc_drive::ST_RUN,
+        "not on the observer at +600"
+    );
+    let mut slowest = f32::MAX;
+    let mut on_hfi = false;
+    for _ in 0..40 {
+        rig.run(0.1);
+        slowest = slowest.min(rig.board.motor.omega_e());
+        on_hfi |= rig.telem(channel::STATE) as u8 == mmc_drive::ST_SL_RAMP;
+        assert!(rig.sh.state() != mmc_drive::ST_STALL, "stall-tripped");
+        assert!(rig.sh.state() != mmc_drive::ST_FAULT_OC, "tripped");
+    }
+    let w = rig.board.motor.omega_e();
+    println!(
+        "reversal: +{w_fwd:.0} -> {w:.0} rad/s el (min {slowest:.0}), handed back to HFI: {on_hfi}"
+    );
+    assert!(on_hfi, "never handed back to HFI");
+    assert_eq!(
+        rig.telem(channel::STATE) as u8,
+        mmc_drive::ST_RUN,
+        "not on the observer at -600"
+    );
+    assert!((w_fwd - 600.0).abs() < 60.0, "forward ended at {w_fwd:.0}");
+    assert!((w + 600.0).abs() < 60.0, "reverse ended at {w:.0}");
+}
