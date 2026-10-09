@@ -149,11 +149,16 @@ impl HallSpeed {
             5 => -1.0,
             _ => {
                 // Two or three steps at once: direction is ambiguous, and the
-                // interval no longer spans 60°. Resync without a speed.
+                // interval no longer spans 60°. Resync without a speed, and
+                // without a direction: the next edge is timed from this one,
+                // which a glitch may have placed a sample before it, so it
+                // must not count as a measurement (a one-sample interval read
+                // as ~10 000 rad/s).
                 self.skips = self.skips.wrapping_add(1);
                 self.last_idx = Some(idx);
                 self.since_edge = 0.0;
                 self.interval = 0.0;
+                self.dir = 0.0;
                 return true;
             }
         };
@@ -329,14 +334,39 @@ pub struct HallTracker {
     since_edge: f32,
     /// Direction of the last edge (+1/−1 electrical, 0 before one).
     last_travel: f32,
+    /// Speed measured raw between the last two edges the same way
+    /// [rad/s el, magnitude], 0 when there is none (start, a reversal, a
+    /// skipped state).
+    edge_speed: f32,
 }
 
 impl HallTracker {
     /// Load-estimate gain per edge (fraction of the implied acceleration).
     const LOAD_GAIN: f32 = 0.2;
-    /// Shortest edge interval used to infer a speed correction [s] (guards
-    /// against a sensor bounce reading as a huge speed).
+    /// Shortest edge interval used to infer a speed correction [s]: a
+    /// sensor bounce or a glitch must not read as a huge speed. Above
+    /// [`Self::FAST_OMEGA`] it follows the measured edge rate instead
+    /// ([`Self::min_interval`]): a fixed 10 ms capped every measurement at
+    /// one sector per 10 ms, ~105 rad/s el, and the tracker read 155 for
+    /// 300 with its angle up to 30° off.
     const MIN_INTERVAL: f32 = 10e-3;
+    /// Measured edge rate [rad/s el] above which the interval floor drops
+    /// below [`Self::MIN_INTERVAL`]. Below it the tracker behaves as it did
+    /// when the position-torque feed-forward was tuned on the bench (low-
+    /// speed hunting, 100 rad/s el); gating on the raw edge rate rather than
+    /// the model's speed lets the floor drop even when the model under-reads.
+    const FAST_OMEGA: f32 = 150.0;
+
+    /// Floor for an interval spanning a sector of `width`: half the time the
+    /// last two same-direction edges say it takes, once they were faster
+    /// than [`Self::FAST_OMEGA`], else [`Self::MIN_INTERVAL`].
+    fn min_interval(&self, width: f32) -> f32 {
+        if self.edge_speed > Self::FAST_OMEGA {
+            Self::MIN_INTERVAL.min(0.5 * width / self.edge_speed)
+        } else {
+            Self::MIN_INTERVAL
+        }
+    }
 
     pub fn new(map: HallMap, accel_per_amp: f32) -> Self {
         Self {
@@ -348,6 +378,7 @@ impl HallTracker {
             last_idx: None,
             since_edge: 0.0,
             last_travel: 0.0,
+            edge_speed: 0.0,
         }
     }
 
@@ -383,14 +414,20 @@ impl HallTracker {
             };
             let travel = seq * self.map.dir;
             if travel == 0.0 {
-                // Skipped a state: no direction, no exact edge.
+                // Skipped a state: no direction, no exact edge. Forget the
+                // last direction too, so the next edge (timed from this one)
+                // is not read as a second edge the same way.
                 self.theta = c;
                 self.omega = 0.0;
+                self.last_travel = 0.0;
+                self.edge_speed = 0.0;
             } else {
                 let edge = c - travel * half + travel * self.map.hyst;
                 let e = edge - self.theta;
                 self.theta = edge;
-                let t = self.since_edge.max(Self::MIN_INTERVAL);
+                let t = self
+                    .since_edge
+                    .max(self.min_interval(self.map.widths[last]));
                 if self.last_travel != 0.0 && travel != self.last_travel {
                     // Back across the edge it just crossed: the rotor passed
                     // through zero speed, and the time since that edge says
@@ -400,6 +437,7 @@ impl HallTracker {
                     // the position loop's D term.
                     self.omega = 0.0;
                     self.last_travel = travel;
+                    self.edge_speed = 0.0;
                     self.since_edge = 0.0;
                     self.last_idx = Some(idx);
                     return Some((self.theta, self.omega));
@@ -411,6 +449,11 @@ impl HallTracker {
                     // Two edges the same way: one sector in t is a direct
                     // speed measurement; average it with the model.
                     self.omega = 0.5 * self.omega + 0.5 * travel * self.map.widths[last] / t;
+                    if self.since_edge > 0.0 {
+                        self.edge_speed = self.map.widths[last] / self.since_edge;
+                    }
+                } else {
+                    self.edge_speed = 0.0;
                 }
                 let lim = self.accel_per_amp;
                 self.load = (self.load + Self::LOAD_GAIN * e / (t * t)).clamp(-lim, lim);
@@ -433,7 +476,7 @@ impl HallTracker {
                 // that time; whatever the model held above that cap it
                 // over-predicted, so learn it into the load term.
                 self.theta = b;
-                let t = self.since_edge.max(Self::MIN_INTERVAL);
+                let t = self.since_edge.max(self.min_interval(2.0 * half));
                 let cap = 2.0 * half / t;
                 let capped = self.omega.clamp(-cap, cap);
                 let excess = self.omega - capped;
@@ -694,5 +737,97 @@ mod tests {
             assert!(wrap_angle(a - center).abs() < 1e-5);
         }
         assert_eq!(map.angle(0), None);
+    }
+
+    /// A state skipped by a glitch just before a real edge: the edge is
+    /// timed from the glitch one sample earlier, which used to read as
+    /// (π/3)/100 µs ≈ 10 000 rad/s for four samples.
+    #[test]
+    fn a_skip_before_an_edge_is_not_a_speed() {
+        let mut h = HallSpeed::new();
+        let dt = 1e-4;
+        // Forward at 5 rad/s el: ~2094 samples a sector.
+        let per = ((PI / 3.0) / 5.0 / dt) as usize;
+        for &s in &SEQUENCE[..3] {
+            for _ in 0..per {
+                h.update(s, dt);
+            }
+        }
+        assert!((h.omega() - 5.0).abs() < 0.1, "{}", h.omega());
+        // Skip ahead, skip back, then the real edge.
+        h.update(SEQUENCE[4], dt);
+        h.update(SEQUENCE[2], dt);
+        h.update(SEQUENCE[3], dt);
+        for _ in 0..10 {
+            assert!(h.omega().abs() < 10.0, "{}", h.omega());
+            h.update(SEQUENCE[3], dt);
+        }
+        // Two clean edges later it measures again.
+        for &s in &SEQUENCE[4..] {
+            for _ in 0..per {
+                h.update(s, dt);
+            }
+        }
+        assert!((h.omega() - 5.0).abs() < 0.1, "{}", h.omega());
+    }
+
+    /// The tracker follows a steady rotor at speed: the fixed 10 ms floor
+    /// on its edge interval capped it near 105 rad/s el. Between that and
+    /// `FAST_OMEGA` (150) it still reads low, by design (see the constant).
+    #[test]
+    fn tracker_follows_speed_well_above_the_floor() {
+        let map = HallMap {
+            offset: 0.0,
+            dir: 1.0,
+            hyst: 0.0,
+            widths: EVEN,
+        };
+        for &w in &[50.0f32, 100.0, 200.0, 300.0, 600.0, 1200.0, -300.0] {
+            let mut tr = HallTracker::new(map, 0.0);
+            let dt = 1e-4;
+            let mut theta = 0.3f32;
+            let (mut om, mut worst) = (0.0f32, 0.0f32);
+            for k in 0..20_000 {
+                theta += w * dt;
+                let (a, o) = tr.update(ideal(theta), 0.0, dt).unwrap();
+                om = o;
+                if k > 10_000 {
+                    worst = worst.max(wrap_angle(a - wrap_angle(theta)).abs());
+                }
+            }
+            assert!((om - w).abs() < 0.05 * w.abs(), "{w}: omega {om}");
+            // An edge shows at the next sample: one sample of travel, plus
+            // a little.
+            let lim = (w.abs() * dt).to_degrees() + 2.0;
+            assert!(
+                worst.to_degrees() < lim,
+                "{w}: angle off {} deg",
+                worst.to_degrees()
+            );
+        }
+    }
+
+    /// A skipped state then a real edge one sample later: the tracker must
+    /// not read that sample as a sector's worth of travel.
+    #[test]
+    fn tracker_skip_before_an_edge_stays_bounded() {
+        let map = HallMap {
+            offset: 0.0,
+            dir: 1.0,
+            hyst: 0.0,
+            widths: EVEN,
+        };
+        let mut tr = HallTracker::new(map, 0.0);
+        let dt = 1e-4;
+        let per = ((PI / 3.0) / 5.0 / dt) as usize;
+        for &s in &SEQUENCE[..3] {
+            for _ in 0..per {
+                tr.update(s, 0.0, dt);
+            }
+        }
+        tr.update(SEQUENCE[4], 0.0, dt);
+        tr.update(SEQUENCE[2], 0.0, dt);
+        let (_, o) = tr.update(SEQUENCE[3], 0.0, dt).unwrap();
+        assert!(o.abs() < 60.0, "kick {o}");
     }
 }
