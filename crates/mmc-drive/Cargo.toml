@@ -22,6 +22,10 @@ estim = []
 cogging = []
 # HallPosition drive: trapezoidal reference, position PID, hall tracker.
 hall-pos = []
+# Diagnostic, off by default: in the hall modes, run the HFI tracker in
+# shadow (`hfi_v` > 0) and score it against the halls on `theta_err`.
+# ~1 160 cycles a tick on the F302.
+hfi-shadow = []
 # The serial host link as async loops over embedded-io-async, shared by
 # every board crate, so the firmware glue is two lines per task.
 link = ["dep:embedded-io-async", "dep:embassy-sync", "dep:embassy-time", "dep:embassy-futures"]

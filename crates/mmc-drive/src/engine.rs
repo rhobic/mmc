@@ -1127,7 +1127,8 @@ impl Engine {
             // High-frequency injection: track the rotor's axis from its
             // saliency, the carrier riding on whatever the mode applied. In
             // the hall modes this is a shadow, scored at hall edges.
-            let hfi_mode = matches!(self.mode, mode::HALL_FOC | mode::HALL_POS)
+            let hfi_mode = (cfg!(feature = "hfi-shadow")
+                && matches!(self.mode, mode::HALL_FOC | mode::HALL_POS))
                 || (self.mode == mode::SENSORLESS && self.hfi_start.is_some());
             if let Some(tr) = self.hfi.as_mut().filter(|_| hfi_mode) {
                 let (th, w) = tr.update(i_ab, dt);
@@ -1776,8 +1777,14 @@ impl Engine {
                 .seq
                 .as_ref()
                 .is_some_and(|q| q.phase() != Phase::Closed);
-        let hfi_on =
-            p(param::HFI_V) > 0.0 && (matches!(mode, mode::HALL_FOC | mode::HALL_POS) || sl_hfi);
+        // The hall-mode shadow (HFI scored against the halls) is a
+        // diagnostic, built only with `hfi-shadow`: with HFI the sensorless
+        // default it otherwise ran in every hall FOC drive, ~1 160 cycles a
+        // tick on the F302, and with the estimator and cogging built in it
+        // overran the interrupt (session 43).
+        let shadow =
+            cfg!(feature = "hfi-shadow") && matches!(mode, mode::HALL_FOC | mode::HALL_POS);
+        let hfi_on = p(param::HFI_V) > 0.0 && (shadow || sl_hfi);
         self.hfi = hfi_on.then(|| {
             HfiTracker::new(
                 p(param::HFI_V_HI).max(p(param::HFI_V)),

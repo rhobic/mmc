@@ -84,3 +84,14 @@ jobs:
       # The integer-HFI variant (feature fixq); keep it linking.
       - run: cargo build --release --features fixq
         working-directory: crates/mmc-fw-f302
+
+  # The H743 skeleton (Cortex-M7): the full application must keep building
+  # for it; its size is printed under the same rule as the other boards.
+  firmware-h743:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - run: cargo build --release
+        working-directory: crates/mmc-fw-h743
+      - run: tools/fw_size.sh crates/mmc-fw-h743 2048

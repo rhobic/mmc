@@ -53,7 +53,7 @@ differencing cancels.
 |---|---|
 | Standstill sweep: 24 test angles, response demodulated and accumulated on the device | `RunTest HFI_SWEEP` (`mmc_core::hfi`), `mmc-host hfi`, `tools/hfi_fit.py` |
 | Real-time tracker | `mmc_core::hfi::Tracker`; params `hfi_v` (carrier [V], 0 = off), `hfi_bw` [rad/s], `hfi_xi` |
-| Shadow under hall FOC, scored at hall edges | `hfi_v` > 0 in hall FOC: tracker angle on `theta_est`, its error at the last hall edge on `theta_err`, d response on `hfi_d` (channel 28) |
+| Shadow under hall FOC, scored at hall edges | cargo feature `hfi-shadow` (off by default since session 43; ~1 160 cycles a tick on the F302) and `hfi_v` > 0 in hall FOC: tracker angle on `theta_est`, its error at the last hall edge on `theta_err`, d response on `hfi_d` (channel 28) |
 | Sensorless start from standstill | `hfi_v` > 0 in sensorless mode: lock (0.3 s), polarity (`hfi_pol_n` × ±0.6 A pulse pairs of `hfi_pol_s` each, default 8 × 6 ms), run on the tracker, hand over to the flux observer at `sl_handoff` |
 | HFI speed gains | `hfi_kp`/`hfi_ki` while on the tracker (0 = `speed_kp`/`speed_ki`), back to the shared gains at the handover (motor 3: 8× the shared, persisted on bench 2) |
 | Cross-saturation correction | `hfi_xsat` [rad el/A]: the drive's angle is the tracker's + `hfi_xsat`·i_q (motor 3: 0.44, persisted on bench 2) |

@@ -1,0 +1,10 @@
+mode,isr_max_cycles,states
+hfi20,5758,0 6
+obs600,5112,0 6 1
+hallfoc100,1516,0 1 0
+sixhall,3098,0 1
+sixforced,2682,0 1
+sixcl,1363,0 6 2
+hallfoc100_cogff,1404,0 1 0
+hallfoc100_noshadow,6012,0 1
+hallfoc100_cogff_noshadow,6298,0 1

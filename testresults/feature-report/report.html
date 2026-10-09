@@ -1,0 +1,396 @@
+<title>mmc Footprint Report</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column (~74ch) for prose; charts and tables run the
+   full content width (max 1080px). Board summary leads, then cost by
+   feature, cost by mode, what was done, the H743 test, method. */
+:root {
+  --bg: #f6f7f6;
+  --surface: #fcfcfb;
+  --ink: #15191a;
+  --ink-2: #4a5254;
+  --ink-3: #7a8386;
+  --rule: #dfe3e2;
+  --grid: #e9ecea;
+  --accent: #9a4a26;          /* copper: board traces */
+  --accent-soft: #f3e6df;
+  --s1: #2a78d6;              /* F302 / shipped build */
+  --s2: #eb6834;              /* G474 / all-features build */
+  --s3: #1baf7a;              /* H743 */
+  --good: #0ca30c;
+  --warn: #fab219;
+  --crit: #d03b3b;
+  --display: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "Source Sans 3", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121514; --surface: #1a1a19; --ink: #f2f4f3; --ink-2: #c3c8c6; --ink-3: #8d9593;
+    --rule: #2e3332; --grid: #252928; --accent: #e08a5f; --accent-soft: #2c211c;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121514; --surface: #1a1a19; --ink: #f2f4f3; --ink-2: #c3c8c6; --ink-3: #8d9593;
+  --rule: #2e3332; --grid: #252928; --accent: #e08a5f; --accent-soft: #2c211c;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 16px/1.55 var(--body); padding-inline: 16px; padding-block: 28px 64px; }
+.wrap { max-width: 1080px; margin: 0 auto; display: grid; gap: 44px; }
+header { display: grid; gap: 10px; }
+.eyebrow { font: 600 12px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h1 { font: 700 clamp(30px, 5vw, 44px)/1.05 var(--display); margin: 0; text-wrap: balance; letter-spacing: -.01em; }
+h2 { font: 600 26px/1.15 var(--display); margin: 0; text-wrap: balance; }
+h3 { font: 600 18px/1.2 var(--display); margin: 0; letter-spacing: .01em; }
+p { margin: 0; max-width: 74ch; }
+.lede { color: var(--ink-2); font-size: 17px; max-width: 74ch; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 18px; font: 13px/1.4 var(--mono); color: var(--ink-3); }
+section { display: grid; gap: 16px; min-width: 0; }
+.prose { display: grid; gap: 10px; }
+.num, td.n, th.n { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font: 600 12px/1.3 var(--body); color: var(--ink-3); text-transform: uppercase; letter-spacing: .05em; background: var(--surface); }
+td.n, th.n { text-align: right; white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td .sub { display: block; color: var(--ink-3); font-size: 12.5px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font: 600 11px/1 var(--mono); letter-spacing: .04em; padding: 4px 7px; border-radius: 3px; border: 1px solid var(--rule); color: var(--ink-2); white-space: nowrap; }
+.chip i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.meter { display: grid; gap: 4px; min-width: 132px; }
+.meter .bar { height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; }
+.meter .bar span { display: block; height: 100%; border-radius: 3px; }
+.meter .lbl { display: flex; justify-content: space-between; gap: 8px; font: 12px/1.2 var(--mono); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.est { font: 600 10px/1 var(--mono); color: var(--accent); letter-spacing: .06em; text-transform: uppercase; }
+.figure { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 18px 18px 12px; display: grid; gap: 12px; min-width: 0; }
+.figure svg { width: 100%; height: auto; display: block; overflow: visible; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13.5px; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: 7px; }
+.legend i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+.caption { font-size: 13.5px; color: var(--ink-3); max-width: 90ch; }
+.axis text, .lab, .val { font-family: var(--mono); font-size: 11.5px; fill: var(--ink-2); }
+.cat { font-family: var(--body); font-size: 13px; fill: var(--ink); }
+.cat.sub { fill: var(--ink-3); font-size: 11.5px; }
+.gridline { stroke: var(--grid); stroke-width: 1; }
+.budget { stroke: var(--crit); stroke-width: 1.5; }
+.budget-lab { font-family: var(--mono); font-size: 11px; fill: var(--crit); }
+.toggle { display: flex; gap: 8px; }
+.toggle button { font: 600 12.5px/1 var(--body); padding: 7px 11px; border-radius: 4px; border: 1px solid var(--rule); background: var(--surface); color: var(--ink-2); cursor: pointer; }
+.toggle button[aria-pressed="true"] { border-color: var(--ink-2); color: var(--ink); }
+.toggle button:focus-visible, .tablewrap:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; display: grid; gap: 10px; align-content: start; min-width: 0; }
+.card ul { margin: 0; padding-left: 18px; display: grid; gap: 7px; font-size: 14.5px; }
+.card li strong { font-weight: 600; }
+.finding { border-left: 3px solid var(--accent); padding: 4px 0 4px 14px; display: grid; gap: 4px; }
+.finding h3 { font-size: 17px; }
+.finding p { font-size: 15px; color: var(--ink-2); }
+.tip { position: fixed; pointer-events: none; background: var(--ink); color: var(--bg); font: 12.5px/1.35 var(--mono); padding: 7px 9px; border-radius: 4px; max-width: 280px; z-index: 5; }
+code { font: 13.5px var(--mono); background: var(--accent-soft); padding: 1px 4px; border-radius: 3px; }
+@media (max-width: 520px) { th, td { padding: 8px 9px; } body { font-size: 15.5px; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">mmc · measurement report · 2026-10-09</div>
+  <h1>mmc Footprint Report</h1>
+  <p class="lede">How much flash, RAM and control-interrupt time each drive feature costs, on the boards we have (STM32F302, STM32G474, STM32G0B1) and on an STM32H743 build test, and how much is left on each.</p>
+  <div class="meta"><span>F302 fw 32 · G474 fw 37 · nvparam v16</span><span>rustc 1.99.0 · opt-level 2 · fat LTO · 1 codegen unit</span><span>motor 3 (maxon EC-i 40) · 18 V bus</span></div>
+</header>
+
+<section aria-labelledby="s-boards">
+  <h2 id="s-boards">Boards at a glance</h2>
+  <p>Each row is a board with the feature set it actually builds. Flash and RAM are measured from the linked image. Interrupt time is the worst steady-state control tick: measured on the F302, estimated for the G474 and H743 from the F302 cycle counts, and emulated for the Cortex-M0+.</p>
+  <div class="tablewrap" tabindex="0">
+  <table>
+    <thead><tr><th>Board</th><th>Builds</th><th>Flash</th><th>Static RAM</th><th>Control tick (worst)</th></tr></thead>
+    <tbody id="board-rows"></tbody>
+  </table>
+  </div>
+  <p class="caption">Meters turn amber above 70 % and red above 90 %. Flash on the F302 is 62 KB because the last 2 KB page holds the parameter table; CI fails a build with less than 2 KB free. RAM is static data and BSS; the remainder is stack.</p>
+</section>
+
+<section aria-labelledby="s-mem">
+  <h2 id="s-mem">What each feature costs in flash</h2>
+  <p>Every subsystem is a cargo build option of <code>mmc-drive</code> (session 42). The base build, with none of them, already carries FOC, the flux observer and sensorless start, HFI, hall FOC, the R/L probe and the host link: 48.5 KB on the F302, 47.7 KB on the G474, 52.0 KB on the H743. The bars are each feature's addition to that base.</p>
+  <div class="figure">
+    <div class="legend" aria-hidden="true"><span><i style="background:var(--s1)"></i>F302 (Cortex-M4F)</span><span><i style="background:var(--s2)"></i>G474 (Cortex-M4F)</span><span><i style="background:var(--s3)"></i>H743 (Cortex-M7)</span></div>
+    <div id="chart-mem" role="img" aria-label="Flash added by each feature on F302, G474 and H743, in kilobytes"></div>
+    <p class="caption">Flash added over the no-feature build, KB. The compiler re-inlines differently with each set, so single-feature deltas carry about a kilobyte of noise (hall-pos on the H743 measured −0.2 KB), and they do not add up exactly: the singles sum to 13.3 KB on the F302 (full set +13.4 KB), 11.6 KB on the G474 (+12.3 KB) and 9.3 KB on the H743 (+11.9 KB). <code>fixq</code> is the integer HFI path, built alongside the float one. No feature changes static RAM except <code>fixq</code> (+336 to +344 B of state).</p>
+  </div>
+  <div class="tablewrap" tabindex="0">
+  <table>
+    <thead><tr><th>Build</th><th class="n">F302</th><th class="n">G474</th><th class="n">H743</th></tr></thead>
+    <tbody id="mem-rows"></tbody>
+  </table>
+  </div>
+</section>
+
+<section aria-labelledby="s-isr">
+  <h2 id="s-isr">What each mode costs in interrupt time</h2>
+  <p>Measured on the F302 at 72 MHz, where a 10 kHz control tick has 7,200 cycles. Each figure is the worst tick over about 3.5 s of steady running in that mode, read from the firmware's own cycle counter without stopping the core. The shipped build has hall position but no six-step, estimator or cogging feed-forward; the all-features build adds those three.</p>
+  <div class="toggle" role="group" aria-label="Show">
+    <button type="button" id="t-chart" aria-pressed="true">Chart</button>
+    <button type="button" id="t-table" aria-pressed="false">Table</button>
+  </div>
+  <div class="figure" id="isr-figure">
+    <div class="legend" aria-hidden="true"><span><i style="background:var(--s1)"></i>Shipped F302 build</span><span><i style="background:var(--s2)"></i>All-features F302 build</span></div>
+    <div id="chart-isr" role="img" aria-label="Worst control-tick cycles per drive mode on the F302, against the 7,200-cycle budget"></div>
+    <p class="caption">Hall FOC with the estimator, cogging identification and the HFI shadow together exceeded the budget: the serial link starved and the drive's 2 s host watchdog turned it off. That is why the shadow is now an opt-in build feature.</p>
+  </div>
+  <div class="tablewrap" id="isr-table" tabindex="0" hidden>
+  <table>
+    <thead><tr><th>Mode</th><th>Build</th><th class="n">Cycles</th><th class="n">of 7,200</th></tr></thead>
+    <tbody id="isr-rows"></tbody>
+  </table>
+  </div>
+  <div class="tablewrap" tabindex="0">
+  <table>
+    <thead><tr><th>Feature</th><th>Where it runs</th><th class="n">Added cycles a tick</th></tr></thead>
+    <tbody>
+      <tr><td>HFI shadow (<code>hfi-shadow</code>)</td><td>hall FOC and hall position, when <code>hfi_v</code> &gt; 0</td><td class="n">+1,160</td></tr>
+      <tr><td>Estimator + cogging identification</td><td>hall FOC (both run)</td><td class="n">+2,150</td></tr>
+      <tr><td>Estimator + cogging identification</td><td>sensorless on the observer, 600 rad/s el</td><td class="n">+1,030</td></tr>
+      <tr><td>Estimator + cogging identification</td><td>sensorless on HFI, 20 rad/s el</td><td class="n">+530</td></tr>
+      <tr><td>Cogging feed-forward on (<code>cog_ff</code> 1)</td><td>hall FOC</td><td class="n">+290</td></tr>
+      <tr><td>Integer HFI step (<code>fixq</code>)</td><td>replaces the float HFI path</td><td class="n">1,508 for the step<span class="sub">whole tick 5,643 (session 40)</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="caption">Sensorless six-step from rest tripped overcurrent on motor 3 at this bus voltage, so it has no figure here. Forced and hall six-step are the cheapest closed modes (2,682 and 3,098 cycles) because they skip the current loop and modulation.</p>
+</section>
+
+<section aria-labelledby="s-opt">
+  <h2 id="s-opt">Optimizations</h2>
+  <div class="cols">
+    <div class="card">
+      <h3>In place</h3>
+      <ul>
+        <li><strong>Per-board feature sets.</strong> The F302 builds the link and hall position only: 49.5 KB, 14.0 KB free (was 1.8 KB, under the CI floor).</li>
+        <li><strong>HFI shadow made opt-in.</strong> Hall FOC on the F302 went from 5,016 to 3,861 cycles a tick.</li>
+        <li><strong>opt-level 2, fat LTO, one codegen unit</strong> for everything the control interrupt reaches; <code>"s"</code> for boot, executor, link and protocol code on the F302 (session 38).</li>
+        <li><strong>Hardware square root, nibble-table CRCs, 32-bit telemetry period</strong> (session 38): about 3.1 KB off the F302 image.</li>
+        <li><strong>Out-of-line rarely run HFI code</strong> (<code>Tracker::update</code>, the observer hand-back): about 280 B (session 41).</li>
+        <li><strong>Pinned compiler</strong> (rustc 1.99.0) and a CI size check per board, so a toolchain update cannot silently cost flash.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Tried and rejected</h3>
+      <ul>
+        <li><strong>Whole F302 image at opt-level "s".</strong> Saves 9.2 KB, but HFI at 20 rad/s el then takes 7,231 cycles, over the 7,200 budget.</li>
+        <li><strong><code>mmc-core</code> alone at "s".</strong> Gains 0.3 KB; not worth a slower <code>Foc::step</code>.</li>
+        <li><strong>Moving the HFI amplitude schedule out of line.</strong> Cost 72 B more than leaving it inline.</li>
+        <li><strong>Removing the friction feed-forward alone.</strong> 72 B; not worth a parameter change.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="s-find">
+  <h2 id="s-find">Found while measuring</h2>
+  <div class="finding"><h3>The quiet HFI default switched on the shadow in every hall FOC drive</h3><p>Session 42 made <code>hfi_v</code> 0.3 the saved default for sensorless starts. HFI also ran in shadow under hall FOC whenever <code>hfi_v</code> was above zero, costing 1,160 cycles a tick, and in an all-features build it overran the interrupt. The shadow is now the opt-in build feature <code>hfi-shadow</code>, and <code>hfi_v</code> only controls the sensorless start.</p></div>
+  <div class="finding"><h3>Reading memory with probe-rs pauses the core</h3><p>The first profiling pass cleared and read the cycle counter with <code>probe-rs read/write</code>. With the bridge switching at 600 rad/s el, that momentary halt froze the PWM and tripped the overcurrent limit. The profiler now uses OpenOCD's memory access port, which does not halt; every run in the final pass stayed healthy. Earlier sessions' "while running" reads used probe-rs at low speed only.</p></div>
+  <div class="finding"><h3>All features plus <code>fixq</code> does not fit the F302</h3><p>The full set is 61.9 KB, 1.6 KB free and under the 2 KB CI floor; adding the integer HFI path overflows the 62 KB region. The shipped set plus <code>fixq</code> fits (56.2 KB).</p></div>
+</section>
+
+<section aria-labelledby="s-h7">
+  <h2 id="s-h7">STM32H743 build test</h2>
+  <div class="prose">
+    <p>A new crate, <code>mmc-fw-h743</code>, builds the full application for an STM32H743ZI (Nucleo-H743ZI: Cortex-M7 at 480 MHz, 2 MB flash, 1 MB RAM) with embassy-stm32: every drive feature, the host link on USART3 with DMA, the 480 MHz clock tree, and the full 32 KB saliency-sweep buffer the F302 cannot hold. The power stage is a stub. Currents read zero, duties are dropped, the tick runs from an executor ticker rather than an ADC interrupt, and parameters live in RAM. It shows what the application costs on the part, and it is the starting point for a real port.</p>
+  </div>
+  <div class="tablewrap" tabindex="0">
+  <table>
+    <thead><tr><th>Measure</th><th class="n">H743</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>Flash, all features</td><td class="n">63,928 B</td><td>3.0 % of 2 MB; same Thumb-2 code as the M4 boards, plus the larger H7 vector table and HAL</td></tr>
+      <tr><td>Flash, all features + <code>fixq</code></td><td class="n">71,824 B</td><td>3.4 %</td></tr>
+      <tr><td>Static RAM</td><td class="n">38,412 B</td><td>7.3 % of the 512 KB AXI SRAM the default memory map uses; DTCM, ITCM and SRAM1–4 are untouched</td></tr>
+      <tr><td>Control tick, estimated</td><td class="n">3.5–5.0 k cycles</td><td>F302 worst case (6,298, all features) × 0.55–0.8 for the M7's dual issue and branch prediction, running from cache</td></tr>
+      <tr><td>Share of a 20 kHz tick</td><td class="n">15–21 %</td><td>24,000 cycles at 480 MHz; a 50 kHz loop would still sit near 40–50 %</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="cols">
+    <div class="card">
+      <h3>What a real H7 port needs</h3>
+      <ul>
+        <li>TIM1 (or HRTIM) centre-aligned PWM with dead time and break, triggering injected conversions on ADC1/2; <code>Engine::tick</code> in that interrupt.</li>
+        <li>A flash parameter store: the H7 erases 128 KB sectors, so the table needs a sector of its own, or the backup SRAM.</li>
+        <li>Cache care: DMA buffers (serial ring, burst) in non-cacheable RAM or with cache maintenance; the tick and its data in ITCM/DTCM for deterministic timing.</li>
+        <li>A <code>DeviceKind</code> for the protocol (the skeleton reports <code>Unknown(4)</code>).</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>What the headroom would buy</h3>
+      <ul>
+        <li>A faster loop, with a higher HFI carrier as a result: at 40 kHz control the <code>++−−</code> carrier sits at 10 kHz, past most of the whine motor 3 makes at 2.5 kHz.</li>
+        <li>Every feature at once, with the HFI shadow, the estimator and cogging FF together and room left over.</li>
+        <li>Double precision for the estimator and the online fits, if wanted (the M7's FPU has it; the M4F's does not).</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section aria-labelledby="s-method">
+  <h2 id="s-method">How these numbers were taken</h2>
+  <div class="cols">
+    <div class="card">
+      <h3>Memory</h3>
+      <ul>
+        <li><code>tools/feature_sizes.sh &lt;crate&gt;</code> builds each feature set and reads sections with <code>llvm-size</code>; flash is the programmed binary (<code>.data</code> initial values included).</li>
+        <li>The firmware crates pass every feature through, so <code>--no-default-features --features …</code> builds any set.</li>
+        <li>G0B1: protocol-only firmware (no inverter), 14,920 B flash, 2,312 B RAM.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Interrupt time</h3>
+      <ul>
+        <li>F302: <code>tools/isr_profile.sh</code> starts a drive, clears <code>isr_max_cycles</code> after it settles, and reads it 3.5 s later through OpenOCD without halting. Each row also records the drive's state sequence, so a faulted run shows as one.</li>
+        <li>G474: same Cortex-M4 code as the F302, so the F302 cycle counts are used, against its 8,500-cycle budget (170 MHz, 20 kHz). Not measured: the G474 bench is not connected.</li>
+        <li>H743: the M4 cycle counts scaled by 0.55–0.8 for the M7. An assumption, to be replaced by a measurement on hardware.</li>
+        <li>Cortex-M0+: the integer HFI step run in an instruction emulator with M0+ cycle costs (<code>tools/m0_cycles.py</code>, session 40).</li>
+      </ul>
+    </div>
+  </div>
+</section>
+</div>
+<div class="tip" id="tip" hidden></div>
+
+<script>
+(function () {
+  const KB = 1024;
+  // ---- boards (flash/RAM from the linked images; tick = worst steady tick)
+  const boards = [
+    { name: "STM32F302R8", core: "Cortex-M4F · 72 MHz", set: "link, hall-pos", flash: 49472, flashCap: 63488, ram: 12844, ramCap: 16384,
+      tick: 5230, budget: 7200, rate: "10 kHz", kind: "measured", tickNote: "HFI at 20 rad/s el" },
+    { name: "STM32F302R8", core: "Cortex-M4F · 72 MHz", set: "all features", flash: 61920, flashCap: 63488, ram: 12844, ramCap: 16384,
+      tick: 6298, budget: 7200, rate: "10 kHz", kind: "measured", tickNote: "hall FOC + estimator + cogging FF" },
+    { name: "STM32G474RE", core: "Cortex-M4F · 170 MHz", set: "all features", flash: 60008, flashCap: 524288, ram: 37124, ramCap: 131072,
+      tick: 6298, budget: 8500, rate: "20 kHz", kind: "estimate", tickNote: "F302 cycle counts" },
+    { name: "STM32H743ZI", core: "Cortex-M7 · 480 MHz", set: "all features (skeleton)", flash: 63928, flashCap: 2097152, ram: 38412, ramCap: 524288,
+      tick: 5000, tickLo: 3500, budget: 24000, rate: "20 kHz", kind: "estimate", tickNote: "F302 counts × 0.55–0.8" },
+    { name: "STM32G0B1RE", core: "Cortex-M0+ · 64 MHz", set: "protocol only; integer HFI step", flash: 14920, flashCap: 524288, ram: 2312, ramCap: 147456,
+      tick: 3617, tickLo: 1881, budget: 6400, rate: "10 kHz", kind: "emulated", tickNote: "integer HFI step, RAM to 2-WS flash" },
+  ];
+  const fmt = n => n.toLocaleString("en-US");
+  const level = p => p > 0.9 ? "var(--crit)" : p > 0.7 ? "var(--warn)" : "var(--good)";
+  const meter = (used, cap, label, lo) => {
+    const p = used / cap, pl = lo ? lo / cap : null;
+    const shown = pl != null ? `${Math.round(pl * 100)}–${Math.round(p * 100)} %` : `${(p * 100).toFixed(p < 0.1 ? 1 : 0)} %`;
+    return `<div class="meter"><div class="lbl"><span>${label}</span><span>${shown}</span></div>` +
+      `<div class="bar"><span style="width:${Math.max(1, Math.min(100, p * 100))}%;background:${level(p)}"></span></div></div>`;
+  };
+  document.getElementById("board-rows").innerHTML = boards.map(b => `
+    <tr>
+      <td><strong>${b.name}</strong><span class="sub">${b.core}</span></td>
+      <td>${b.set}</td>
+      <td>${meter(b.flash, b.flashCap, `${(b.flash / KB).toFixed(1)} / ${fmt(Math.round(b.flashCap / KB))} KB`)}<span class="sub">${fmt(b.flashCap - b.flash)} B free</span></td>
+      <td>${meter(b.ram, b.ramCap, `${(b.ram / KB).toFixed(1)} / ${fmt(Math.round(b.ramCap / KB))} KB`)}<span class="sub">${fmt(b.ramCap - b.ram)} B for stack</span></td>
+      <td>${meter(b.tick, b.budget, `${b.tickLo ? fmt(b.tickLo) + "–" : ""}${fmt(b.tick)} / ${fmt(b.budget)}`, b.tickLo)}<span class="sub">${b.rate} · ${b.tickNote} ${b.kind !== "measured" ? `<span class="est">${b.kind}</span>` : ""}</span></td>
+    </tr>`).join("");
+
+  // ---- feature flash cost (bytes over the no-feature build)
+  const feats = [
+    { key: "sixstep", label: "sixstep", sub: "forced, hall, sensorless six-step", v: [5168, 4712, 3760] },
+    { key: "cogging", label: "cogging", sub: "cogging FF + identification", v: [5728, 4544, 4200] },
+    { key: "estim", label: "estim", sub: "online R/ψ + i_d dither", v: [1480, 1400, 1600] },
+    { key: "hall-pos", label: "hall-pos", sub: "hall position mode", v: [952, 896, -232] },
+    { key: "fixq", label: "fixq", sub: "integer HFI path", v: [6760, 7664, 7896] },
+  ];
+  const series = [{ name: "F302", c: "var(--s1)" }, { name: "G474", c: "var(--s2)" }, { name: "H743", c: "var(--s3)" }];
+  const memRows = [
+    ["No features (base)", 48520, 47720, 51992],
+    ["Shipped set", 49472, 60008, 63928],
+    ["All features", 61920, 60008, 63928],
+    ["All features + fixq", null, 67672, 71824],
+  ];
+  document.getElementById("mem-rows").innerHTML =
+    memRows.map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(v => `<td class="n">${v == null ? "does not fit" : fmt(v) + " B"}</td>`).join("")}</tr>`).join("") +
+    feats.map(f => `<tr><td>+ ${f.label}<span class="sub">${f.sub}</span></td>${f.v.map(v => `<td class="n">${v >= 0 ? "+" : "−"}${fmt(Math.abs(v))} B</td>`).join("")}</tr>`).join("");
+
+  const tip = document.getElementById("tip");
+  const showTip = (e, html) => { tip.innerHTML = html; tip.hidden = false; const x = Math.min(e.clientX + 14, window.innerWidth - 290); tip.style.left = x + "px"; tip.style.top = (e.clientY + 14) + "px"; };
+  const hideTip = () => { tip.hidden = true; };
+
+  function barChart(el, rows, opts) {
+    const W = 760, labW = opts.labW, padR = 64, rowH = opts.rowH, barH = opts.barH, gap = 2;
+    const top = 8, axisH = 24;
+    const H = top + rows.length * rowH + axisH;
+    const max = opts.max, x = v => labW + (Math.max(0, v) / max) * (W - labW - padR);
+    let s = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
+    for (const t of opts.ticks) {
+      s += `<line class="gridline" x1="${x(t)}" x2="${x(t)}" y1="${top}" y2="${H - axisH + 4}"/>`;
+      s += `<g class="axis"><text x="${x(t)}" y="${H - 6}" text-anchor="middle">${opts.tickFmt(t)}</text></g>`;
+    }
+    rows.forEach((r, i) => {
+      const y0 = top + i * rowH;
+      s += `<text class="cat" x="0" y="${y0 + rowH / 2 - (r.sub ? 4 : -4)}">${r.label}</text>`;
+      if (r.sub) s += `<text class="cat sub" x="0" y="${y0 + rowH / 2 + 11}">${r.sub}</text>`;
+      const n = r.bars.length, block = n * barH + (n - 1) * gap, by = y0 + (rowH - block) / 2;
+      r.bars.forEach((b, j) => {
+        const y = by + j * (barH + gap), x0 = x(0), x1 = x(b.v), w = Math.max(x1 - x0, 1.5), rad = Math.min(4, w / 2);
+        const d = `M${x0},${y} H${x0 + w - rad} Q${x0 + w},${y} ${x0 + w},${y + rad} V${y + barH - rad} Q${x0 + w},${y + barH} ${x0 + w - rad},${y + barH} H${x0} Z`;
+        s += `<path d="${d}" fill="${b.c}" data-tip="${b.tip}"/>`;
+        s += `<rect x="${labW}" y="${y - 1}" width="${W - labW}" height="${barH + 2}" fill="transparent" data-tip="${b.tip}"/>`;
+        s += `<text class="val" x="${x0 + w + 6}" y="${y + barH / 2 + 4}">${b.lab}</text>`;
+      });
+    });
+    if (opts.budget) {
+      const bx = x(opts.budget);
+      s += `<line class="budget" x1="${bx}" x2="${bx}" y1="${top - 4}" y2="${H - axisH + 4}"/>`;
+      s += `<text class="budget-lab" x="${bx - 4}" y="${top + 6}" text-anchor="end">budget ${fmt(opts.budget)}</text>`;
+    }
+    s += `</svg>`;
+    el.innerHTML = s;
+    el.querySelectorAll("[data-tip]").forEach(n => {
+      n.addEventListener("mousemove", e => showTip(e, n.getAttribute("data-tip")));
+      n.addEventListener("mouseleave", hideTip);
+    });
+  }
+
+  barChart(document.getElementById("chart-mem"),
+    feats.map(f => ({
+      label: f.label, sub: f.sub,
+      bars: f.v.map((v, j) => ({ v, c: series[j].c, lab: v < 300 ? "≈0" : (v / KB).toFixed(1),
+        tip: `${f.label} on ${series[j].name}: ${v >= 0 ? "+" : "−"}${fmt(Math.abs(v))} B` }))
+    })),
+    { labW: 230, rowH: 64, barH: 14, max: 8 * KB, ticks: [0, 2, 4, 6, 8].map(k => k * KB), tickFmt: t => `${t / KB} KB` });
+
+  // ---- ISR per mode (F302, worst steady tick)
+  const isr = [
+    { label: "Idle (drive off)", v: 1106, b: 0 },
+    { label: "Forced six-step", v: 2682, b: 1 },
+    { label: "Hall six-step", v: 3098, b: 1 },
+    { label: "I-f, 100 rad/s el", v: 3734, b: 0 },
+    { label: "Hall FOC, 100 rad/s el", v: 3861, b: 0 },
+    { label: "Hall position", v: 3953, b: 0 },
+    { label: "Observer FOC, 600", v: 4081, b: 0 },
+    { label: "Observer FOC, 1000", v: 4085, b: 0 },
+    { label: "HFI hold, 0 rad/s el", v: 4685, b: 0 },
+    { label: "Hall FOC + HFI shadow", v: 5016, b: 0 },
+    { label: "Observer FOC, 600", v: 5112, b: 1 },
+    { label: "HFI, 20 rad/s el", v: 5230, b: 0 },
+    { label: "HFI, 20 rad/s el", v: 5758, b: 1 },
+    { label: "Hall FOC, 100 rad/s el", v: 6012, b: 1 },
+    { label: "Hall FOC + cogging FF", v: 6298, b: 1 },
+  ];
+  const buildName = ["shipped", "all features"], buildC = ["var(--s1)", "var(--s2)"];
+  barChart(document.getElementById("chart-isr"),
+    isr.map(r => ({ label: r.label, bars: [{ v: r.v, c: buildC[r.b], lab: fmt(r.v),
+      tip: `${r.label}, ${buildName[r.b]} build: ${fmt(r.v)} cycles (${Math.round(r.v / 72)} µs, ${Math.round(r.v / 72)} % of 100 µs)` }] })),
+    { labW: 200, rowH: 26, barH: 14, max: 8000, ticks: [0, 2000, 4000, 6000, 8000], tickFmt: t => fmt(t), budget: 7200 });
+  document.getElementById("isr-rows").innerHTML = isr.map(r =>
+    `<tr><td>${r.label}</td><td>${buildName[r.b]}</td><td class="n">${fmt(r.v)}</td><td class="n">${Math.round(r.v / 72)} %</td></tr>`).join("");
+
+  const tc = document.getElementById("t-chart"), tt = document.getElementById("t-table");
+  const fig = document.getElementById("isr-figure"), tab = document.getElementById("isr-table");
+  const set = showTable => { fig.hidden = showTable; tab.hidden = !showTable; tc.setAttribute("aria-pressed", String(!showTable)); tt.setAttribute("aria-pressed", String(showTable)); };
+  tc.addEventListener("click", () => set(false));
+  tt.addEventListener("click", () => set(true));
+})();
+</script>

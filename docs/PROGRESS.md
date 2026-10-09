@@ -3,6 +3,33 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-09 — session 43: footprint report; H743 build test; HFI shadow opt-in
+
+Report: [mmc Footprint Report](https://claude.ai/artifact/HZRe2D5rGvoNbRqypkjjgJ)
+(source `testresults/feature-report/report.html`, data beside it).
+**F302 fw 33, G474 fw 38** (nvparam v16 unchanged).
+
+- **Memory per feature** (`tools/feature_sizes.sh`; firmware crates now pass
+  every mmc-drive feature through): sixstep +3.8–5.2 KB, cogging +4.2–5.7,
+  estim +1.4–1.6, hall-pos ≈ 0–1, fixq +6.8–7.9. F302 shipped set 49.5 KB
+  (14.0 KB free); all features 61.9 KB (under the 2 KB floor); all + fixq
+  does not fit.
+- **ISR per mode on the F302** (`tools/isr_profile.sh`, 7 200-cycle budget):
+  idle 1 106, I-f 3 734, hall FOC 3 861, hall position 3 953, observer
+  4 081–4 085, HFI hold 4 685, HFI 20 rad/s el 5 230; all-features build:
+  six-step 2 682–3 098, observer 5 112, HFI 5 758, hall FOC 6 012, + cogging
+  FF 6 298.
+- **HFI shadow is now the opt-in feature `hfi-shadow`**: with session 42's
+  quiet-HFI default it ran in every hall FOC drive (+1 160 cycles), and in
+  an all-features build it overran the interrupt (serial starved, the 2 s
+  deadman turned the drive off). Hall FOC 5 016 → 3 861 cycles.
+- **probe-rs memory access halts the core**: at 600 rad/s el the frozen PWM
+  tripped overcurrent. `isr_profile.sh` reads/clears through OpenOCD, which
+  does not halt.
+- **`crates/mmc-fw-h743`**: Nucleo-H743ZI skeleton (480 MHz, all features,
+  USART3 link, stub power stage): 63.9 KB of 2 MB flash, 38.4 KB of 512 KB
+  RAM; tick estimated 3.5–5.0 k of 24 000 cycles at 20 kHz. CI builds it.
+
 ## 2026-10-09 — session 42: the quiet carrier; subsystems as build options
 
 **F302 fw 32, G474 fw 37, nvparam v16** (re-applied and persisted on bench 2).

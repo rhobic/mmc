@@ -10,16 +10,23 @@ description = "STM32F302R8 + L6230 three-shunt shield: the MotorBoard under the 
 [workspace]
 
 [features]
+# Subsystems this bench builds (62 KB of flash): FOC, sensorless + HFI and
+# hall FOC/position. Six-step, the online R/ψ estimator and the cogging
+# feed-forward are left out (session 42); add them to `default` if the bench
+# needs them, then watch tools/fw_size.sh. Each passes through to mmc-drive,
+# so `--no-default-features --features …` builds any set (tools/feature_sizes.sh).
+default = ["hall-pos"]
+sixstep = ["mmc-drive/sixstep"]
+estim = ["mmc-drive/estim"]
+cogging = ["mmc-drive/cogging"]
+hall-pos = ["mmc-drive/hall-pos"]
+hfi-shadow = ["mmc-drive/hfi-shadow"]
 # Run HFI sensorless on the integer path (mmc_core::fixq).
 fixq = ["mmc-drive/fixq"]
 
 [dependencies]
 mmc-core = { path = "../mmc-core" }
-# Subsystems this bench builds (62 KB of flash): FOC, sensorless + HFI and
-# hall FOC/position. Six-step, the online R/ψ estimator and the cogging
-# feed-forward are left out (session 42); add them back here if the bench
-# needs them, then watch tools/fw_size.sh.
-mmc-drive = { path = "../mmc-drive", default-features = false, features = ["link", "hall-pos"] }
+mmc-drive = { path = "../mmc-drive", default-features = false, features = ["link"] }
 mmc-hal = { path = "../mmc-hal" }
 mmc-proto = { path = "../mmc-proto" }
 

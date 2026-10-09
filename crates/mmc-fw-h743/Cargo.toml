@@ -1,17 +1,15 @@
 [package]
-name = "mmc-fw-g474"
+name = "mmc-fw-h743"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "STM32G474RE + STSPIN830 shield: the MotorBoard under the mmc-drive application"
+description = "STM32H743ZI (Cortex-M7, 480 MHz) skeleton: the full mmc-drive application on an H7, power stage not wired yet"
 
 # Detached from the root workspace: always builds for thumbv7em-none-eabihf
 # (see .cargo/config.toml).
 [workspace]
 
 [features]
-# Every subsystem (512 KB of flash). Each passes through to mmc-drive, so
-# `--no-default-features --features …` builds any set (tools/feature_sizes.sh).
 default = ["sixstep", "estim", "cogging", "hall-pos"]
 sixstep = ["mmc-drive/sixstep"]
 estim = ["mmc-drive/estim"]
@@ -22,14 +20,12 @@ fixq = ["mmc-drive/fixq"]
 
 [dependencies]
 mmc-core = { path = "../mmc-core" }
-mmc-drive = { path = "../mmc-drive", default-features = false }
+mmc-drive = { path = "../mmc-drive", default-features = false, features = ["link"] }
 mmc-hal = { path = "../mmc-hal" }
 mmc-proto = { path = "../mmc-proto" }
 
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
-embassy-futures = "0.1.2"
-embassy-stm32 = { version = "0.6.0", features = ["stm32g474re", "memory-x", "rt", "time-driver-any", "unstable-pac", "dual-bank"] }
-embassy-sync = "0.8.0"
+embassy-stm32 = { version = "0.6.0", features = ["stm32h743zi", "memory-x", "rt", "time-driver-any", "unstable-pac"] }
 embassy-time = { version = "0.5.1", features = ["tick-hz-1_000_000"] }
 
 cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
@@ -40,3 +36,4 @@ panic-halt = "1.0.0"
 lto = true
 codegen-units = 1
 opt-level = 2
+debug = 2
