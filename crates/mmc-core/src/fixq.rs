@@ -180,6 +180,7 @@ pub struct FixTracker {
     pub omega_f: i32,
     omega_max_f: i32,
     seq: crate::hfi::CarrierSeq,
+    since: i32,
     c1: i32,
     c2: i32,
     prev: Option<(i32, i32)>,
@@ -202,10 +203,11 @@ impl FixTracker {
         let wf = (1u32 << W_FRAC) as f32;
         Self {
             vh,
-            // θ += 2·kp·err·dt; ω += 2·ki·err·dt (gains doubled: the error
-            // refreshes every other tick).
-            kp: (2.0 * kp * dt * UNITS_PER_RAD * per_lsb) as i32,
-            ki: (2.0 * ki * dt * dt * UNITS_PER_RAD * wf * per_lsb + 0.5) as i32,
+            // θ += n·kp·err·dt; ω += n·ki·err·dt, n the periods since the
+            // error last refreshed (as the float tracker).
+            kp: (kp * dt * UNITS_PER_RAD * per_lsb) as i32,
+            ki: (ki * dt * dt * UNITS_PER_RAD * wf * per_lsb + 0.5) as i32,
+            since: 0,
             theta: 0,
             omega_f: 0,
             omega_max_f: (omega_max * dt * UNITS_PER_RAD * wf).min(i32::MAX as f32 / 2.0) as i32,
@@ -240,8 +242,12 @@ impl FixTracker {
     /// Feed this tick's measured αβ current (Q15).
     pub fn update(&mut self, i_ab: (i32, i32)) {
         let w = (self.c1 + self.c2) / 2;
+        self.since = (self.since + 1).min(4);
+        let mut n = 0;
         match self.prev {
             Some(prev) if w != 0 => {
+                n = self.since;
+                self.since = 0;
                 let (s, c) = sin_cos(self.theta);
                 let (nd, nq) = park(i_ab, s, c);
                 let (bd, bq) = park(prev, s, c);
@@ -259,10 +265,10 @@ impl FixTracker {
                 self.err = 0;
             }
         }
-        self.omega_f = clamp(self.omega_f + self.ki * self.err, self.omega_max_f);
+        self.omega_f = clamp(self.omega_f + n * self.ki * self.err, self.omega_max_f);
         self.theta = self
             .theta
-            .wrapping_add(((self.omega_f >> W_FRAC) + self.kp * self.err) as u32);
+            .wrapping_add(((self.omega_f >> W_FRAC) + n * self.kp * self.err) as u32);
         self.prev = Some(i_ab);
         self.c2 = self.c1;
         self.c1 = self.seq.advance() as i32;

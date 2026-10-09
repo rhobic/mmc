@@ -132,8 +132,10 @@ pub struct Tracker {
     pub d_fresh: Option<f32>,
     /// Last normalised error (≈ 2ξ·(θr − θ̂) when small).
     pub err: f32,
-    /// Carrier spreading ([`Spread`]) and its frame state.
+    /// Carrier spreading ([`CarrierSeq`]) and its frame state.
     seq: CarrierSeq,
+    /// Periods since the error last refreshed.
+    since: u8,
 }
 
 /// Carrier frame sequencer. Fixed (`spread` 0): `++−−` forever, one tone at
@@ -210,6 +212,7 @@ impl Tracker {
             d_fresh: None,
             err: 0.0,
             seq: CarrierSeq::new(0),
+            since: 0,
         }
     }
 
@@ -228,9 +231,14 @@ impl Tracker {
     /// Feed this period's measured current (it answers the carriers of the
     /// previous periods); returns the updated (angle, speed) estimate and
     /// advances the carrier to the one to command now.
+    #[inline(never)]
     pub fn update(&mut self, i_ab: AlphaBeta, dt: f32) -> (f32, f32) {
         let w = 0.5 * (self.c1 + self.c2);
+        self.since = self.since.saturating_add(1);
+        let mut weight = 0.0;
         if let (Some(prev), true) = (self.prev, w != 0.0) {
+            weight = self.since as f32;
+            self.since = 0;
             let sc = sin_cos(self.theta);
             let now = park(i_ab, sc);
             let before = park(prev, sc);
@@ -246,10 +254,12 @@ impl Tracker {
             self.d_fresh = None;
             self.err = 0.0;
         }
-        // The PLL runs every period; the error refreshes every other one, so
-        // its gains (for a per-period error) are doubled.
-        self.omega += 2.0 * self.ki * self.err * dt;
-        self.theta = wrap_angle(self.theta + (self.omega + 2.0 * self.kp * self.err) * dt);
+        // The PLL runs every period; the error refreshes only on some (every
+        // other with the fixed carrier, about two in three spread), so each
+        // refresh stands for the periods since the last one. With `++−−`
+        // that is the doubled gain it always had.
+        self.omega += weight * self.ki * self.err * dt;
+        self.theta = wrap_angle(self.theta + (self.omega + weight * self.kp * self.err) * dt);
         self.prev = Some(i_ab);
         self.c2 = self.c1;
         self.c1 = self.seq.advance() as f32;

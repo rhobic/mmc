@@ -2079,6 +2079,8 @@ impl Engine {
     /// cross-saturation offset the tracker will see at this q current) and
     /// speed, straight into the run phase; the speed loop keeps its
     /// integrator and takes the HFI gains.
+    #[cold]
+    #[inline(never)]
     fn hfi_handback(&mut self, p: &impl Fn(u8) -> f32, theta: f32, omega: f32, iq: f32) {
         let mut tr = HfiTracker::new(
             p(param::HFI_V),

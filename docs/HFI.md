@@ -59,6 +59,8 @@ differencing cancels.
 | Cross-saturation correction | `hfi_xsat` [rad el/A]: the drive's angle is the tracker's + `hfi_xsat`·i_q (motor 3: 0.44, persisted on bench 2) |
 | Lock-up trip | HFI speed loop at ≥ 90 % of `iq_limit` with the tracker under half the reference, net 0.5 s → stall fault |
 | Friction feed-forward | `sl_fric` [A], HFI speed loop only, faded in over ±5 rad/s el (measured no benefit on motor 3; off) |
+| Hand-back | on the observer below 0.6 × `sl_handoff` → HFI run, from the observer's angle and speed |
+| Carrier spreading | `hfi_spread` 0 fixed `++−−` / 1 random frame polarity / 2 random polarity and length |
 
 Firmware: F302 fw 20, G474 fw 25, **nvparam v11** (`hfi_v`, `hfi_bw`,
 `hfi_xi`, ids 48–50). Correction, trip and `sl_fric` (ids 51–52): F302
@@ -233,6 +235,90 @@ With the HFI gains on their own params (8× the shared, persisted) and
 `hfi_xsat` = 0.44, on fw 25: ±5 → 5.2 / −5.0 rad/s el (stick-slip 318° /
 222°), ±10 → 10.0 / −10.1 (283° / 213°), 50 → −50 crossing clean; the
 observer at ±200 unaffected (shared gains).
+
+## Full speed, both ways, and the carrier's whine (session 41)
+
+*F302 fw 26–29, motor 3, 18 V. `testresults/motor3-hfi-deadtime/`,
+`motor3-fullspeed/`, `motor3-hfi-lock/`, `motor3-hfi-noise2/`;
+`tools/reversal_eval.py`, `tools/hfi_listen.sh`.*
+
+**Dead-time compensation under HFI.** The injection hook re-modulated the
+FOC's *uncompensated* voltage plus the carrier, so `v_dead` compensation was
+silently off whenever HFI ran (every HFI result before fw 26). It now adds
+the FOC's dead-time correction. A/B at `v_dead` 0 vs 0.382 V: ±50 rad/s el
+stick-slip 216/205 → 154/152° el, ±5…±20 and ±100 within run-to-run
+noise, starts 10/10 both ways. Kept on.
+
+**Hand-back observer → HFI.** Running on the flux observer with `hfi_v` > 0,
+below 0.6 × `sl_handoff` the drive hands back to HFI: the tracker starts on
+the observer's angle (less the cross-saturation offset) and speed, straight
+into the run phase. A reversal at speed now crosses zero on HFI instead of
+stall-tripping, and the state channel reads 6 whenever HFI drives.
+
+From rest (`omega_accel` 1000), true speed from hall steps:
+
+| rad/s el | ±100 | ±200 | ±300 | ±400 | ±600 | ±800 | ±1000 | ±1200 |
+|---|---|---|---|---|---|---|---|---|
+| on | HFI | HFI | HFI | observer | observer | observer | observer | observer |
+| + | 99.8 | 200.1 | 300.0 | 400.1 | 599.9 | 800.1 | 1000.0 | 1207* |
+| − | −99.8 | −200.0 | −300.0 | −400.1 | −599.8 | −799.9 | −1000.0 | −1200.0 |
+
+\* At ≥ 1200 the hall-step count aliases (telemetry arrives every 1.7 ms —
+the link carries ~590 frames/s — about two hall edges a frame); the
+firmware's edge-timed hall speed is the truth there.
+
+Live retargets (state sequence after the retarget: 6 HFI, 1 observer):
+
+| | states | dwell \|ω\| < 20 | to within 10 % | peak \|i_q\| |
+|---|---|---|---|---|
+| +1200 → −1200 | 1, 6, 1 | 0.01 s | 2.27 s | 0.59 A |
+| −1200 → +1200 | 1, 6, 1 | 0.07 s | 2.28 s | 0.43 A |
+| ±600 → ∓600 | 1, 6, 1 | ≤ 0.06 s | 1.13 s | 0.36 A |
+| +300 → −300 | 6 | 0.07 s | 0.56 s | 0.33 A |
+| 100 ↔ 600 | 6, 1 / 1, 6 | — | 0.43–0.48 s | 0.45 A |
+
+**Lock runaway.** One full-speed start (−1200) tripped 45 ms into the lock:
+the rotor swinging onto the stepped d bias dragged the tracker, which
+dragged the bias — over an electrical revolution before the trip. Across
+160 earlier starts, 14 had turned the rotor a full revolution or more in
+the lock. Now the bias ramps in over 0.15 s and the tracker's speed is held
+at zero until the run phase (float and integer paths): 40 starts, none
+past 3 hall edges, no trips.
+
+**The whine.** The `++−−` carrier is a 2.5 kHz tone (a quarter of the 10 kHz
+control rate), ±1 V. Two levers, measured at ±20 rad/s el and 5 starts
+each (fw 29):
+
+| carrier | θ err σ | stick-slip | starts |
+|---|---|---|---|
+| 1.0 V fixed | 4.8–5.1° | 204–265° | 5/5 |
+| 0.5 V fixed | 6.1–7.2° | 233–292° | 5/5 |
+| **0.3 V fixed** | 8.3–8.4° | 249–312° | 5/5 |
+| 1.0 V, `hfi_spread` 1 / 2 | 7–10° | 140–199° | 5/5 (start i_d peaks 1.15 A) |
+| 0.5 V, spread 2 | | one run tripped | 5/5 |
+| 0.3 V, spread 2 | trips | | 1/5 |
+
+- **Amplitude** is the robust lever: 0.3 V (≈ −10 dB of ripple power)
+  still tracks, crosses zero (50 → −50 clean) and starts.
+- **`hfi_spread`** (57, nvparam v14) randomises each frame's polarity (1)
+  and also its length, `++−−` or `+++−−−` (2), smearing the tone into a
+  band — every sign still held ≥ 2 periods for the F302's duty load. It
+  works at 1 V but costs angle noise and raises the start's current peaks
+  (frame boundaries hold a sign up to 6 periods), and at low amplitude it
+  loses lock. Default 0.
+- The PLL now weights each refresh by the periods since the last one (the
+  error refreshes every other period with `++−−`, ~2 in 3 spread): identical
+  for the fixed carrier, correct for any pattern — before, the spread
+  carrier ran the loop ~33 % hot.
+- Whether 0.3 V or the spread sounds better is an ear test:
+  `tools/hfi_listen.sh <profiles…>` plays each for 6 s at 20 rad/s el.
+
+**Simulator.** `PmsmModel.ld_sat` (d-axis saturation) gives the polarity test
+something to read in the sim; the test config now carries the firmware's
+6 ms × 8 pulses (it had 0 × 0: a one-sample "polarity test" that passed by
+luck with the fixed carrier, and failed when the spread carrier re-rolled
+it). `hfi_polarity_reads_saturation_from_any_angle`: 16 starts from 8
+angles, both ways — all right with saturation, 2 wrong without.
 
 ## Is back-EMF sensing needed?
 

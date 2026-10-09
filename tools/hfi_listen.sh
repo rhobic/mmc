@@ -18,6 +18,7 @@ for prof in "$@"; do
         --hz="$hz" --out "$(dirname "$prof")/listen_$(basename "$prof" .json).csv" > /dev/null
     sleep 2
 done
-printf '{"hfi_v":0.0,"id_inject":0.0}' > /tmp/hfi_off.json 2>/dev/null || true
-$H apply --serial COM9 --profile /tmp/hfi_off.json > /dev/null 2>&1 || true
+off="$(dirname "$1")/hfi_off.json"
+printf '{"hfi_v":0.0,"id_inject":0.0,"hfi_spread":0.0}' > "$off"
+$H apply --serial COM9 --profile "$off" > /dev/null
 echo "done (HFI off)"

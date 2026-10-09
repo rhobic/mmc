@@ -3,6 +3,28 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-08 — session 41: HFI full speed both ways, dead time, the whine
+
+Details: [HFI.md](HFI.md#full-speed-both-ways-and-the-carriers-whine-session-41).
+**F302 fw 29, G474 fw 34, nvparam v14** (re-applied and persisted on bench 2).
+
+- **Dead-time compensation was off whenever HFI ran** (the injection hook
+  re-modulated the uncompensated voltage). Fixed; ±50 rad/s el stick-slip
+  ~210 → ~153° el, the rest neutral.
+- **Hand-back observer → HFI** below 0.6 × `sl_handoff`: reversals at
+  ±300/±600/±1200 rad/s el cross zero on HFI (≤ 0.07 s near zero) and hand
+  over again; from rest ±100 … ±1200 all hold. Sim test
+  `hfi_hands_back_and_reverses_through_zero`.
+- **Lock runaway** (14/160 starts turned ≥ 1 el rev in the lock, one
+  tripped): bias ramp + tracker speed held at zero until run → 0/40.
+- **The whine** (2.5 kHz carrier): 0.3 V fixed tracks and starts (σθ ~8°
+  vs ~5°); `hfi_spread` (new) works only at 1 V. PLL refreshes now weighted
+  by elapsed periods. Ear test: `tools/hfi_listen.sh`.
+- Sim motor saturates (`ld_sat`); the sim's polarity test was a one-sample
+  coin flip (pulse params 0) — fixed, with a 16-start polarity test.
+- F302 flash dipped to 2 032 free; `Tracker::update` and the hand-back are
+  `inline(never)` now → 2 312 free.
+
 ## 2026-10-08 — session 40: integer HFI drive, verified for a Cortex-M0+
 
 Question: would the low-speed HFI drive run on an FPU-less M0+ (STM32G0)?
