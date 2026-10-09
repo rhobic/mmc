@@ -27,6 +27,23 @@ Bench 2, motor 3, 18 V, fw 20 (HFI and observer code as on `main`).
 - `lowspeed_sweep.sh`: negative targets need `--hz=` (clap read `-31.8` as
   a flag).
 
+**Then fixed (F302 fw 24, G474 fw 29, nvparam v12** — params re-applied and
+persisted on bench 2, plus `hfi_xsat` = 0.44):
+
+- `hfi_xsat` (51): the drive's angle is the tracker's + `hfi_xsat`·i_q.
+  With it and ×4–×8 speed-loop gains, **HFI holds every target from ±5 to
+  ±50 rad/s el in both directions** and crosses zero; stick-slip 170–390°
+  el at ×8 (from ~1900 at ×1). Floor now ≤ 5 rad/s el (~7 rpm), not found.
+- HFI lock-up trip (stall fault); first version missed −10 (noise reset its
+  counter), now leaky.
+- `sl_fric` (52), Coulomb feed-forward: no gain on HFI with the stiff loop,
+  worse on the observer — HFI-only, off.
+- Start trips stay at ~10 %: the polarity pulses spin the rotor 1–3 el
+  revs. A pulse slew (fw 23) did not help and was reverted in fw 24.
+- Speed gains are shared across modes, so ×8 is not persisted; next:
+  separate HFI gains, and a start that holds the rotor through the pulses.
+  Details: [HFI.md](HFI.md#with-the-correction-fw-2224-testresultsmotor3-hfi-fix).
+
 ## 2026-10-08 — session 38: F302 flash headroom, pinned toolchain, size check
 
 The F302 image had 608 bytes of its 62 KB left on rustc 1.99 and overflowed

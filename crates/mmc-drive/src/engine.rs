@@ -72,11 +72,6 @@ const HFI_STUCK_S: f32 = 0.5;
 /// Speed [rad/s el] over which the friction feed-forward (`sl_fric`) fades
 /// in from zero, so it changes sign smoothly through a zero crossing.
 const FRIC_OMEGA: f32 = 5.0;
-/// Slew of the d current through the HFI start [A/s]: a polarity pulse
-/// stepped from −0.6 to +0.6 A in one tick overshot to ~1.3 A of i_d and
-/// tripped the 1.5 A limit in ~1 start in 12 (session 39). 300 A/s swings it
-/// in 4 ms, inside the pulse's 8 ms unrecorded settling.
-const HFI_ID_SLEW: f32 = 300.0;
 
 /// Phases of the HFI sensorless start.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -186,7 +181,6 @@ pub struct Engine {
     hfi_start: Option<HfiStart>,
     hfi_edge_err: f32,
     hfi_stuck: u32,
-    hfi_id: f32,
     hall_state_prev: Option<u8>,
     /// Measured stator current of the last tick, αβ: a flying start reads
     /// the torque current the rotor was carrying in the rotor's own frame
@@ -268,7 +262,6 @@ impl Engine {
             hfi_start: None,
             hfi_edge_err: 0.0,
             hfi_stuck: 0,
-            hfi_id: 0.0,
             hall_state_prev: None,
             i_ab_last: AlphaBeta {
                 alpha: 0.0,
@@ -907,8 +900,6 @@ impl Engine {
                     }
                 };
                 iq_ref = iq_cmd;
-                let slew = HFI_ID_SLEW * dt;
-                self.hfi_id += (id_cmd - self.hfi_id).clamp(-slew, slew);
                 // Cross-saturation: q current turns the saliency axis the
                 // tracker locks onto; the rotor's d axis is that plus
                 // `hfi_xsat`·i_q. The carrier stays on the tracker's own axis.
@@ -933,7 +924,7 @@ impl Engine {
                     th,
                     w_ff,
                     Dq {
-                        d: self.hfi_id,
+                        d: id_cmd,
                         q: iq_cmd,
                     },
                     vbus,
@@ -1526,7 +1517,6 @@ impl Engine {
         self.v_applied2 = AlphaBeta::default();
         self.stall_strikes = 0;
         self.hfi_stuck = 0;
-        self.hfi_id = 0.0;
         self.probe_ticks = 0;
         let (rs, ls) = (p(param::R), p(param::L));
         let gains = current_pi_gains(rs, ls, p(param::CUR_BW));

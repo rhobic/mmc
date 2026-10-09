@@ -55,9 +55,13 @@ differencing cancels.
 | Real-time tracker | `mmc_core::hfi::Tracker`; params `hfi_v` (carrier [V], 0 = off), `hfi_bw` [rad/s], `hfi_xi` |
 | Shadow under hall FOC, scored at hall edges | `hfi_v` > 0 in hall FOC: tracker angle on `theta_est`, its error at the last hall edge on `theta_err`, d response on `hfi_d` (channel 28) |
 | Sensorless start from standstill | `hfi_v` > 0 in sensorless mode: lock (0.3 s), polarity (3 × ±0.6 A pairs), run on the tracker, hand over to the flux observer at `sl_handoff` |
+| Cross-saturation correction | `hfi_xsat` [rad el/A]: the drive's angle is the tracker's + `hfi_xsat`·i_q (motor 3: 0.44, persisted on bench 2) |
+| Lock-up trip | HFI speed loop at ≥ 90 % of `iq_limit` with the tracker under half the reference, net 0.5 s → stall fault |
+| Friction feed-forward | `sl_fric` [A], HFI speed loop only, faded in over ±5 rad/s el (measured no benefit on motor 3; off) |
 
 Firmware: F302 fw 20, G474 fw 25, **nvparam v11** (`hfi_v`, `hfi_bw`,
-`hfi_xi`, ids 48–50).
+`hfi_xi`, ids 48–50). Correction, trip and `sl_fric` (ids 51–52): F302
+fw 24, G474 fw 29, **nvparam v12**.
 
 ## Results on motor 3
 
@@ -158,10 +162,45 @@ currents (r = −0.88 overall) and runs away past ~0.6 A. So "more current
 beats cogging" is capped by HFI itself: q current shifts the saliency axis
 the tracker reads.
 
-**Start overcurrent.** 4 of 34 HFI starts this session tripped the 1.5 A
-limit during the polarity pulses (i_d at −0.75…−0.8 A while the rotor
-jerks): 1 of 30 at `hfi_bw` 150, 3 of 4 at 300. Session 36's 18/18 was a
-small sample; the ±0.6 A pulses have little margin.
+### With the correction (fw 22–24, `testresults/motor3-hfi-fix/`)
+
+`hfi_xsat` = 0.44 rad/A (the −25° el/A drift). True speed / stick-slip
+(`pos_pp`, ° el):
+
+| | +5 | −5 | +10 | −10 | +20 | −20 | +50 | −50 |
+|---|---|---|---|---|---|---|---|---|
+| ×1, no correction (fw 20) | stuck | | 8.8 / 1388 | −6.2 / 1606 | 17.0 / 2251 | −20.1 / 1413 | 48.0 / 2269 | −50.7 / 1543 |
+| ×4, no correction | 4.6 / 415 | −4.9 / 392 | 10.0 / 452 | **lock-up** | 19.9 / 499 | **lock-up** | 50.4 / 558 | −49.8 / 357 |
+| ×4 + `hfi_xsat` | 5.0 / 444 | −4.9 / 314 | 10.2 / 495 | −10.2 / 374 | 19.4 / 598 | −20.0 / 321 | 49.8 / 418 | −50.0 / 247 |
+| ×8 + `hfi_xsat` | 5.0 / 287 | −5.0 / 216 | 9.6 / 388 | −10.0 / 215 | 20.0 / 287 | −20.1 / 220 | 50.0 / 184 | −50.1 / 167 |
+
+(×8 +20 from the fw 24 check; its fw 23 run tripped at start.) With the
+correction every target from ±5 to ±50 rad/s el runs, both directions,
+and q current drops (0.22 → 0.17 A rms at ×4, 0.16 at ×8: the torque is
+aligned). Zero crossings at ×8: 20 → −20 (178°), 50 → −50 (130–136°),
+100 → −100 (179°, angle +25 ± 18° — the one point where ×8 looked worse).
+The floor is now **5 rad/s el (0.7 rad/s mechanical, ~7 rpm)** and not yet
+found. ×8 gains were tried on HFI only: `speed_kp`/`speed_ki` are shared
+with the observer and hall modes, so they are not persisted.
+
+The lock-up trip fires on the uncorrected ×4 runs at −10 and −20 (stall at
+5.6 s instead of holding 1.2 A); the first version missed −10, where
+tracker speed noise reset its counter, and is now leaky.
+
+**Friction feed-forward did not help.** `sl_fric` 0.12 A at ×4 + correction:
+mean `pos_pp` 408° el, the same as without; 0.20 A no better. With the
+stiff loop the integrator already supplies breakaway in milliseconds. On
+the flux observer it made things worse (100 rad/s el `pos_pp` 341 → 1984,
+75 and 50 stall-tripped), so it is HFI-only and off.
+
+**Start overcurrent.** The polarity pulses trip the 1.5 A limit in about 1
+start in 10 (2/40 on fw 22, 5/42 on fw 23, 4/19 in a dedicated batch). It
+is not an edge overshoot — a 300 A/s slew on the pulses (fw 23) did not
+help and was taken out again in fw 24. Through the whole pulse window the
+measured i_d is ~2× the ±0.6 A command and the rotor turns 1–3 electrical
+revolutions (10–21 hall edges in 0.2 s, up to ±90 rad/s el): the pulses
+throw the rotor, the tracker frame slips under the current loop, and the
+phase peaks reach the trip. Session 36's 18/18 was a small sample.
 
 ## Is back-EMF sensing needed?
 
@@ -181,15 +220,16 @@ need them; it needs saliency, which motor 3 has.
   saliency term, and the pulses jerk the rotor. Options for a motor with less d-axis saturation: read the
   contrast from the first current rise rather than the averaged ripple, or a
   short q-current nudge read on the tracker.
-- **Cross-saturation compensation**: correct the tracker angle by
-  ≈ +25° el/A × i_q (fit the slope properly, it is not linear past ~0.6 A),
-  and trip on i_q at its limit with no hall/HFI motion. That unlocks the
-  stiffer speed loop (×4) at low speed, which is what beats the stiction.
-- **Friction feed-forward** (`i_fric`·sign ω_ref, as in hall position
-  mode) in the sensorless speed loop: supplies the breakaway current without
-  winding the integrator through a whole stick.
-- **Polarity pulses**: smaller or slower-edged pulses to keep the start off
-  the overcurrent limit.
+- **Start trips (~10 %)**: the polarity pulses spin the rotor. Hold it
+  while pulsing (a q-axis hold current on the tracker, or pulses short
+  enough that the rotor cannot follow), or smaller pulses with more pairs —
+  then re-measure polarity reliability, which smaller pulses put at risk.
+- **Separate HFI speed-loop gains**: the ×8 gains that suit HFI at low
+  speed are shared with the observer and hall modes; a pair of HFI gains
+  would let them be persisted.
+- **Cross-saturation is linear only to ~0.6 A**: a table or quadratic
+  `hfi_xsat` for loaded operation (motor 3 never needs more than ~0.3 A
+  unloaded).
 - **20–100 rad/s el** with heavy hunting (in shadow; under HFI control the
   tracker holds, see the low-speed floor above): the tracker needs the known torque
   (an acceleration feed-forward into its PLL) or the cogging feed-forward
