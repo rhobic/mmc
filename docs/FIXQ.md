@@ -89,8 +89,9 @@ the flash case would not fit; from RAM it would (59 %).
 
 On the F302 the whole ISR with the integer step measured 5 643 of 7 200
 cycles (it still runs the float telemetry, flux observer and hall code
-around it). The `fixq` firmware fits the 62 KB flash only with the firmware
-crate at opt-level "s" (CI builds it that way).
+around it). Since the F302 build leaves out six-step, the estimator and the
+cogging feed-forward (session 42) the `fixq` firmware fits at the normal
+opt-level (56.5 KB of 62).
 
 ## What an M0+ drive still needs
 

@@ -3,6 +3,29 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-09 — session 42: the quiet carrier; subsystems as build options
+
+**F302 fw 32, G474 fw 37, nvparam v16** (re-applied and persisted on bench 2).
+
+- **Quiet HFI by default on bench 2**: 0.3 V carrier (chosen by ear) with
+  `hfi_v_hi` 1 V through starts, ramps, reversals and load; `hfi_id` (HFI's
+  own d bias, split from hall FOC's `id_inject`). Handover/hand-back gated
+  on the reference as well as the estimate; hand-back 0.45 × `sl_handoff`.
+  8/8 retargets, 10/10 starts. [HFI.md](HFI.md#the-quiet-carrier-session-42).
+- **mmc-drive subsystems are cargo features** — `sixstep`, `estim` (online
+  R/ψ + i_d dither), `cogging` (position-torque FF + identification),
+  `hall-pos` — default on; boards and applications pick their set. A mode
+  not built in is NAKed at SetDrive (test `a_mode_not_built_in_is_refused`);
+  the parameter table is the same in every build. Sim tests needing a
+  feature skip without it; CI tests the minimal and the F302 sets.
+- **F302 builds `link` + `hall-pos` only**: 49.7 KB, **13.8 KB free** (was
+  1.8 KB, under the 2 KB floor). The `fixq` variant now fits at opt-level 2
+  (7 KB free). Whole-image opt-level "s" was measured and rejected: HFI ISR
+  7 231 of 7 200 cycles.
+- Cogging FF is out of the F302 build: it worked in hall FOC (session 34)
+  but runs only there, was off (`cog_ff` 0), and cannot share the ISR with
+  HFI's shadow. One feature flag brings it back.
+
 ## 2026-10-08 — session 41: HFI full speed both ways, dead time, the whine
 
 Details: [HFI.md](HFI.md#full-speed-both-ways-and-the-carriers-whine-session-41).

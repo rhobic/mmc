@@ -22,6 +22,11 @@ jobs:
       # The integer HFI path (mmc_core::fixq) in the drive, sim tests included.
       - run: cargo clippy -p mmc-drive --features fixq --all-targets -- -D warnings
       - run: cargo test -p mmc-drive --features fixq
+      # Subsystems are build options: the minimal drive and the F302's set
+      # must build, lint and pass on their own (feature tests skip).
+      - run: cargo clippy -p mmc-drive --no-default-features --all-targets -- -D warnings
+      - run: cargo test -p mmc-drive --no-default-features
+      - run: cargo test -p mmc-drive --no-default-features --features hall-pos
 
   no-std:
     runs-on: ubuntu-latest
@@ -76,7 +81,6 @@ jobs:
       - run: cargo build --release
         working-directory: crates/mmc-fw-f302
       - run: tools/fw_size.sh crates/mmc-fw-f302 2048
-      # The integer-HFI variant (feature fixq) only fits at opt-level "s" for
-      # the firmware crate; keep it linking.
-      - run: cargo build --release --features fixq --config 'profile.release.opt-level="s"' --config 'profile.release.package.mmc-drive.opt-level="s"'
+      # The integer-HFI variant (feature fixq); keep it linking.
+      - run: cargo build --release --features fixq
         working-directory: crates/mmc-fw-f302

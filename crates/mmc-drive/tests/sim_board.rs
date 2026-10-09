@@ -508,6 +508,7 @@ fn hall_foc_closes_the_speed_loop_from_rest_both_ways() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "sixstep"), ignore = "needs feature sixstep")]
 fn hall_six_step_spins_both_ways() {
     for hz in RATES {
         for target in [250.0f32, -250.0] {
@@ -529,6 +530,7 @@ fn hall_six_step_spins_both_ways() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "sixstep"), ignore = "needs feature sixstep")]
 fn hall_six_step_at_180_degrees_spins_both_ways() {
     for hz in RATES {
         for target in [250.0f32, -250.0] {
@@ -586,6 +588,7 @@ fn a_board_without_halls_refuses_the_hall_modes() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "sixstep"), ignore = "needs feature sixstep")]
 fn switching_modes_while_running_rebuilds_the_drive() {
     // Straight from one running mode to another, no Off in between: each
     // mode's control blocks must be built for it (a stale set panicked the
@@ -624,6 +627,7 @@ fn switching_modes_while_running_rebuilds_the_drive() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "hall-pos"), ignore = "needs feature hall-pos")]
 fn hall_position_moves_and_holds_both_ways() {
     for hz in RATES {
         for target_deg in [90.0f32, -360.0] {
@@ -667,6 +671,7 @@ fn hall_position_moves_and_holds_both_ways() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "hall-pos"), ignore = "needs feature hall-pos")]
 fn hall_position_tracks_a_slow_move() {
     // A far target at a slow cruise speed is the low-speed mode: here 5 rad/s
     // el, which the hall speed loop cannot hold.
@@ -1069,4 +1074,31 @@ fn hfi_polarity_reads_saturation_from_any_angle() {
         wrong.is_empty(),
         "wrong-way or failed starts (angle, dir, backwards, end): {wrong:?}"
     );
+}
+
+/// A drive mode left out of the build is refused, not run half-built.
+#[test]
+#[cfg(not(feature = "sixstep"))]
+fn a_mode_not_built_in_is_refused() {
+    let mut rig = Rig::build(10_000, PmsmParams::small_bldc(), true);
+    for drive in [
+        DriveMode::SixStepForced {
+            duty: 0.2,
+            omega_e: 100.0,
+        },
+        DriveMode::SixStepHall {
+            duty: 0.2,
+            omega_e: 100.0,
+        },
+        DriveMode::SixStepSensorless {
+            duty: 0.2,
+            omega_handoff: 300.0,
+        },
+    ] {
+        assert!(
+            matches!(rig.send(&Message::SetDrive(drive)), Message::Nak { .. }),
+            "{drive:?} accepted"
+        );
+    }
+    assert_eq!(rig.sh.state(), ST_OFF);
 }

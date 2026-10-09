@@ -429,6 +429,12 @@ impl<const N: usize> Shared<N> {
                 {
                     return nak(1); // this board has no hall inputs
                 }
+                if (matches!(m, mode::SS_FORCED | mode::SS_SENSORLESS | mode::SS_HALL)
+                    && !cfg!(feature = "sixstep"))
+                    || (m == mode::HALL_POS && !cfg!(feature = "hall-pos"))
+                {
+                    return nak(1); // not built into this firmware
+                }
                 if m != mode::OFF {
                     if state == ST_CAL {
                         return nak(3); // still calibrating

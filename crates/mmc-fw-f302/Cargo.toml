@@ -15,7 +15,11 @@ fixq = ["mmc-drive/fixq"]
 
 [dependencies]
 mmc-core = { path = "../mmc-core" }
-mmc-drive = { path = "../mmc-drive", features = ["link"] }
+# Subsystems this bench builds (62 KB of flash): FOC, sensorless + HFI and
+# hall FOC/position. Six-step, the online R/ψ estimator and the cogging
+# feed-forward are left out (session 42); add them back here if the bench
+# needs them, then watch tools/fw_size.sh.
+mmc-drive = { path = "../mmc-drive", default-features = false, features = ["link", "hall-pos"] }
 mmc-hal = { path = "../mmc-hal" }
 mmc-proto = { path = "../mmc-proto" }
 

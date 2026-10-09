@@ -6,6 +6,22 @@ license.workspace = true
 description = "Board-agnostic motor-drive application: drive state machine, protocol handling, probes and telemetry, run on any mmc-hal MotorBoard"
 
 [features]
+# Control subsystems, each a build option: a board enables what its hardware
+# and its application need (all on by default; the sim tests and the G474
+# build everything). A drive mode that is not built in is NAKed at SetDrive,
+# as a board without halls refuses the hall modes; the parameter table is the
+# same in every build, so stored tables and the host tools are unaffected.
+default = ["sixstep", "estim", "cogging", "hall-pos"]
+# Six-step: forced, hall and sensorless (back-EMF zero crossings, needs the
+# terminal dividers), 120/180° conduction, the FOC→six-step live handover.
+sixstep = []
+# Online R/ψ estimator in the closed-loop FOC modes, and its i_d dither.
+estim = []
+# Position-torque (cogging) feed-forward and pole-pair identification, in
+# hall FOC (needs halls).
+cogging = []
+# HallPosition drive: trapezoidal reference, position PID, hall tracker.
+hall-pos = []
 # The serial host link as async loops over embedded-io-async, shared by
 # every board crate, so the firmware glue is two lines per task.
 link = ["dep:embedded-io-async", "dep:embassy-sync", "dep:embassy-time", "dep:embassy-futures"]

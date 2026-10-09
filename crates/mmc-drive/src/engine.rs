@@ -400,19 +400,18 @@ impl Engine {
         self.hall_last = hall_ref;
         let cog_terms = cog_terms(&p);
         let kt = 1.5 * p(param::POLE_PAIRS) * p(param::FLUX);
-        if spec.has_halls {
+        if spec.has_halls && self.hall_angle.is_none() {
+            // First tick after calibration. The hall angle is tracked from
+            // here on, not from the first drive build: a first start on a
+            // rotor that is already turning (a reset while it coasts) needs
+            // it to catch the rotor.
+            self.hall_angle = Some(HallAngle::new(hall_map(&p)));
+        }
+        if cfg!(feature = "cogging") && spec.has_halls {
             let pp = p(param::POLE_PAIRS).max(1.0) as u8;
             let cog = match self.cog {
                 Some(ref mut cog) => cog,
-                None => {
-                    // First tick after calibration. The hall angle is tracked
-                    // from here on, not from the first drive build: a first
-                    // start on a rotor that is already turning (a reset while
-                    // it coasts) needs it to catch the rotor.
-                    let map = hall_map(&p);
-                    self.hall_angle = Some(HallAngle::new(map));
-                    self.cog.insert(CogComp::new(&map, pp))
-                }
+                None => self.cog.insert(CogComp::new(&hall_map(&p), pp)),
             };
             // Collect torque samples only in steady hall FOC: the energy
             // balance needs a speed loop holding the rotor near a setpoint.
@@ -461,7 +460,11 @@ impl Engine {
             self.epoch_seen = epoch;
             self.command(sh, b);
         }
-        let (cog_now, cog_unit) = self.cog_unit(&p, &cog_terms, kt, dt);
+        let (cog_now, cog_unit) = if cfg!(feature = "cogging") {
+            self.cog_unit(&p, &cog_terms, kt, dt)
+        } else {
+            (0.0, 0.0)
+        };
 
         // --- protection trips (only meaningful once running).
         if self.mode != mode::OFF {
@@ -709,7 +712,7 @@ impl Engine {
                 }
                 if self.mode == mode::OFF {
                     AlphaBeta::default()
-                } else if self.mode == mode::HALL_POS {
+                } else if cfg!(feature = "hall-pos") && self.mode == mode::HALL_POS {
                     // Position loop on the hall tracker: every hall edge is
                     // an exact position update, and between edges the
                     // rotor is predicted from the commanded torque and the
@@ -807,7 +810,10 @@ impl Engine {
                     let lim = p(param::IQ_LIMIT);
                     let mut id_ref = p(param::ID_INJECT);
                     let dither = p(param::ID_DITHER);
-                    if dither != 0.0 && self.omega.abs() >= ESTIM_OMEGA_MIN {
+                    if cfg!(feature = "estim")
+                        && dither != 0.0
+                        && self.omega.abs() >= ESTIM_OMEGA_MIN
+                    {
                         let half = 0.5 * p(param::ID_DITHER_PERIOD);
                         self.dither_t += dt;
                         if self.dither_t >= half {
@@ -837,9 +843,12 @@ impl Engine {
                     v_dq = out.v_dq;
                     i_dq = out.i_dq;
                     out.v_ab
-                } else {
+                } else if cfg!(feature = "sixstep") {
                     duties = self.sixstep_hall(sh, b, omega_target, amp_target);
                     i_dq = park(i_ab, sin_cos(self.theta));
+                    AlphaBeta::default()
+                } else {
+                    // A mode this build refuses at SetDrive.
                     AlphaBeta::default()
                 }
             } else if self.mode == mode::SENSORLESS && self.fixq_active() {
@@ -1075,10 +1084,10 @@ impl Engine {
                     let v_ab = inverse_park(v_dq, sc);
                     duties = svpwm(v_ab, vbus);
                     v_ab
-                } else if self.mode == mode::SS_SENSORLESS {
+                } else if cfg!(feature = "sixstep") && self.mode == mode::SS_SENSORLESS {
                     duties = self.sixstep_sensorless(sh, b, vt);
                     AlphaBeta::default()
-                } else if self.mode == mode::SS_FORCED {
+                } else if cfg!(feature = "sixstep") && self.mode == mode::SS_FORCED {
                     // Forced six-step commutation: two phases conduct, the
                     // third is Hi-Z. `amp` is the high-side duty (0..1), not
                     // volts. Sector advances with the forced angle, so the
@@ -1237,7 +1246,7 @@ impl Engine {
         put(channel::I_D, i_dq.d);
         put(channel::I_Q, i_dq.q);
         put(channel::V_D, v_dq.d);
-        if let Some(e) = self.rpsi.as_mut() {
+        if let Some(e) = self.rpsi.as_mut().filter(|_| cfg!(feature = "estim")) {
             let running = sh.state.load(Ordering::Relaxed) == ST_RUN
                 && matches!(self.mode, mode::HALL_FOC | mode::SENSORLESS);
             e.push(v_dq, i_dq, self.omega, cfg.dt(), running);
@@ -1515,7 +1524,8 @@ impl Engine {
             sh.state.store(ST_FAULT_VBUS, Ordering::Relaxed);
             return;
         }
-        if self.mode == mode::SENSORLESS
+        if cfg!(feature = "sixstep")
+            && self.mode == mode::SENSORLESS
             && mode == mode::SS_SENSORLESS
             && matches!(self.seq.as_ref().map(|q| q.phase()), Some(Phase::Closed))
             && self.omega > 40.0
@@ -1622,7 +1632,7 @@ impl Engine {
         self.ss_ramp = None;
         self.ss_speed = None;
         self.ss_target = 0.0;
-        if mode == mode::SS_SENSORLESS {
+        if cfg!(feature = "sixstep") && mode == mode::SS_SENSORLESS {
             // Blanking has to clear the freewheel of the phase that just
             // opened. Handoff speed comes from the command.
             self.ss_zc = Some(ZeroCross::new(ZcCfg {
@@ -1755,7 +1765,7 @@ impl Engine {
             h.retune(map);
         }
         self.hall.widths = map.widths;
-        if let Some(c) = self.cog.as_mut() {
+        if let Some(c) = self.cog.as_mut().filter(|_| cfg!(feature = "cogging")) {
             c.retune(&map, p(param::POLE_PAIRS).max(1.0) as u8);
         }
         self.ff_theta = None;
@@ -1846,7 +1856,7 @@ impl Engine {
                 self.hfi = None;
             }
         }
-        if mode == mode::HALL_FOC && spec.has_halls {
+        if cfg!(feature = "cogging") && mode == mode::HALL_FOC && spec.has_halls {
             // Hall FOC keeps the hall angle for its FOC; the tracker only
             // places the position-torque feed-forward.
             let pp = p(param::POLE_PAIRS).max(1.0);
@@ -1857,25 +1867,26 @@ impl Engine {
         // Online R/ψ in the closed-loop FOC modes, starting from the
         // profile. Tuned per 50 ms block, as the host estimator is
         // (docs/CALIBRATION.md): R may drift ~1 %/s, ψ ~0.1 %/s.
-        self.rpsi = matches!(mode, mode::HALL_FOC | mode::SENSORLESS).then(|| {
-            let l = p(param::L);
-            let cfg = RpsiCfg {
-                ld: l,
-                lq: l,
-                q_r: 1e-5,
-                q_psi: 2e-12,
-                q_bias: 1e-6,
-                noise: 1e-4,
-                omega_min: ESTIM_OMEGA_MIN,
-                i_min: 0.1,
-                use_derivative: false,
-                p0: 1.0,
-            };
-            RpsiAverager::new(RpsiEstimator::new(cfg, p(param::R), p(param::FLUX)), 0.05)
-        });
+        self.rpsi = (cfg!(feature = "estim") && matches!(mode, mode::HALL_FOC | mode::SENSORLESS))
+            .then(|| {
+                let l = p(param::L);
+                let cfg = RpsiCfg {
+                    ld: l,
+                    lq: l,
+                    q_r: 1e-5,
+                    q_psi: 2e-12,
+                    q_bias: 1e-6,
+                    noise: 1e-4,
+                    omega_min: ESTIM_OMEGA_MIN,
+                    i_min: 0.1,
+                    use_derivative: false,
+                    p0: 1.0,
+                };
+                RpsiAverager::new(RpsiEstimator::new(cfg, p(param::R), p(param::FLUX)), 0.05)
+            });
         self.dither_t = 0.0;
         self.dither_hi = false;
-        if mode == mode::SS_HALL {
+        if cfg!(feature = "sixstep") && mode == mode::SS_HALL {
             // Duty per rad/s el, preloaded with the duty that drives the
             // current ceiling through two windings at standstill (the
             // breakaway duty), so the loop does not integrate up to it.
