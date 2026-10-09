@@ -338,6 +338,19 @@ sync — normal for motor control in any language.
   flux from a coast, and the position torque around a turn measured and fed
   forward with on-board pole-pair identification (fw 19, nvparam v10).
   Next: better cancellation in reverse, or with the encoder.
+- **TODO: one documentation site.** *(added 2026-10-09)* The docs are spread
+  over 13 Markdown files (`README.md`, `overview.md`, `docs/*.md`,
+  `hw/README.md`, `testresults/…/*.md`), hand-built HTML (`docs/overview.html`,
+  `docs/sixstep-conduction.html`, `testresults/index.html`, the feature
+  report) and rustdoc, with no index, search or cross-links between them.
+  Consolidate into one generated site: **Sphinx** with MyST (the existing
+  Markdown carries over nearly as is) is the suggestion; mdBook, the
+  Rust-native option, is the alternative to weigh. Scope: one tree
+  (design, per-subsystem notes such as HFI / six-step / FIXQ / calibration /
+  profiler, hardware, bench results, the PROGRESS log), the rustdoc API docs
+  linked in, the existing HTML reports embedded or linked, a CI job that
+  builds it with warnings as errors (broken links fail). Keep the private
+  twin's material out of the public build.
 
 ## Verification strategy
 
