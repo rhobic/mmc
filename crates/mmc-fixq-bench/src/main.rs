@@ -37,6 +37,7 @@ fn params() -> FixParams {
         pol_s: 0.006,
         pol_n: 8,
         lock_s: 0.3,
+        lock_ramp_s: 0.15,
         stuck_s: 0.5,
         advance_periods: 1.0,
         omega_max: 700.0,

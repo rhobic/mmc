@@ -920,7 +920,10 @@ fn hfi_starts_a_salient_motor_from_standstill() {
 /// rotor through zero; past `sl_handoff` the other way the observer takes
 /// over again. Without the hand-back the observer stall-tripped at zero.
 #[test]
-#[cfg_attr(feature = "fixq", ignore = "the integer HFI path has no observer handover")]
+#[cfg_attr(
+    feature = "fixq",
+    ignore = "the integer HFI path has no observer handover"
+)]
 fn hfi_hands_back_and_reverses_through_zero() {
     let mut motor = PmsmParams::small_bldc();
     motor.lq = 1.25 * motor.ld;

@@ -64,6 +64,13 @@ const CATCH_OMEGA_MIN: f32 = 30.0;
 /// flipped it back and forth (1–3 el revs per start) and tripped the 1.5 A
 /// limit in ~1 start in 10 (session 39). Pulses of a few τ cannot.
 const HFI_LOCK_S: f32 = 0.3;
+/// The lock's d bias ramps in over this long. Stepped on, with the tracker
+/// free to build speed, the rotor swinging onto the bias dragged the
+/// tracker, which dragged the bias: in ~1 start in 11 the pair ran away
+/// into a full electrical revolution or more inside the lock, once into the
+/// overcurrent limit (session 41). The tracker's speed is also held at zero
+/// until the run phase: the rotor is meant to be still.
+const HFI_LOCK_RAMP_S: f32 = 0.15;
 
 const HFI_POL_A: f32 = 0.6;
 /// HFI lock-up: q current at 90 % of its limit with the tracker below half
@@ -856,8 +863,10 @@ impl Engine {
                         // off zero, where the dead time would flip with the
                         // carrier and swamp it. Off the axis it is torque,
                         // so the rotor turns a little toward the estimate as
-                        // the estimate turns onto the rotor.
+                        // the estimate turns onto the rotor; ramped, so it
+                        // settles rather than runs away (HFI_LOCK_RAMP_S).
                         p(param::ID_INJECT)
+                            * (st.ticks as f32 / cfg.ticks(HFI_LOCK_RAMP_S).max(1) as f32).min(1.0)
                     }
                     HfiPhase::PolPos | HfiPhase::PolNeg => {
                         let k = (st.phase == HfiPhase::PolNeg) as usize;
@@ -1094,6 +1103,18 @@ impl Engine {
                 || (self.mode == mode::SENSORLESS && self.hfi_start.is_some());
             if let Some(tr) = self.hfi.as_mut().filter(|_| hfi_mode) {
                 let (th, w) = tr.update(i_ab, dt);
+                // Locking and polarity: the rotor should be still, and a
+                // tracker free to build speed can co-rotate with it.
+                let (th, w) = if self
+                    .hfi_start
+                    .as_ref()
+                    .is_some_and(|s| s.phase != HfiPhase::Run)
+                {
+                    tr.set_omega(0.0);
+                    (th, 0.0)
+                } else {
+                    (th, w)
+                };
                 let inj = inverse_park(
                     Dq {
                         d: tr.carrier(),
@@ -1792,6 +1813,7 @@ impl Engine {
                     pol_s: p(param::HFI_POL_S),
                     pol_n: p(param::HFI_POL_N) as u32,
                     lock_s: HFI_LOCK_S,
+                    lock_ramp_s: HFI_LOCK_RAMP_S,
                     stuck_s: HFI_STUCK_S,
                     advance_periods: 0.5 + spec.pwm_latency,
                     omega_max: 2.0 * p(param::SL_HANDOFF),

@@ -338,6 +338,8 @@ pub struct FixParams {
     pub pol_s: f32,
     pub pol_n: u32,
     pub lock_s: f32,
+    /// The lock's d bias ramps in over this long.
+    pub lock_ramp_s: f32,
     pub stuck_s: f32,
     /// Ticks the duty lands after the sample (advance of the output angle).
     pub advance_periods: f32,
@@ -390,6 +392,7 @@ pub struct FixHfi {
     accel_f: i32,
     stuck_w_min: i32,
     lock_ticks: u32,
+    lock_ramp_ticks: u32,
     pol_ticks: u32,
     pol_n: u32,
     stuck_ticks: u32,
@@ -433,6 +436,7 @@ impl FixHfi {
             accel_f: (p.omega_accel * p.dt * p.dt * UNITS_PER_RAD * wf + 0.5) as i32,
             stuck_w_min: (5.0 * ws_per_rad_s) as i32,
             lock_ticks: ticks(p.lock_s),
+            lock_ramp_ticks: ticks(p.lock_ramp_s).max(1),
             pol_ticks: ticks(p.pol_s).max(2),
             pol_n: p.pol_n.max(1),
             stuck_ticks: ticks(p.stuck_s),
@@ -476,7 +480,12 @@ impl FixHfi {
                     self.phase = Phase::PolPos;
                     self.ticks = 0;
                 }
-                self.id_inject
+                if self.ticks >= self.lock_ramp_ticks {
+                    self.id_inject
+                } else {
+                    // ticks < ramp ≤ 2¹⁵ for any sane ramp: no overflow.
+                    self.id_inject * self.ticks as i32 / self.lock_ramp_ticks as i32
+                }
             }
             Phase::PolPos | Phase::PolNeg => {
                 let k = (self.phase == Phase::PolNeg) as usize;
@@ -560,6 +569,10 @@ impl FixHfi {
 
         // --- HFI: update on this sample, inject along the new estimate.
         self.tracker.update(i_ab);
+        if !running {
+            // The rotor should be still: no co-rotating tracker.
+            self.tracker.omega_f = 0;
+        }
         let (st, ct) = sin_cos(self.tracker.theta);
         let vh = self.tracker.carrier();
         let v_mod = (v_ab.0 + ((vh * ct) >> 15), v_ab.1 + ((vh * st) >> 15));
