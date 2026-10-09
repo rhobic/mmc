@@ -16,6 +16,7 @@ extern crate std;
 // methodologies are made of.
 pub mod angle;
 pub mod cogging;
+pub mod fixq;
 pub mod hall;
 pub mod hfi;
 pub mod math;

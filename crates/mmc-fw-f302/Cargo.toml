@@ -9,6 +9,10 @@ description = "STM32F302R8 + L6230 three-shunt shield: the MotorBoard under the 
 # (see .cargo/config.toml).
 [workspace]
 
+[features]
+# Run HFI sensorless on the integer path (mmc_core::fixq).
+fixq = ["mmc-drive/fixq"]
+
 [dependencies]
 mmc-core = { path = "../mmc-core" }
 mmc-drive = { path = "../mmc-drive", features = ["link"] }

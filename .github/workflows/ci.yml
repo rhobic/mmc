@@ -19,6 +19,9 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      # The integer HFI path (mmc_core::fixq) in the drive, sim tests included.
+      - run: cargo clippy -p mmc-drive --features fixq --all-targets -- -D warnings
+      - run: cargo test -p mmc-drive --features fixq
 
   no-std:
     runs-on: ubuntu-latest
@@ -28,6 +31,8 @@ jobs:
       # G474 (M4F) and the M0+ scaling floor: both stay green from day one.
       - run: cargo build --target thumbv7em-none-eabihf -p mmc-core -p mmc-hal -p mmc-proto -p mmc-drive
       - run: cargo build --target thumbv6m-none-eabi -p mmc-core -p mmc-hal -p mmc-proto
+      # The integer HFI step on the M0+ calls no float or 64-bit routine.
+      - run: tools/fixq_m0_check.sh
 
   # Each control methodology must build on its own: the low-resource scaling
   # story is only real if a target can take six-step without FOC, or vice versa.
@@ -71,3 +76,7 @@ jobs:
       - run: cargo build --release
         working-directory: crates/mmc-fw-f302
       - run: tools/fw_size.sh crates/mmc-fw-f302 2048
+      # The integer-HFI variant (feature fixq) only fits at opt-level "s" for
+      # the firmware crate; keep it linking.
+      - run: cargo build --release --features fixq --config 'profile.release.opt-level="s"' --config 'profile.release.package.mmc-drive.opt-level="s"'
+        working-directory: crates/mmc-fw-f302

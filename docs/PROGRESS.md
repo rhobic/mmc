@@ -3,6 +3,26 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-08 — session 40: integer HFI drive, verified for a Cortex-M0+
+
+Question: would the low-speed HFI drive run on an FPU-less M0+ (STM32G0)?
+**Yes.** Details: [FIXQ.md](FIXQ.md).
+
+- `mmc_core::fixq`: current loop, HFI tracker, start and speed loop in
+  integer only (Q15 currents/voltages, u32 angles, i32 × i32 products under
+  2³⁰ — no 64-bit multiply; two integer divides and two isqrts a tick).
+  7 unit tests against the float versions.
+- Feature `fixq` (mmc-drive, mmc-fw-f302) runs HFI sensorless on it. Sim:
+  all 22 tests pass. **Motor 3: indistinguishable from the float drive**
+  (±5…±50 rad/s el, both zero crossings, 17/17 starts).
+- Cycles: F302 measured 1 508 worst; **M0+ emulated 1 881 worst from RAM,
+  ≤ 3 617 from 2-wait-state flash = 29–57 % of a 10 kHz tick at 64 MHz**
+  (`crates/mmc-fixq-bench`, `tools/m0_cycles.py`). CI: `tools/fixq_m0_check.sh`
+  fails if the M0+ step calls a float or 64-bit routine.
+- Found: the float HFI path drops dead-time compensation (the carrier hook
+  re-modulates the uncompensated voltage). All HFI results so far ran so.
+- Bench left on standard fw 25; the `fixq` F302 build needs opt-level "s".
+
 ## 2026-10-08 — session 39: low-speed floor, HFI vs the flux observer
 
 Bench 2, motor 3, 18 V, fw 20 (HFI and observer code as on `main`).

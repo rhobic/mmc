@@ -1,0 +1,16 @@
+[package]
+name = "mmc-fixq-bench"
+version = "0.1.0"
+edition = "2021"
+description = "Cortex-M0+ (thumbv6m) build of the integer HFI drive step, for cycle counting (tools/m0_cycles.py)"
+publish = false
+
+[dependencies]
+mmc-core = { path = "../mmc-core", default-features = false }
+
+[profile.release]
+opt-level = 2
+lto = true
+codegen-units = 1
+panic = "abort"
+debug = 0

@@ -9,6 +9,10 @@ description = "Board-agnostic motor-drive application: drive state machine, prot
 # The serial host link as async loops over embedded-io-async, shared by
 # every board crate, so the firmware glue is two lines per task.
 link = ["dep:embedded-io-async", "dep:embassy-sync", "dep:embassy-time", "dep:embassy-futures"]
+# The HFI sensorless drive on the integer path (`mmc_core::fixq`) instead
+# of the float one: the proof that it fits an FPU-less MCU, run on a board
+# that has one. Times the integer step into `FIXQ_CYCLES_MAX`/`_AVG`.
+fixq = []
 
 [dependencies]
 mmc-core.workspace = true

@@ -6,6 +6,8 @@ use core::sync::atomic::Ordering;
 use mmc_core::angle::AngleEstimator;
 use mmc_core::cogging::{CogComp, Ident, Term, TERMS};
 use mmc_core::estim::{RpsiAverager, RpsiCfg, RpsiEstimator};
+#[cfg(feature = "fixq")]
+use mmc_core::fixq::{FixHfi, FixParams};
 use mmc_core::foc::{Decoupling, Foc};
 use mmc_core::hall::{HallAngle, HallMap, HallSpeed, HallTracker};
 use mmc_core::hfi::Tracker as HfiTracker;
@@ -183,6 +185,9 @@ pub struct Engine {
     hfi_start: Option<HfiStart>,
     hfi_edge_err: f32,
     hfi_stuck: u32,
+    /// The integer HFI drive (feature `fixq`), replacing the float HFI path.
+    #[cfg(feature = "fixq")]
+    fixq: Option<(FixHfi, FixParams)>,
     hall_state_prev: Option<u8>,
     /// Measured stator current of the last tick, αβ: a flying start reads
     /// the torque current the rotor was carrying in the rotor's own frame
@@ -264,6 +269,8 @@ impl Engine {
             hfi_start: None,
             hfi_edge_err: 0.0,
             hfi_stuck: 0,
+            #[cfg(feature = "fixq")]
+            fixq: None,
             hall_state_prev: None,
             i_ab_last: AlphaBeta {
                 alpha: 0.0,
@@ -816,6 +823,14 @@ impl Engine {
                     i_dq = park(i_ab, sin_cos(self.theta));
                     AlphaBeta::default()
                 }
+            } else if self.mode == mode::SENSORLESS && self.fixq_active() {
+                let o = self.fixq_tick(b, i_abc, vbus, omega_target);
+                duties = o.duties;
+                v_dq = o.v_dq;
+                i_dq = o.i_dq;
+                iq_ref = o.iq_ref;
+                hfi_out = Some((o.theta_tr, o.omega));
+                o.v_ab
             } else if self.mode == mode::SENSORLESS && self.hfi_start.is_some() {
                 // Sensorless from standstill on high-frequency injection:
                 // the tracker owns the angle (one tick old; it updates in
@@ -1711,6 +1726,50 @@ impl Engine {
                 }
             }
         }
+        #[cfg(feature = "fixq")]
+        {
+            self.fixq = self.hfi_start.is_some().then(|| {
+                let hfi_gains = p(param::HFI_KP) > 0.0;
+                let fp = FixParams {
+                    i_base: 2.0 * spec.i_trip,
+                    v_base: 32.0,
+                    dt: sh.cfg.dt(),
+                    r: p(param::R),
+                    l: p(param::L),
+                    flux: p(param::FLUX),
+                    cur_bw: p(param::CUR_BW),
+                    speed_kp: p(if hfi_gains {
+                        param::HFI_KP
+                    } else {
+                        param::SPEED_KP
+                    }),
+                    speed_ki: p(if hfi_gains {
+                        param::HFI_KI
+                    } else {
+                        param::SPEED_KI
+                    }),
+                    iq_limit: p(param::IQ_LIMIT),
+                    omega_accel: p(param::OMEGA_ACCEL),
+                    hfi_v: p(param::HFI_V),
+                    hfi_xi: p(param::HFI_XI),
+                    hfi_bw: p(param::HFI_BW),
+                    hfi_xsat: p(param::HFI_XSAT),
+                    id_inject: p(param::ID_INJECT),
+                    pol_a: HFI_POL_A.min(0.5 * spec.i_trip),
+                    pol_s: p(param::HFI_POL_S),
+                    pol_n: p(param::HFI_POL_N) as u32,
+                    lock_s: HFI_LOCK_S,
+                    stuck_s: HFI_STUCK_S,
+                    advance_periods: 0.5 + spec.pwm_latency,
+                    omega_max: 2.0 * p(param::SL_HANDOFF),
+                };
+                (FixHfi::new(&fp), fp)
+            });
+            if self.fixq.is_some() {
+                // The integer path injects and modulates itself.
+                self.hfi = None;
+            }
+        }
         if mode == mode::HALL_FOC && spec.has_halls {
             // Hall FOC keeps the hall angle for its FOC; the tracker only
             // places the position-torque feed-forward.
@@ -1955,6 +2014,97 @@ fn hall_map(p: &impl Fn(u8) -> f32) -> HallMap {
         dir: if p(param::HALL_DIR) < 0.0 { -1.0 } else { 1.0 },
         hyst: p(param::HALL_HYST),
         widths: HallMap::normalized_widths(w),
+    }
+}
+
+/// One tick of the integer HFI drive, converted back to the engine's units.
+struct FixTick {
+    duties: [f32; 3],
+    v_dq: Dq,
+    i_dq: Dq,
+    v_ab: AlphaBeta,
+    iq_ref: f32,
+    theta_tr: f32,
+    omega: f32,
+}
+
+/// Worst and average (EMA, ×16) cycles of the integer step (feature
+/// `fixq`); read them with a debugger.
+#[cfg(feature = "fixq")]
+pub static FIXQ_CYCLES_MAX: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+#[cfg(feature = "fixq")]
+pub static FIXQ_CYCLES_AVG16: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+impl Engine {
+    #[cfg(feature = "fixq")]
+    fn fixq_active(&self) -> bool {
+        self.fixq.is_some()
+    }
+
+    #[cfg(not(feature = "fixq"))]
+    fn fixq_active(&self) -> bool {
+        false
+    }
+
+    #[cfg(not(feature = "fixq"))]
+    fn fixq_tick(&mut self, _: &impl MotorBoard, _: Abc, _: f32, _: f32) -> FixTick {
+        unreachable!()
+    }
+
+    /// The board boundary converts to and from the integer units (an
+    /// FPU-less board would hand over ADC counts and take timer compares).
+    #[cfg(feature = "fixq")]
+    fn fixq_tick(
+        &mut self,
+        b: &impl MotorBoard,
+        i_abc: Abc,
+        vbus: f32,
+        omega_target: f32,
+    ) -> FixTick {
+        use mmc_core::fixq::ONE;
+        let (fx, fp) = self.fixq.as_mut().unwrap();
+        let qi = ONE as f32 / fp.i_base;
+        let qv = ONE as f32 / fp.v_base;
+        let i = [
+            (i_abc.a * qi) as i32,
+            (i_abc.b * qi) as i32,
+            (i_abc.c * qi) as i32,
+        ];
+        let v = (vbus * qv) as i32;
+        let target = FixHfi::target_units(fp, omega_target);
+        let t0 = b.cycles();
+        let o = fx.step(i, v, target);
+        let dur = b.cycles().wrapping_sub(t0);
+        FIXQ_CYCLES_MAX.fetch_max(dur, Ordering::Relaxed);
+        let avg = FIXQ_CYCLES_AVG16.load(Ordering::Relaxed);
+        FIXQ_CYCLES_AVG16.store(avg - (avg >> 6) + (dur << 4 >> 6), Ordering::Relaxed);
+        if o.stuck {
+            self.hfi_stuck = u32::MAX / 2;
+        }
+        let units_per_rad = 4_294_967_296.0 / (2.0 * core::f32::consts::PI);
+        let ang = |t: u32| (t as i32) as f32 / units_per_rad;
+        let (ia, va) = (1.0 / qi, 1.0 / qv);
+        let omega = o.omega_u as f32 / (fp.dt * units_per_rad);
+        self.theta = ang(o.theta);
+        self.omega = omega;
+        FixTick {
+            duties: o.duties.map(|d| d as f32 / ONE as f32),
+            v_dq: Dq {
+                d: o.v_dq.0 as f32 * va,
+                q: o.v_dq.1 as f32 * va,
+            },
+            i_dq: Dq {
+                d: o.i_dq.0 as f32 * ia,
+                q: o.i_dq.1 as f32 * ia,
+            },
+            v_ab: AlphaBeta {
+                alpha: o.v_ab.0 as f32 * va,
+                beta: o.v_ab.1 as f32 * va,
+            },
+            iq_ref: o.iq_cmd as f32 * ia,
+            theta_tr: ang(fx.tracker.theta),
+            omega,
+        }
     }
 }
 
