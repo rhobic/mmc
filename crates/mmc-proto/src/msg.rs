@@ -190,7 +190,16 @@ pub mod param {
     /// the speed reference; 0 = off. (On the observer it made low speed
     /// worse, session 39.)
     pub const SL_FRIC: u8 = 52;
-    pub const COUNT: usize = 53;
+    /// Speed-loop gains while sensorless runs on HFI (A per rad/s el, and
+    /// per rad el); `hfi_kp` = 0 keeps `speed_kp`/`speed_ki`. Back to those
+    /// at the handover to the flux observer.
+    pub const HFI_KP: u8 = 53;
+    pub const HFI_KI: u8 = 54;
+    /// HFI start polarity pulse length [s] (first half unrecorded) and
+    /// number of +d/−d pulse pairs.
+    pub const HFI_POL_S: u8 = 55;
+    pub const HFI_POL_N: u8 = 56;
+    pub const COUNT: usize = 57;
     pub const NAMES: [&str; COUNT] = [
         "r",
         "l",
@@ -245,6 +254,10 @@ pub mod param {
         "hfi_xi",
         "hfi_xsat",
         "sl_fric",
+        "hfi_kp",
+        "hfi_ki",
+        "hfi_pol_s",
+        "hfi_pol_n",
     ];
 }
 

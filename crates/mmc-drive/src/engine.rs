@@ -50,16 +50,18 @@ const COG_FF_OMEGA_MAX: f32 = 500.0;
 /// Slowest rotor [rad/s el] a drive start catches on the fly; below it the
 /// rotor is treated as at rest and the mode starts as it always has.
 const CATCH_OMEGA_MIN: f32 = 30.0;
-/// HFI sensorless start (`hfi_v` > 0): time for the tracker to lock at zero
-/// current, each polarity pulse (and its unrecorded settling), and the
-/// pulse current along ±d. Saturation makes the +d (magnet north) pulse
-/// answer the carrier more strongly (motor 3: 2-20 % at ±0.7 A).
+/// HFI sensorless start (`hfi_v` > 0): time for the tracker to lock, and
+/// the pulse current along ±d. Saturation makes the +d (magnet north) pulse
+/// answer the carrier more strongly (motor 3: 2-20 % at ±0.7 A). The pulse
+/// length and the number of +d/−d pairs are params (`hfi_pol_s`,
+/// `hfi_pol_n`); the first half of each pulse settles unrecorded.
+///
+/// One sign of pulse always pushes against the magnet: an unstable
+/// equilibrium that turns the rotor half a revolution if it lasts. Motor 3
+/// at 0.6 A: offsets grow with τ = 1/√(1.5·p²·ψ·i/J) ≈ 4 ms, so 25 ms pulses
+/// flipped it back and forth (1–3 el revs per start) and tripped the 1.5 A
+/// limit in ~1 start in 10 (session 39). Pulses of a few τ cannot.
 const HFI_LOCK_S: f32 = 0.3;
-const HFI_POL_S: f32 = 0.025;
-const HFI_POL_SETTLE_S: f32 = 0.008;
-/// Polarity pulse pairs, alternating +d/−d: averages the noise, and a rotor
-/// drifting during the test biases both signs alike.
-const HFI_POL_PAIRS: u32 = 3;
 
 const HFI_POL_A: f32 = 0.6;
 /// HFI lock-up: q current at 90 % of its limit with the tracker below half
@@ -840,15 +842,16 @@ impl Engine {
                     }
                     HfiPhase::PolPos | HfiPhase::PolNeg => {
                         let k = (st.phase == HfiPhase::PolNeg) as usize;
-                        if st.ticks > cfg.ticks(HFI_POL_SETTLE_S) {
-                            st.acc[k] += tr.d_amp.abs();
+                        let pulse = cfg.ticks(p(param::HFI_POL_S));
+                        if let Some(d) = tr.d_fresh.filter(|_| 2 * st.ticks > pulse) {
+                            st.acc[k] += d.abs();
                             st.n[k] += 1;
                         }
-                        if st.ticks >= cfg.ticks(HFI_POL_S) {
+                        if st.ticks >= pulse {
                             st.ticks = 0;
                             if k == 0 {
                                 st.phase = HfiPhase::PolNeg;
-                            } else if st.pairs + 1 < HFI_POL_PAIRS {
+                            } else if st.pairs + 1 < p(param::HFI_POL_N) as u32 {
                                 st.pairs += 1;
                                 st.phase = HfiPhase::PolPos;
                             } else {
@@ -893,6 +896,10 @@ impl Engine {
                             if let Some(q) = self.seq.as_mut() {
                                 q.start_closed();
                             }
+                            self.speed.as_mut().unwrap().set_gains(PiGains {
+                                kp: p(param::SPEED_KP),
+                                ki: p(param::SPEED_KI),
+                            });
                             self.hfi_start = None;
                             self.hfi = None;
                         }
@@ -1692,6 +1699,17 @@ impl Engine {
             // The speed reference ramps from rest, not from the I-f handoff.
             self.omega_ref_cur = 0.0;
             self.sl_preload = 0.0;
+            // HFI's own speed gains (0 = the shared ones) until the handover
+            // to the observer: a stiff loop is what beats stiction at a few
+            // rad/s, and the shared gains also serve the observer and halls.
+            if p(param::HFI_KP) > 0.0 {
+                if let Some(s) = self.speed.as_mut() {
+                    s.set_gains(PiGains {
+                        kp: p(param::HFI_KP),
+                        ki: p(param::HFI_KI),
+                    });
+                }
+            }
         }
         if mode == mode::HALL_FOC && spec.has_halls {
             // Hall FOC keeps the hall angle for its FOC; the tracker only

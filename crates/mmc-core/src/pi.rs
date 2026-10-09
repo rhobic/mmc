@@ -30,6 +30,11 @@ impl Pi {
         self.integral = self.integral.clamp(-self.limit, self.limit);
     }
 
+    /// New gains, the integrator kept (bumpless).
+    pub fn set_gains(&mut self, gains: PiGains) {
+        self.gains = gains;
+    }
+
     pub fn reset(&mut self) {
         self.integral = 0.0;
     }

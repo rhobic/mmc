@@ -162,6 +162,10 @@ impl DriveConfig {
             param::HFI_XI => (0.005, 0.5),
             param::HFI_XSAT => (-2.0, 2.0),
             param::SL_FRIC => (0.0, 0.5 * self.spec.i_trip),
+            param::HFI_KP => (0.0, 0.1),
+            param::HFI_KI => (0.0, 10.0),
+            param::HFI_POL_S => (0.002, 0.05),
+            param::HFI_POL_N => (1.0, 20.0),
             // A sector between 30° and 90°: anything outside is a broken
             // sensor or a bad fit, not a placement tolerance.
             id if (param::HALL_W0..param::HALL_W0 + 6).contains(&id) => {

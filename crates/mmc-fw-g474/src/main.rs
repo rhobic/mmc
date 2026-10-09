@@ -178,6 +178,10 @@ const DEFAULTS: [f32; param::COUNT] = [
     0.05,  // HFI_XI
     0.0,   // HFI_XSAT [rad/A] (off)
     0.0,   // SL_FRIC [A] (off)
+    0.0,   // HFI_KP (0 = speed_kp/speed_ki)
+    0.0,   // HFI_KI
+    0.006, // HFI_POL_S [s]
+    8.0,   // HFI_POL_N
 ];
 
 /// f32 capacity of the probe burst buffer: the saliency sweep's full
@@ -189,7 +193,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardG474,
-        fw_version: 29,
+        fw_version: 30,
         name: "mmc-g474",
         defaults: DEFAULTS,
     },

@@ -127,6 +127,10 @@ pub struct Tracker {
     /// Low-passed d-axis demodulated ripple [A] (the normaliser; its sign
     /// is the carrier-to-sample latency's).
     pub d_amp: f32,
+    /// This period's unfiltered d response [A], when the period refreshed
+    /// it (every other one): a short polarity pulse is read from these, as
+    /// `d_amp` still carries the previous pulse.
+    pub d_fresh: Option<f32>,
     /// Last normalised error (≈ 2ξ·(θr − θ̂) when small).
     pub err: f32,
 }
@@ -147,6 +151,7 @@ impl Tracker {
             c2: 0.0,
             prev: None,
             d_amp: 0.0,
+            d_fresh: None,
             err: 0.0,
         }
     }
@@ -169,11 +174,13 @@ impl Tracker {
             let dd = w * (now.d - before.d);
             let dq = w * (now.q - before.q);
             // ~10-update average: the normaliser need not be fast.
+            self.d_fresh = Some(dd);
             self.d_amp += 0.1 * (dd - self.d_amp);
             if self.d_amp.abs() > 1e-4 {
                 self.err = (dq / self.d_amp).clamp(-1.0, 1.0);
             }
         } else {
+            self.d_fresh = None;
             self.err = 0.0;
         }
         // The PLL runs every period; the error refreshes every other one, so

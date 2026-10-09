@@ -214,6 +214,11 @@ impl SpeedLoop {
         }
     }
 
+    /// New gains, the integrator kept.
+    pub fn set_gains(&mut self, gains: PiGains) {
+        self.pi.set_gains(gains);
+    }
+
     /// Bumpless takeover from the startup current.
     pub fn preload(&mut self, iq: f32) {
         self.pi.preload(iq);
