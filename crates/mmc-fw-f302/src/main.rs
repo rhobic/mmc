@@ -155,13 +155,22 @@ const DEFAULTS: [f32; param::COUNT] = [
     core::f32::consts::FRAC_PI_3,
     core::f32::consts::FRAC_PI_3,
     core::f32::consts::FRAC_PI_3,
-    0.0, // ID_DITHER [A] (off)
-    0.5, // ID_DITHER_PERIOD [s]
-    0.0, // COG_FF (off)
+    0.0,  // ID_DITHER [A] (off)
+    0.5,  // ID_DITHER_PERIOD [s]
+    0.0,  // COG_FF (off)
     -1.0, // COG_SHIFT (identify)
-    0.0, 0.0, 0.0, 0.0, // COG_N0..3 (no series until measured)
-    0.0, 0.0, 0.0, 0.0, // COG_A0..3 [N·m]
-    0.0, 0.0, 0.0, 0.0, // COG_P0..3 [rad]
+    0.0,
+    0.0,
+    0.0,
+    0.0, // COG_N0..3 (no series until measured)
+    0.0,
+    0.0,
+    0.0,
+    0.0, // COG_A0..3 [N·m]
+    0.0,
+    0.0,
+    0.0,
+    0.0,   // COG_P0..3 [rad]
     0.0,   // HFI_V [V] (off)
     300.0, // HFI_BW [rad/s]
     0.05,  // HFI_XI
@@ -179,14 +188,14 @@ const DEFAULTS: [f32; param::COUNT] = [
 /// Probe burst capacity [f32s]: 8 KB of the 16 KB RAM. Enough for the R/L
 /// probe (1024 pairs); the 32 KB saliency sweep does not fit this MCU and is
 /// NAKed (the host knows from `BoardTraits::burst_cap`).
-const BURST: usize = 2048;
+const BURST: usize = if cfg!(feature = "burst") { 2048 } else { 0 };
 
 static BURST_BUF: BurstBuffer<BURST> = BurstBuffer::new();
 static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardF302,
-        fw_version: 33,
+        fw_version: 35,
         name: "mmc-f302",
         defaults: DEFAULTS,
     },
@@ -305,8 +314,26 @@ static REPLIES: link::Replies = link::Replies::new();
 
 // ------------------------------------------------------------------- tasks
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+/// The executor's own loop (embassy's thread executor: poll, then sleep on
+/// WFE until an interrupt or a wake), with the sleep booked as idle so the
+/// CPU can be accounted (`Shared::meter_idle`, `tools/cpu_profile.sh`).
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    // The thread executor's context marker: its pender answers with SEV.
+    let exec = cortex_m::singleton!(: embassy_executor::raw::Executor =
+        embassy_executor::raw::Executor::new(usize::MAX as *mut ()))
+    .unwrap();
+    let spawner = exec.spawner();
+    spawner.spawn(init(spawner).unwrap());
+    loop {
+        // Safety: polled from this one thread only, as embassy's own loop.
+        unsafe { exec.poll() };
+        SHARED.meter_idle(cortex_m::peripheral::DWT::cycle_count, cortex_m::asm::wfe);
+    }
+}
+
+#[embassy_executor::task]
+async fn init(spawner: Spawner) {
     let mut config = embassy_stm32::Config::default();
     {
         use embassy_stm32::rcc::*;
@@ -530,12 +557,19 @@ fn init_adc() {
 /// a frame is being handled.
 #[embassy_executor::task]
 async fn rx_task(rx: RingBufferedUartRx<'static>, mut store: FlashStore) {
-    link::rx_loop(&SHARED, &REPLIES, rx, &mut store).await
+    let link = link::rx_loop(&SHARED, &REPLIES, rx, &mut store);
+    link::Metered::new(&SHARED, cortex_m::peripheral::DWT::cycle_count, link).await
 }
 
 #[embassy_executor::task]
 async fn tx_task(tx: UartTx<'static, Async>) {
-    link::tx_loop(&SHARED, &REPLIES, tx).await
+    let link = link::tx_loop(
+        &SHARED,
+        &REPLIES,
+        tx,
+        cortex_m::peripheral::DWT::cycle_count,
+    );
+    link::Metered::new(&SHARED, cortex_m::peripheral::DWT::cycle_count, link).await
 }
 
 // ------------------------------------------------------------- control ISR

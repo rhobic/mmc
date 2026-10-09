@@ -10,12 +10,14 @@ description = "STM32H743ZI (Cortex-M7, 480 MHz) skeleton: the full mmc-drive app
 [workspace]
 
 [features]
-default = ["sixstep", "estim", "cogging", "hall-pos"]
+default = ["sixstep", "estim", "cogging", "hall-pos", "telemetry", "burst"]
 sixstep = ["mmc-drive/sixstep"]
 estim = ["mmc-drive/estim"]
 cogging = ["mmc-drive/cogging"]
 hall-pos = ["mmc-drive/hall-pos"]
 hfi-shadow = ["mmc-drive/hfi-shadow"]
+telemetry = ["mmc-drive/telemetry"]
+burst = ["mmc-drive/burst"]
 fixq = ["mmc-drive/fixq"]
 
 [dependencies]

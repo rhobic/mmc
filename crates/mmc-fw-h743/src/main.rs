@@ -81,7 +81,11 @@ const DEFAULTS: [f32; param::COUNT] = {
 };
 
 /// The saliency sweep's full schedule fits easily (1 MB of RAM).
-const BURST: usize = mmc_core::probe::SAL_HDR + mmc_core::probe::SAL_TICKS * 2;
+const BURST: usize = if cfg!(feature = "burst") {
+    mmc_core::probe::SAL_HDR + mmc_core::probe::SAL_TICKS * 2
+} else {
+    0
+};
 
 static BURST_BUF: BurstBuffer<BURST> = BurstBuffer::new();
 static SHARED: Shared<BURST> = Shared::new(
@@ -140,8 +144,26 @@ impl ParamStore for RamStore {
 
 static REPLIES: link::Replies = link::Replies::new();
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
+/// The executor's own loop (embassy's thread executor: poll, then sleep on
+/// WFE until an interrupt or a wake), with the sleep booked as idle so the
+/// CPU can be accounted (`Shared::meter_idle`, `tools/cpu_profile.sh`).
+#[cortex_m_rt::entry]
+fn main() -> ! {
+    // The thread executor's context marker: its pender answers with SEV.
+    let exec = cortex_m::singleton!(: embassy_executor::raw::Executor =
+        embassy_executor::raw::Executor::new(usize::MAX as *mut ()))
+    .unwrap();
+    let spawner = exec.spawner();
+    spawner.spawn(init(spawner).unwrap());
+    loop {
+        // Safety: polled from this one thread only, as embassy's own loop.
+        unsafe { exec.poll() };
+        SHARED.meter_idle(cortex_m::peripheral::DWT::cycle_count, cortex_m::asm::wfe);
+    }
+}
+
+#[embassy_executor::task]
+async fn init(spawner: Spawner) {
     let mut config = embassy_stm32::Config::default();
     {
         use embassy_stm32::rcc::*;
@@ -203,10 +225,17 @@ async fn control_task() {
 
 #[embassy_executor::task]
 async fn rx_task(rx: RingBufferedUartRx<'static>, mut store: RamStore) {
-    link::rx_loop(&SHARED, &REPLIES, rx, &mut store).await
+    let link = link::rx_loop(&SHARED, &REPLIES, rx, &mut store);
+    link::Metered::new(&SHARED, cortex_m::peripheral::DWT::cycle_count, link).await
 }
 
 #[embassy_executor::task]
 async fn tx_task(tx: UartTx<'static, Async>) {
-    link::tx_loop(&SHARED, &REPLIES, tx).await
+    let link = link::tx_loop(
+        &SHARED,
+        &REPLIES,
+        tx,
+        cortex_m::peripheral::DWT::cycle_count,
+    );
+    link::Metered::new(&SHARED, cortex_m::peripheral::DWT::cycle_count, link).await
 }

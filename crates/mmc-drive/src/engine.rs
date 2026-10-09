@@ -516,9 +516,8 @@ impl Engine {
             let i_ab = clarke(i_abc);
             let vbus = self.vbus_filt.max(1.0);
 
-            let mut v_ab = if self.mode == mode::PROBE
-                && sh.probe_kind.load(Ordering::Relaxed) == test::HFI_SWEEP
-            {
+            let probe = cfg!(feature = "burst") && self.mode == mode::PROBE;
+            let mut v_ab = if probe && sh.probe_kind.load(Ordering::Relaxed) == test::HFI_SWEEP {
                 // HFI sweep (`mmc_core::hfi`): optional align, a short
                 // release, then a ±V_h carrier along each test angle, the
                 // response demodulated and accumulated into the burst.
@@ -599,9 +598,7 @@ impl Engine {
                         v_ab
                     }
                 }
-            } else if self.mode == mode::PROBE
-                && sh.probe_kind.load(Ordering::Relaxed) == test::L_THETA
-            {
+            } else if probe && sh.probe_kind.load(Ordering::Relaxed) == test::L_THETA {
                 // Saliency sweep: align at v_low on θ = 0 (parks a free
                 // rotor; a clamped one just stays put and the fit recovers its
                 // angle), then run the shared `mmc_core::probe` schedule —
@@ -654,7 +651,7 @@ impl Engine {
                     duties = svpwm(v_ab, vbus);
                     v_ab
                 }
-            } else if self.mode == mode::PROBE {
+            } else if probe {
                 // Locked-rotor R/L probe: θ held at 0 (rotor aligned during
                 // the first phase), then unslewed square-wave v_d between the
                 // two levels, recording (i_d, v_d) per tick into the burst
@@ -1239,10 +1236,18 @@ impl Engine {
             }
         }
 
-        // --- telemetry snapshot (seqlock).
+        // --- telemetry snapshot (seqlock). Without `telemetry` the stores
+        // compile away, and with them whatever only fed them; the state
+        // updated along the way (estimator, last currents) stays.
         let seq = sh.telem_seq.load(Ordering::Relaxed);
-        sh.telem_seq.store(seq.wrapping_add(1), Ordering::Release);
-        let put = |id: u8, v: f32| sh.telem[id as usize].store(v.to_bits(), Ordering::Relaxed);
+        if cfg!(feature = "telemetry") {
+            sh.telem_seq.store(seq.wrapping_add(1), Ordering::Release);
+        }
+        let put = |id: u8, v: f32| {
+            if cfg!(feature = "telemetry") {
+                sh.telem[id as usize].store(v.to_bits(), Ordering::Relaxed)
+            }
+        };
         put(channel::IQ_REF, iq_ref);
         put(channel::I_D, i_dq.d);
         put(channel::I_Q, i_dq.q);
@@ -1340,10 +1345,13 @@ impl Engine {
         );
         put(channel::HALL, hall_state.unwrap_or(0) as f32);
         put(channel::OMEGA_HALL, self.hall.omega());
-        sh.telem_seq.store(seq.wrapping_add(2), Ordering::Release);
+        if cfg!(feature = "telemetry") {
+            sh.telem_seq.store(seq.wrapping_add(2), Ordering::Release);
+        }
 
         let dur = b.cycles().wrapping_sub(t0);
         sh.isr_max_cycles.fetch_max(dur, Ordering::Relaxed);
+        sh.isr_sum_cycles.fetch_add(dur, Ordering::Relaxed);
     }
 
     /// The i_q [A] that cancels the position torque at the tracker's angle,

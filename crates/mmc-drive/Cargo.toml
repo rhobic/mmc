@@ -11,7 +11,7 @@ description = "Board-agnostic motor-drive application: drive state machine, prot
 # build everything). A drive mode that is not built in is NAKed at SetDrive,
 # as a board without halls refuses the hall modes; the parameter table is the
 # same in every build, so stored tables and the host tools are unaffected.
-default = ["sixstep", "estim", "cogging", "hall-pos"]
+default = ["sixstep", "estim", "cogging", "hall-pos", "telemetry", "burst"]
 # Six-step: forced, hall and sensorless (back-EMF zero crossings, needs the
 # terminal dividers), 120/180° conduction, the FOC→six-step live handover.
 sixstep = []
@@ -22,6 +22,16 @@ estim = []
 cogging = []
 # HallPosition drive: trapezoidal reference, position PID, hall tracker.
 hall-pos = []
+# Host-link scaling (session 44). `telemetry`: the streaming channels — the
+# control tick's per-period snapshot and the link's frames (Stream,
+# SetTelemetry). Each 29-channel frame costs ~10–12 k cycles to snapshot and
+# encode on the F302, ~8.6 % of its CPU at 500 frames/s. `burst`: the
+# full-rate test recordings (RunTest R/L, saliency and HFI sweeps, ReadBurst)
+# and the probe drive; the profiler needs it, and the burst buffer is the
+# board's biggest RAM user. Without them the link still takes commands,
+# parameters and saves; their messages are NAKed.
+telemetry = []
+burst = []
 # Diagnostic, off by default: in the hall modes, run the HFI tracker in
 # shadow (`hfi_v` > 0) and score it against the halls on `theta_err`.
 # ~1 160 cycles a tick on the F302.

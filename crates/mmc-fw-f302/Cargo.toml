@@ -15,12 +15,14 @@ description = "STM32F302R8 + L6230 three-shunt shield: the MotorBoard under the 
 # feed-forward are left out (session 42); add them to `default` if the bench
 # needs them, then watch tools/fw_size.sh. Each passes through to mmc-drive,
 # so `--no-default-features --features …` builds any set (tools/feature_sizes.sh).
-default = ["hall-pos"]
+default = ["hall-pos", "telemetry", "burst"]
 sixstep = ["mmc-drive/sixstep"]
 estim = ["mmc-drive/estim"]
 cogging = ["mmc-drive/cogging"]
 hall-pos = ["mmc-drive/hall-pos"]
 hfi-shadow = ["mmc-drive/hfi-shadow"]
+telemetry = ["mmc-drive/telemetry"]
+burst = ["mmc-drive/burst"]
 # Run HFI sensorless on the integer path (mmc_core::fixq).
 fixq = ["mmc-drive/fixq"]
 
@@ -59,6 +61,11 @@ opt-level = "s"
 [profile.release.package.mmc-core]
 opt-level = 2
 [profile.release.package.mmc-drive]
+opt-level = 2
+# The protocol codec at 2, not "s": it runs once per telemetry frame, byte by
+# byte, and at "s" a 29-channel frame cost ~12.2 k cycles to snapshot and
+# encode against ~10.2 k at 2, for 0.6 KB of flash (session 44).
+[profile.release.package.mmc-proto]
 opt-level = 2
 [profile.release.package.libm]
 opt-level = 2

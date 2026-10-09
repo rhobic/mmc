@@ -1102,3 +1102,29 @@ fn a_mode_not_built_in_is_refused() {
     }
     assert_eq!(rig.sh.state(), ST_OFF);
 }
+
+/// Without the `telemetry` and `burst` build options the link refuses their
+/// messages instead of half-running them.
+#[test]
+#[cfg(not(any(feature = "telemetry", feature = "burst")))]
+fn link_options_not_built_in_are_refused() {
+    let mut rig = Rig::build(10_000, PmsmParams::small_bldc(), false);
+    for msg in [
+        Message::Stream { enable: true },
+        Message::SetTelemetry {
+            divider: 10,
+            mask: 0xF,
+        },
+        Message::RunTest {
+            kind: mmc_proto::test::RL_STEP,
+            a: 0.5,
+            b: 1.0,
+        },
+        Message::ReadBurst { offset: 0 },
+    ] {
+        assert!(
+            matches!(rig.send(&msg), Message::Nak { .. }),
+            "{msg:?} accepted"
+        );
+    }
+}

@@ -3,6 +3,35 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-09 — session 44: what the host link costs; link as build options
+
+Report section: [mmc Footprint Report](https://claude.ai/artifact/HZRe2D5rGvoNbRqypkjjgJ)
+("The host link"); data in `testresults/link-overhead/`. **F302 fw 35, G474
+fw 39** (nvparam v16).
+
+- **CPU accounting in the firmware**: `Shared::isr_sum_cycles`,
+  `link_cycles` (`link::Metered` around the link loops), `idle_cycles`
+  (`Shared::meter_idle` in the boards' own executor loop), `encode_cycles`;
+  `tools/cpu_profile.sh` / `tools/link_cost.sh` read them twice over OpenOCD
+  without halting.
+- **F302 results**: commands and parameters ~0 %; telemetry ~0.017 % of the
+  CPU per frame/s (500 frames/s ≈ 8 %, the 1 Mbaud link saturates near 680
+  frames/s ≈ 10.5–11.6 %). A 29-channel frame costs 10.2–12.2 k cycles to
+  snapshot and encode (CRC ~2.95 k of it), DMA write ~1.2 k. The per-tick
+  snapshot inside the control interrupt costs 245–580 cycles (3–8 %), whether
+  or not anyone listens. HFI 20 with full telemetry: 22 % idle; lean: 40 %.
+- **Build options** `telemetry` and `burst` (mmc-drive, default on; boards
+  pass them through and size their burst buffer from `burst`). F302 lean
+  (link + hall-pos): −5.3 KB flash, −8.2 KB RAM; H743 lean RAM 38.4 → 5.6 KB.
+  Their messages are NAKed when not built (test
+  `link_options_not_built_in_are_refused`); `mmc-host capture` drives a
+  telemetry-less device without recording.
+- **Idle wake-ups fixed**: not streaming, the send loop checks the stream
+  switch every 100 ms instead of waking each telemetry period (0.8 % → 0 %).
+- F302 builds the codec (`mmc-proto`) at opt-level 2 (+0.6 KB). Next if
+  telemetry must get cheaper: a single-pass encoder, a byte-table or
+  hardware CRC, or 16-bit channel encoding.
+
 ## 2026-10-09 — session 43: footprint report; H743 build test; HFI shadow opt-in
 
 Report: [mmc Footprint Report](https://claude.ai/artifact/HZRe2D5rGvoNbRqypkjjgJ)

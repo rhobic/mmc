@@ -99,8 +99,8 @@ code { font: 13.5px var(--mono); background: var(--accent-soft); padding: 1px 4p
 <header>
   <div class="eyebrow">mmc · measurement report · 2026-10-09</div>
   <h1>mmc Footprint Report</h1>
-  <p class="lede">How much flash, RAM and control-interrupt time each drive feature costs, on the boards we have (STM32F302, STM32G474, STM32G0B1) and on an STM32H743 build test, and how much is left on each.</p>
-  <div class="meta"><span>F302 fw 32 · G474 fw 37 · nvparam v16</span><span>rustc 1.99.0 · opt-level 2 · fat LTO · 1 codegen unit</span><span>motor 3 (maxon EC-i 40) · 18 V bus</span></div>
+  <p class="lede">How much flash, RAM and CPU each drive feature and the host link cost, on the boards we have (STM32F302, STM32G474, STM32G0B1) and on an STM32H743 build test, and how much is left on each.</p>
+  <div class="meta"><span>F302 fw 33–35 · G474 fw 38–39 · nvparam v16</span><span>rustc 1.99.0 · opt-level 2 · fat LTO · 1 codegen unit</span><span>motor 3 (maxon EC-i 40) · 18 V bus</span></div>
 </header>
 
 <section aria-labelledby="s-boards">
@@ -163,6 +163,47 @@ code { font: 13.5px var(--mono); background: var(--accent-soft); padding: 1px 4p
   </table>
   </div>
   <p class="caption">Sensorless six-step from rest tripped overcurrent on motor 3 at this bus voltage, so it has no figure here. Forced and hall six-step are the cheapest closed modes (2,682 and 3,098 cycles) because they skip the current loop and modulation.</p>
+</section>
+
+<section aria-labelledby="s-link">
+  <h2 id="s-link">The host link</h2>
+  <p>The serial protocol is in every image above, but the interrupt figures leave it out: it runs at thread level, in the time the control tick leaves free. These numbers come from firmware counters that book every cycle on the F302 to the control tick, the link, sleep or the rest (executor and USART/DMA interrupts), read twice 3 s apart without halting. Telemetry is the expensive part; commands and parameters cost almost nothing.</p>
+  <div class="figure">
+    <div class="legend" aria-hidden="true"><span><i style="background:var(--s1)"></i>Control tick</span><span><i style="background:var(--s2)"></i>Host link</span><span><i style="background:var(--ink-3)"></i>Executor and other interrupts</span><span><i style="background:var(--grid);outline:1px solid var(--rule)"></i>Idle</span></div>
+    <div id="chart-cpu" role="img" aria-label="Share of the F302's CPU per scenario: control tick, host link, other, idle"></div>
+    <p class="caption">F302 at 72 MHz, 29 telemetry channels unless noted. At 1 Mbaud the link carries about 680 full frames a second, so higher requested rates cost no more. "Lean" is the firmware built without <code>telemetry</code> and <code>burst</code>.</p>
+  </div>
+  <div class="cols">
+    <div class="card">
+      <h3>Per telemetry frame</h3>
+      <ul>
+        <li><strong>10,200–12,200 cycles</strong> to snapshot and encode 29 channels (it varies with code alignment in the 2-wait-state flash); about 5,400 for 5 channels.</li>
+        <li>Of that, <strong>~2,950 is the CRC</strong> (a nibble table read from flash, ~21 cycles a byte). Serializing, COBS stuffing and buffer zeroing take most of the rest.</li>
+        <li>The DMA write and replies add ~1,150.</li>
+        <li>Inside the control tick, the snapshot itself costs <strong>245–580 cycles every tick</strong> (3–8 % of the CPU), whether or not anyone is listening.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Memory</h3>
+      <ul>
+        <li>Link code with command handling: about 10–11 KB of flash on each board.</li>
+        <li><code>telemetry</code> + <code>burst</code> on the F302: 5.3 KB of flash and <strong>8.2 KB of RAM</strong>, half the part. The 8 KB is the probe burst buffer.</li>
+        <li>On the H743 the 32 KB saliency-sweep buffer goes with <code>burst</code>: 38.4 KB of RAM becomes 5.6 KB.</li>
+      </ul>
+    </div>
+  </div>
+  <div class="tablewrap" tabindex="0">
+  <table>
+    <thead><tr><th>Option</th><th>What it keeps or drops</th><th>Saves (F302)</th></tr></thead>
+    <tbody>
+      <tr><td><code>link</code></td><td>Commands, parameters, saving: about 0 % CPU with no telemetry</td><td>needed for any host control</td></tr>
+      <tr><td><code>telemetry</code></td><td>Streaming channels: the per-tick snapshot and the frames</td><td class="n">3–8 % ISR + 8–11 % link</td></tr>
+      <tr><td><code>burst</code></td><td>R/L, saliency and HFI probe recordings and their readout (the profiler needs it)</td><td class="n">8 KB RAM</td></tr>
+      <tr><td>Divider and mask</td><td>At runtime: frame rate and channel count scale the link cost linearly</td><td class="n">~0.017 % per frame/s</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="caption">Not streaming used to cost 0.8 % of the CPU in wake-ups at the telemetry period; the link now checks the stream switch every 100 ms instead (0.0 %). Next steps if telemetry needs to be cheaper: a single-pass encoder that serializes, checksums and stuffs without intermediate buffers (about half the cost, estimated), a byte-table or hardware CRC (−2.9 k cycles a frame), or 16-bit channel encoding (half the bytes, but a protocol version change).</p>
 </section>
 
 <section aria-labelledby="s-opt">
@@ -386,6 +427,51 @@ code { font: 13.5px var(--mono); background: var(--accent-soft); padding: 1px 4p
     { labW: 200, rowH: 26, barH: 14, max: 8000, ticks: [0, 2000, 4000, 6000, 8000], tickFmt: t => fmt(t), budget: 7200 });
   document.getElementById("isr-rows").innerHTML = isr.map(r =>
     `<tr><td>${r.label}</td><td>${buildName[r.b]}</td><td class="n">${fmt(r.v)}</td><td class="n">${Math.round(r.v / 72)} %</td></tr>`).join("");
+
+  // ---- CPU share per scenario (F302, fw 34–35)
+  const cpu = [
+    { label: "Drive off, no host traffic", s: [14.7, 0.0, 1.9, 83.4] },
+    { label: "Drive off, 200 frames/s", s: [15.0, 3.5, 2.0, 79.5] },
+    { label: "Drive off, 500 frames/s", s: [14.7, 7.9, 2.0, 75.4] },
+    { label: "Drive off, 690 frames/s (link full)", s: [14.7, 10.5, 1.8, 72.9] },
+    { label: "Drive off, 5 channels, 2,000/s", s: [15.0, 15.1, 2.5, 67.4] },
+    { label: "HFI 20, 500 frames/s", s: [67.3, 9.4, 0.8, 22.4] },
+    { label: "HFI 20, 200 frames/s", s: [67.2, 3.8, 0.9, 28.1] },
+    { label: "HFI 20, lean build", s: [59.3, 0.0, 0.9, 39.8] },
+    { label: "Observer 1000, 590 frames/s", s: [55.4, 10.5, 0.8, 33.3] },
+    { label: "Observer 600, lean build", s: [48.0, 0.0, 1.3, 50.7] },
+  ];
+  const parts = [["Control tick", "var(--s1)"], ["Host link", "var(--s2)"], ["Other", "var(--ink-3)"], ["Idle", "var(--grid)"]];
+  (function () {
+    const el = document.getElementById("chart-cpu");
+    const W = 760, labW = 230, padR = 8, rowH = 28, barH = 16, top = 4, axisH = 24;
+    const H = top + cpu.length * rowH + axisH, x = v => labW + v / 100 * (W - labW - padR);
+    let s = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
+    for (const t of [0, 25, 50, 75, 100]) {
+      s += `<line class="gridline" x1="${x(t)}" x2="${x(t)}" y1="${top}" y2="${H - axisH + 4}"/>`;
+      s += `<g class="axis"><text x="${x(t)}" y="${H - 6}" text-anchor="middle">${t} %</text></g>`;
+    }
+    cpu.forEach((r, i) => {
+      const y = top + i * rowH + (rowH - barH) / 2;
+      s += `<text class="cat" x="0" y="${y + barH / 2 + 4}">${r.label}</text>`;
+      let acc = 0;
+      r.s.forEach((v, j) => {
+        if (v <= 0) return;
+        const x0 = x(acc), x1 = x(acc + v), w = Math.max(x1 - x0 - (j < 3 ? 2 : 0), 0.5);
+        const tipText = `${r.label}: ${parts.map((p, k) => `${p[0]} ${r.s[k].toFixed(1)} %`).join(" · ")}`;
+        s += `<rect x="${x0}" y="${y}" width="${w}" height="${barH}" fill="${parts[j][1]}" rx="${j === 0 ? 0 : 0}" data-tip="${tipText}"/>`;
+        acc += v;
+      });
+      const busy = r.s[0] + r.s[1] + r.s[2];
+      s += `<text class="val" x="${x(busy) + 6}" y="${y + barH / 2 + 4}">${busy.toFixed(0)} % busy</text>`;
+    });
+    s += `</svg>`;
+    el.innerHTML = s;
+    el.querySelectorAll("[data-tip]").forEach(n => {
+      n.addEventListener("mousemove", e => showTip(e, n.getAttribute("data-tip")));
+      n.addEventListener("mouseleave", hideTip);
+    });
+  })();
 
   const tc = document.getElementById("t-chart"), tt = document.getElementById("t-table");
   const fig = document.getElementById("isr-figure"), tab = document.getElementById("isr-table");

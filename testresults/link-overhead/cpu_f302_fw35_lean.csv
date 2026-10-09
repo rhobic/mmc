@@ -1,0 +1,7 @@
+scenario,isr_pct,link_pct,idle_pct,other_pct,frames_per_s,states
+quiet,11.3,0.0,86.8,1.9,,
+hfi20_cmd,11.3,0.0,86.8,1.9,,
+scenario,isr_pct,link_pct,idle_pct,other_pct,frames_per_s,states
+hfi20_cmd,59.3,0.0,39.8,0.9,,
+obs600_cmd,48.0,0.0,50.7,1.3,,
+hallfoc_cmd,45.3,0.0,52.8,1.9,,
