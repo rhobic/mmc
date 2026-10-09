@@ -18,7 +18,7 @@ for run in "$@"; do
     elif [[ $kind == obs ]]; then a=$(python -c "print(350 if $run > 0 else -350)"); b=$run
     else a=$run; b=; fi
     name="${prof}_w${run/:/_to_}"
-    args=(--drive sl --amp 0.5 --hz="$(hz "$a")" --duration 10)
+    args=(--drive sl --amp 0.5 --hz="$(hz "$a")" --duration "${DUR:-10}")
     title="$kind ($prof) $a rad/s el"
     if [[ -n $b ]]; then args+=(--step-hz="$(hz "$b")"); title+=" -> $b"; fi
     $H capture --serial COM9 --baud 1000000 --divider 5 "${args[@]}" \

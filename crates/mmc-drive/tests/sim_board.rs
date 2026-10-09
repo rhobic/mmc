@@ -898,7 +898,7 @@ fn hfi_starts_a_salient_motor_from_standstill() {
         (param::HFI_V, 1.0),
         (param::HFI_XI, 0.11),
         (param::HFI_BW, 150.0),
-        (param::ID_INJECT, 0.3),
+        (param::HFI_ID, 0.3),
         (param::SL_HANDOFF, 1000.0), // stay on HFI throughout
     ] {
         assert!(matches!(
@@ -936,7 +936,7 @@ fn hfi_hands_back_and_reverses_through_zero() {
         (param::HFI_V, 1.0),
         (param::HFI_XI, 0.11),
         (param::HFI_BW, 150.0),
-        (param::ID_INJECT, 0.3),
+        (param::HFI_ID, 0.3),
         (param::SL_HANDOFF, 350.0),
         (param::OMEGA_ACCEL, 600.0),
     ] {
@@ -995,7 +995,7 @@ fn hfi_starts_with_a_spread_carrier() {
         (param::HFI_V, 1.0),
         (param::HFI_XI, 0.11),
         (param::HFI_BW, 150.0),
-        (param::ID_INJECT, 0.3),
+        (param::HFI_ID, 0.3),
         (param::HFI_SPREAD, 2.0),
         (param::SL_HANDOFF, 1000.0),
     ] {
@@ -1035,7 +1035,7 @@ fn hfi_polarity_reads_saturation_from_any_angle() {
                 (param::HFI_V, 1.0),
                 (param::HFI_XI, 0.11),
                 (param::HFI_BW, 150.0),
-                (param::ID_INJECT, 0.3),
+                (param::HFI_ID, 0.3),
                 (param::HFI_SPREAD, 2.0),
                 (param::SL_HANDOFF, 1000.0),
             ] {

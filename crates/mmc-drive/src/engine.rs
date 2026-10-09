@@ -80,10 +80,14 @@ const HFI_POL_A: f32 = 0.6;
 /// away past ~0.6 A); far enough off, q current makes no torque and the speed
 /// loop winds to its limit holding a stopped rotor (session 39).
 const HFI_STUCK_S: f32 = 0.5;
-/// Below this fraction of `sl_handoff` a sensorless drive running on the
-/// flux observer hands back to HFI (`hfi_v` > 0); hysteresis against the
-/// handover at `sl_handoff`.
-const HFI_HANDBACK: f32 = 0.6;
+/// Below this fraction of `sl_handoff` (estimate and reference both) a
+/// sensorless drive running on the flux observer hands back to HFI
+/// (`hfi_v` > 0); hysteresis against the handover at `sl_handoff`. Low:
+/// HFI's angle degrades with speed, and at 0.3 V a hand-back at 0.6 (210
+/// rad/s el on motor 3) tripped; the observer holds well to ~150 there.
+const HFI_HANDBACK: f32 = 0.45;
+/// Slew of the scheduled carrier amplitude [V/s] (`hfi_v` ↔ `hfi_v_hi`).
+const HFI_V_SLEW: f32 = 2.0;
 /// Speed [rad/s el] over which the friction feed-forward (`sl_fric`) fades
 /// in from zero, so it changes sign smoothly through a zero crossing.
 const FRIC_OMEGA: f32 = 5.0;
@@ -196,6 +200,9 @@ pub struct Engine {
     hfi_start: Option<HfiStart>,
     hfi_edge_err: f32,
     hfi_stuck: u32,
+    /// The last tracker's d response, to start a handed-back one calibrated
+    /// (a fresh one starts at 0 and its first errors are noise over nothing).
+    hfi_d_amp: f32,
     /// The integer HFI drive (feature `fixq`), replacing the float HFI path.
     #[cfg(feature = "fixq")]
     fixq: Option<(FixHfi, FixParams)>,
@@ -280,6 +287,7 @@ impl Engine {
             hfi_start: None,
             hfi_edge_err: 0.0,
             hfi_stuck: 0,
+            hfi_d_amp: 0.0,
             #[cfg(feature = "fixq")]
             fixq: None,
             hall_state_prev: None,
@@ -859,13 +867,13 @@ impl Engine {
                             st.phase = HfiPhase::PolPos;
                             st.ticks = 0;
                         }
-                        // The d bias (`id_inject`) keeps the phase currents
+                        // The d bias (`hfi_id`) keeps the phase currents
                         // off zero, where the dead time would flip with the
                         // carrier and swamp it. Off the axis it is torque,
                         // so the rotor turns a little toward the estimate as
                         // the estimate turns onto the rotor; ramped, so it
                         // settles rather than runs away (HFI_LOCK_RAMP_S).
-                        p(param::ID_INJECT)
+                        p(param::HFI_ID)
                             * (st.ticks as f32 / cfg.ticks(HFI_LOCK_RAMP_S).max(1) as f32).min(1.0)
                     }
                     HfiPhase::PolPos | HfiPhase::PolNeg => {
@@ -920,10 +928,19 @@ impl Engine {
                         };
                         // Fast enough for the flux observer, which has been
                         // integrating all along: hand over, stop injecting.
-                        if w.abs() >= p(param::SL_HANDOFF) && w * omega_target > 0.0 {
+                        // Both the estimate and the reference: at a low
+                        // carrier the tracker's speed is noisy enough to
+                        // cross the line on a spike (session 42: handed over
+                        // at a true 250 rad/s el, then straight back).
+                        let handoff = p(param::SL_HANDOFF);
+                        if w.abs() >= handoff
+                            && self.omega_ref_cur.abs() >= handoff
+                            && w * omega_target > 0.0
+                        {
                             if let Some(q) = self.seq.as_mut() {
                                 q.start_closed();
                             }
+                            self.hfi_d_amp = tr.d_amp;
                             self.speed.as_mut().unwrap().set_gains(PiGains {
                                 kp: p(param::SPEED_KP),
                                 ki: p(param::SPEED_KI),
@@ -931,10 +948,11 @@ impl Engine {
                             self.hfi_start = None;
                             self.hfi = None;
                         }
-                        p(param::ID_INJECT)
+                        p(param::HFI_ID)
                     }
                 };
                 iq_ref = iq_cmd;
+                self.hfi_schedule(&p, omega_target, iq_cmd, dt);
                 // Cross-saturation: q current turns the saliency axis the
                 // tracker locks onto; the rotor's d axis is that plus
                 // `hfi_xsat`·i_q. The carrier stays on the tracker's own axis.
@@ -1026,6 +1044,7 @@ impl Engine {
                     && p(param::HFI_V) > 0.0
                     && !self.fixq_active()
                     && seq_out.omega.abs() < HFI_HANDBACK * p(param::SL_HANDOFF)
+                    && self.omega_ref_cur.abs() < HFI_HANDBACK * p(param::SL_HANDOFF)
                 {
                     self.hfi_handback(&p, self.theta, self.omega, iq_ref);
                 }
@@ -1751,7 +1770,7 @@ impl Engine {
             p(param::HFI_V) > 0.0 && (matches!(mode, mode::HALL_FOC | mode::HALL_POS) || sl_hfi);
         self.hfi = hfi_on.then(|| {
             HfiTracker::new(
-                p(param::HFI_V),
+                p(param::HFI_V_HI).max(p(param::HFI_V)),
                 p(param::HFI_XI),
                 p(param::HFI_BW),
                 self.hall_last.filter(|_| !sl_hfi).unwrap_or(0.0),
@@ -1810,7 +1829,7 @@ impl Engine {
                     hfi_bw: p(param::HFI_BW),
                     hfi_xsat: p(param::HFI_XSAT),
                     hfi_spread: p(param::HFI_SPREAD) as u8,
-                    id_inject: p(param::ID_INJECT),
+                    id_inject: p(param::HFI_ID),
                     pol_a: HFI_POL_A.min(0.5 * spec.i_trip),
                     pol_s: p(param::HFI_POL_S),
                     pol_n: p(param::HFI_POL_N) as u32,
@@ -2079,17 +2098,40 @@ impl Engine {
     /// cross-saturation offset the tracker will see at this q current) and
     /// speed, straight into the run phase; the speed loop keeps its
     /// integrator and takes the HFI gains.
+    /// Carrier amplitude: quiet (`hfi_v`) only while running steady, slow
+    /// and lightly loaded; full (`hfi_v_hi`) through the start, ramps,
+    /// reversals and load, where a weak carrier lost the rotor (session
+    /// 42). Slewed.
+    #[inline(never)]
+    fn hfi_schedule(&mut self, p: &impl Fn(u8) -> f32, omega_target: f32, iq_cmd: f32, dt: f32) {
+        let v_lo = p(param::HFI_V);
+        let v_hi = p(param::HFI_V_HI).max(v_lo);
+        let quiet = self
+            .hfi_start
+            .as_ref()
+            .is_some_and(|s| s.phase == HfiPhase::Run)
+            && (omega_target - self.omega_ref_cur).abs() < 1.0
+            && self.omega_ref_cur.abs() < 0.5 * p(param::SL_HANDOFF)
+            && iq_cmd.abs() < 0.5 * p(param::IQ_LIMIT);
+        let want = if quiet { v_lo } else { v_hi };
+        if let Some(h) = self.hfi.as_mut() {
+            let v = h.amplitude();
+            h.set_amplitude(v + (want - v).clamp(-HFI_V_SLEW * dt, HFI_V_SLEW * dt));
+        }
+    }
+
     #[cold]
     #[inline(never)]
     fn hfi_handback(&mut self, p: &impl Fn(u8) -> f32, theta: f32, omega: f32, iq: f32) {
         let mut tr = HfiTracker::new(
-            p(param::HFI_V),
+            p(param::HFI_V_HI).max(p(param::HFI_V)),
             p(param::HFI_XI),
             p(param::HFI_BW),
             theta - p(param::HFI_XSAT) * iq,
         )
         .with_spread(p(param::HFI_SPREAD) as u8);
         tr.set_omega(omega);
+        tr.d_amp = self.hfi_d_amp;
         self.hfi = Some(tr);
         self.hfi_start = Some(HfiStart {
             phase: HfiPhase::Run,
