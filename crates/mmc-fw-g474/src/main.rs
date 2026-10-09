@@ -22,7 +22,7 @@
 //! | PWM U/V/W (driver IN)| PA8/PA9/PA10 | TIM1 CH1/2/3, AF6, 40 kHz center |
 //! | Phase enables (EN)  | PB13/PB14/PB15 | GPIO; low = phase Hi-Z          |
 //! | Gate-driver STBY    | PB5  | high = run                                |
-//! | EN_FAULT (in)       | PA11 + PB12 | open-drain, low = fault. The shield routes it to PB12 (R37) by default and to PA11 (R35) on other board variants — the vendor's example config uses PA11. Both are read with internal pull-ups, so whichever is unconnected floats high and stays silent. (TIM1_BKIN2 hardware break on PA11 is a follow-up.) |
+//! | EN_FAULT (in)       | PA11 + PB12 | open-drain, low = fault. The shield routes it to PB12 (R37) by default and to PA11 (R35) on other board variants — the vendor's example config uses PA11. Both have internal pull-ups, so whichever is unconnected floats high and stays silent. Both are TIM1 hardware breaks: PB12 = TIM1_BKIN (AF6), PA11 = TIM1_BKIN2 (AF12), latched for `driver_fault`. |
 //! | Current ref (VREF)  | PB4  | GPIO high → VREF ≈ 0.50 V (max via 22k/3.9k divider). This is the *weakest* hardware current limit (≈1.5 A on 0.33 Ω); floating PB4 would pull VREF toward 0 V and trip continuously (the driver disables outputs for tOFF whenever VSNS > VREF) |
 //! | i_U / i_V / i_W     | PA1/PB1/PB0 | ADC1 IN2/IN12/IN15, ×2 shunt amp  |
 //! | VBUS                | PA0  | ADC1 IN1, 180k/12k divider (×16)          |
@@ -209,7 +209,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardG474,
-        fw_version: 39,
+        fw_version: 40,
         name: "mmc-g474",
         defaults: DEFAULTS,
     },
@@ -262,14 +262,35 @@ impl MotorBoard for G474Board {
         });
     }
 
+    /// Latched by TIM1's break inputs (BIF: PB12, B2IF: PA11), so a fault
+    /// pulse shorter than a control tick still counts.
     fn driver_fault(&mut self) -> bool {
-        GPIOA.idr().read().idr(11) == pac::gpio::vals::Idr::LOW
+        let sr = TIM1.sr().read();
+        sr.bif(0)
+            || sr.bif(1)
+            || GPIOA.idr().read().idr(11) == pac::gpio::vals::Idr::LOW
             || GPIOB.idr().read().idr(12) == pac::gpio::vals::Idr::LOW
+    }
+
+    fn clear_driver_fault(&mut self) {
+        clear_break_flags();
+        // Hardware holds MOE clear while a break input is still low, and
+        // sets the flag again: the drive then trips on its next check.
+        TIM1.bdtr().modify(|w| w.set_moe(true));
     }
 
     fn cycles(&self) -> u32 {
         cortex_m::peripheral::DWT::cycle_count()
     }
+}
+
+/// Clear TIM1's break flags (BIF, B2IF). SR flags clear on a written 0;
+/// the 1s leave the others alone.
+fn clear_break_flags() {
+    let mut sr = pac::timer::regs::SrAdv(!0);
+    sr.set_bif(0, false);
+    sr.set_bif(1, false);
+    TIM1.sr().write_value(sr);
 }
 
 /// Parameter blob in the last 2 KB page of bank 2 (0x0807_F800). Code
@@ -401,14 +422,18 @@ fn init_motor_peripherals() {
         w.set_moder(5, Moder::OUTPUT);
         w.set_moder(4, Moder::OUTPUT);
     });
-    // EN_FAULT candidates (see pin-map note): inputs with internal pull-ups
-    // so the unpopulated route reads high instead of floating.
+    // EN_FAULT candidates (see pin-map note): TIM1 break inputs with
+    // internal pull-ups, so the unpopulated route reads high instead of
+    // floating. PA11 = TIM1_BKIN2 (AF12), PB12 = TIM1_BKIN (AF6); the pins'
+    // input buffers still read the level for `driver_fault`.
     {
         use pac::gpio::vals::Pupdr;
-        GPIOA.moder().modify(|w| w.set_moder(11, Moder::INPUT));
         GPIOA.pupdr().modify(|w| w.set_pupdr(11, Pupdr::PULL_UP));
-        GPIOB.moder().modify(|w| w.set_moder(12, Moder::INPUT));
+        GPIOA.afr(1).modify(|w| w.set_afr(11 - 8, 12));
+        GPIOA.moder().modify(|w| w.set_moder(11, Moder::ALTERNATE));
         GPIOB.pupdr().modify(|w| w.set_pupdr(12, Pupdr::PULL_UP));
+        GPIOB.afr(1).modify(|w| w.set_afr(12 - 8, 6));
+        GPIOB.moder().modify(|w| w.set_moder(12, Moder::ALTERNATE));
     }
 
     // --- TIM1: 20 kHz center-aligned PWM, CH4 as the ADC trigger point.
@@ -456,6 +481,28 @@ fn init_motor_peripherals() {
             w.set_cms(vals::Cms::CENTER_ALIGNED1);
             w.set_arpe(true);
         });
+        // Hardware break on EN_FAULT (both routes, active low): the line
+        // low clears MOE at once and, with OSSI, the channels drive their
+        // idle level, low, so the driver's inputs never float. BIF/B2IF
+        // latch it for `driver_fault`; MOE stays off until the drive
+        // re-arms from Off (`clear_driver_fault`). Filters: 8 samples at
+        // 170 MHz (47 ns). The pin inputs are enabled at reset (AF1.BKINE,
+        // AF2.BK2INE).
+        TIM1.cr2().modify(|w| {
+            for ch in 0..3 {
+                w.set_ois(ch, false);
+            }
+        });
+        TIM1.bdtr().modify(|w| {
+            w.set_ossi(vals::Ossi::IDLE_LEVEL);
+            w.set_aoe(false);
+            for n in 0..2 {
+                w.set_bkf(n, vals::FilterValue::FCK_INT_N8);
+                w.set_bkp(n, vals::Bkp::ACTIVE_LOW);
+                w.set_bke(n, true);
+            }
+        });
+        clear_break_flags();
         TIM1.bdtr().modify(|w| w.set_moe(true));
         TIM1.egr().write(|w| w.set_ug(true));
         TIM1.cr1().modify(|w| w.set_cen(true));

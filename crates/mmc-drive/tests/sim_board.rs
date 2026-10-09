@@ -26,6 +26,12 @@ struct SimBoard {
     dt_plant: f32,
     /// Hall sensors unplugged: every read is the invalid all-high state.
     halls_dead: bool,
+    /// The gate driver holds its fault line low.
+    driver_fault_line: bool,
+    /// The board's latch on that line, as a timer break input keeps it.
+    driver_fault_latch: bool,
+    /// Times the drive re-armed the latch.
+    rearms: u32,
     /// Mechanical angle [rad], unwrapped (the plant's own wraps at ±π).
     theta_m_total: f32,
 }
@@ -38,6 +44,9 @@ impl SimBoard {
             enables: 0,
             dt_plant: 1.0 / (ctrl_hz as f32 * SUBSTEPS as f32),
             halls_dead: false,
+            driver_fault_line: false,
+            driver_fault_latch: false,
+            rearms: 0,
             theta_m_total: 0.0,
         }
     }
@@ -113,7 +122,12 @@ impl MotorBoard for SimBoard {
         self.enables = mask;
     }
     fn driver_fault(&mut self) -> bool {
-        false
+        self.driver_fault_latch |= self.driver_fault_line;
+        self.driver_fault_latch
+    }
+    fn clear_driver_fault(&mut self) {
+        self.driver_fault_latch = self.driver_fault_line;
+        self.rearms += 1;
     }
     fn hall_state(&mut self) -> Option<u8> {
         if self.halls_dead {
@@ -567,6 +581,52 @@ fn a_dead_hall_sensor_trips_the_hall_drive() {
     rig.run(0.05);
     assert_eq!(rig.sh.state(), mmc_drive::ST_FAULT_HALL);
     assert_eq!(rig.board.enables, 0, "stage off");
+}
+
+/// A driver fault that came and went between two ticks still trips the
+/// drive (the board latched it); Off then a start re-arms the latch, and
+/// only a start from Off does.
+#[test]
+fn a_latched_driver_fault_trips_and_rearms_only_from_off() {
+    let mut rig = Rig::new(10_000);
+    let foc = Message::SetDrive(DriveMode::HallFoc {
+        amps: 1.0,
+        omega_e: 200.0,
+    });
+    rig.send(&foc);
+    rig.run(0.2);
+    assert_eq!(rig.board.rearms, 1, "the start from Off re-armed");
+    // A switch between running modes leaves the latch alone.
+    rig.send(&Message::SetDrive(DriveMode::HallFoc {
+        amps: 1.0,
+        omega_e: 300.0,
+    }));
+    rig.run(0.05);
+    assert_eq!(rig.board.rearms, 1);
+    // A pulse shorter than a tick, seen only by the latch.
+    rig.board.driver_fault_latch = true;
+    rig.run(0.01);
+    assert_eq!(rig.sh.state(), mmc_drive::ST_FAULT_DRV);
+    assert_eq!(rig.board.enables, 0, "stage off");
+    // Faulted: a start without Off is refused and does not re-arm.
+    rig.send(&foc);
+    rig.run(0.01);
+    assert_eq!(rig.sh.state(), mmc_drive::ST_FAULT_DRV);
+    assert_eq!(rig.board.rearms, 1);
+    // Off, then a start: re-armed, running again.
+    rig.send(&Message::SetDrive(DriveMode::Off));
+    rig.run(0.01);
+    rig.send(&foc);
+    rig.run(0.05);
+    assert_eq!(rig.board.rearms, 2);
+    assert_eq!(rig.sh.state(), mmc_drive::ST_RUN);
+    // A fault line still held low trips again right after the re-arm.
+    rig.board.driver_fault_line = true;
+    rig.send(&Message::SetDrive(DriveMode::Off));
+    rig.run(0.01);
+    rig.send(&foc);
+    rig.run(0.01);
+    assert_eq!(rig.sh.state(), mmc_drive::ST_FAULT_DRV);
 }
 
 #[test]

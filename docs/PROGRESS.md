@@ -3,6 +3,33 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-09 — session 46: driver faults through the timer's break input
+
+- **The gap:** the boards read the driver's fault line once per control
+  tick. The L6230 (IHM07M1) recovers from an overcurrent by itself: the
+  outputs go off ~1 µs after 2.8 A on a high side, and DIAG/EN charges back
+  through 10 kΩ / 1 nF to its 1.8 V threshold, so the line is low for only
+  ~7 µs per retry (datasheet DS6996 §5.3, schematic R22/C17). A once per
+  100 µs read mostly misses that: a stalled or shorted motor can retry at
+  the current limit indefinitely while the drive keeps commanding it.
+- **Now a latch, core to the HAL:** `MotorBoard::driver_fault` means
+  "faulted since the last `clear_driver_fault`", and the drive calls
+  `clear_driver_fault` only on a start from Off (the rule `oc_strikes`
+  already follows), so a fault is never cleared under a live stage. If the
+  line is still low the latch sets again and the drive trips on the same
+  tick. Test `a_latched_driver_fault_trips_and_rearms_only_from_off`.
+- **F302 fw 36:** PA6 (DIAG/EN) is TIM1_BKIN (AF6). **G474 fw 40:** PB12 is
+  TIM1_BKIN (AF6) and PA11 is TIM1_BKIN2 (AF12), the shield's two EN_FAULT
+  routes, both armed (the unfitted one sits high on its pull-up). Both
+  boards: active low, 8-sample filter at the timer clock (111 / 47 ns),
+  OSSI with idle level low, AOE off. A fault clears MOE in hardware at once
+  and the channels drive low, never float (a floating IN with EN high drove
+  the bridge into overcurrent at bring-up); BIF / B2IF latch it; re-arming
+  clears the flags and sets MOE again.
+- Cost: F302 +72 bytes (49 776 of 63 488). **Not yet run on hardware:**
+  confirm on the bench that a stall trips `ST_FAULT_DRV` and that a normal
+  start re-arms. (The H743 build-test board has no power stage; its
+  `driver_fault` stays a constant.)
 ## 2026-10-09 — session 44: what the host link costs; link as build options
 
 Report section: [mmc Footprint Report](https://claude.ai/artifact/HZRe2D5rGvoNbRqypkjjgJ)

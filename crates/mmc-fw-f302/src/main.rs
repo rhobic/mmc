@@ -20,7 +20,7 @@
 //! | VCP UART | PA2/PA3 | USART2, 1 Mbaud |
 //! | PWM U/V/W (L6230 IN1-3) | PA8/PA9/PA10 | TIM1 CH1-3, 20 kHz center-aligned |
 //! | Phase enables (EN1-3) | PC10/PC11/PC12 | low = phase Hi-Z |
-//! | DIAG/EN | PA6 | L6230 open-drain fault, 10k pull-up; low = fault |
+//! | DIAG/EN | PA6 | L6230 open-drain fault, 10k pull-up; low = fault. TIM1_BKIN (AF6): the hardware break latches it |
 //! | Current ref | PB4 | driven high: the L6230 comparator reference |
 //! | i_U / i_V / i_W | PA0/PC1/PC0 | ADC1 IN1/IN7/IN6, 0.33 Ω, AV 1.53 |
 //! | VBUS | PA1 | ADC1 IN2, 169k/9.31k |
@@ -195,7 +195,7 @@ static SHARED: Shared<BURST> = Shared::new(
     DriveConfig {
         spec: SPEC,
         kind: DeviceKind::BoardF302,
-        fw_version: 35,
+        fw_version: 36,
         name: "mmc-f302",
         defaults: DEFAULTS,
     },
@@ -263,8 +263,23 @@ impl MotorBoard for F302Board {
         }
     }
 
+    /// Latched by TIM1's break input on PA6: an L6230 overcurrent retry
+    /// holds DIAG/EN low for only ~7 µs (10 kΩ / 1 nF back up to the EN
+    /// threshold), which a read of the pin once per 100 µs tick mostly
+    /// misses.
     fn driver_fault(&mut self) -> bool {
-        self.diag.is_low()
+        self.pwm.regs_advanced().sr().read().bif(0) || self.diag.is_low()
+    }
+
+    fn clear_driver_fault(&mut self) {
+        let r = self.pwm.regs_advanced();
+        // SR flags clear on a written 0; the 1s leave the others alone.
+        let mut sr = pac::timer::regs::SrAdv(!0);
+        sr.set_bif(0, false);
+        r.sr().write_value(sr);
+        // Hardware holds MOE clear while the break input is still low, and
+        // sets BIF again: the drive then trips on its next fault check.
+        r.bdtr().modify(|w| w.set_moe(true));
     }
 
     fn hall_state(&mut self) -> Option<u8> {
@@ -429,6 +444,38 @@ async fn init(spawner: Spawner) {
         r.ccer().modify(|w| w.set_cce(4, true));
     }
     pwm.set_mms2_selection(pac::timer::vals::Mms2::COMPARE_OC5);
+    // Hardware break on DIAG/EN (PA6 = TIM1_BKIN, AF6, pull-up kept from
+    // `diag`): the line low clears MOE at once, and with OSSI the channels
+    // then drive their idle level, low, so the L6230 inputs never float (a
+    // floating IN with EN high drove the bridge into overcurrent at
+    // bring-up). BIF latches it for `driver_fault`; MOE stays off until the
+    // drive re-arms from Off (`clear_driver_fault`). The filter (8 samples
+    // at 72 MHz, 111 ns) passes the L6230's ~7 µs fault pulse.
+    {
+        use pac::timer::vals;
+        let gpioa = pac::GPIOA;
+        gpioa.afr(0).modify(|w| w.set_afr(6, 6));
+        gpioa
+            .moder()
+            .modify(|w| w.set_moder(6, pac::gpio::vals::Moder::ALTERNATE));
+        let r = pwm.regs_advanced();
+        r.cr2().modify(|w| {
+            for ch in 0..3 {
+                w.set_ois(ch, false);
+            }
+        });
+        r.bdtr().modify(|w| {
+            w.set_ossi(vals::Ossi::IDLE_LEVEL);
+            w.set_bkf(0, vals::FilterValue::FCK_INT_N8);
+            w.set_bkp(0, vals::Bkp::ACTIVE_LOW);
+            w.set_bke(0, true);
+            w.set_aoe(false);
+        });
+        // A break latched while the pin settled at boot does not count.
+        let mut sr = pac::timer::regs::SrAdv(!0);
+        sr.set_bif(0, false);
+        r.sr().write_value(sr);
+    }
     pwm.set_moe(true);
     pwm.generate_update_event();
     pwm.start();
