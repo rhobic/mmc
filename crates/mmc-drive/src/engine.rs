@@ -1570,6 +1570,8 @@ impl Engine {
             // the switch transient (review follow-up, origin `5bc16cd`).
             if self.mode == mode::OFF {
                 self.oc_strikes = 0;
+                // The same rule for the board's latched driver fault.
+                b.clear_driver_fault();
             }
             self.clean_start(sh, mode);
         }
