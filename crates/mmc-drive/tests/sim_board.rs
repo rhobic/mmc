@@ -28,6 +28,10 @@ struct SimBoard {
     halls_dead: bool,
     /// Mechanical angle [rad], unwrapped (the plant's own wraps at ±π).
     theta_m_total: f32,
+    /// What the bus sense reads [V]; the stage still drives from `VBUS`.
+    vbus_sensed: f32,
+    /// The gate driver's fault line.
+    drv_fault: bool,
 }
 
 impl SimBoard {
@@ -39,6 +43,8 @@ impl SimBoard {
             dt_plant: 1.0 / (ctrl_hz as f32 * SUBSTEPS as f32),
             halls_dead: false,
             theta_m_total: 0.0,
+            vbus_sensed: VBUS,
+            drv_fault: false,
         }
     }
 
@@ -100,7 +106,7 @@ impl MotorBoard for SimBoard {
         let i = self.motor.phase_currents();
         Sample {
             phase_volts: [i.a, i.b, i.c].map(|i| AMP_ZERO - VOLTS_PER_AMP * i),
-            vbus: VBUS,
+            vbus: self.vbus_sensed,
         }
     }
     fn terminal_volts(&mut self) -> [f32; 3] {
@@ -113,7 +119,7 @@ impl MotorBoard for SimBoard {
         self.enables = mask;
     }
     fn driver_fault(&mut self) -> bool {
-        false
+        self.drv_fault
     }
     fn hall_state(&mut self) -> Option<u8> {
         if self.halls_dead {
@@ -1282,6 +1288,52 @@ fn hall_six_step_reverses_with_bounded_current() {
         assert!(
             (w + 250.0).abs() < 0.15 * 250.0,
             "{conduction}°: rotor at {w:.0} after the reversal"
+        );
+    }
+}
+
+/// A bus pumped over `vbus_max` with the stage already off — by a rotor
+/// regenerating through the body diodes after a trip — is reported as a bus
+/// fault, outranking the trip, and Off re-arms only once the bus is back.
+#[test]
+fn an_over_voltage_after_a_trip_is_reported() {
+    let st = mmc_drive::ST_FAULT_VBUS;
+    for hz in RATES {
+        let mut rig = Rig::new(hz);
+        rig.board.vbus_sensed = 40.0;
+        rig.run(0.05);
+        assert_eq!(rig.sh.state(), st, "{hz} Hz: idle over-voltage");
+        rig.send(&Message::SetDrive(DriveMode::Off));
+        rig.run(0.01);
+        assert_eq!(rig.sh.state(), st, "{hz} Hz: still over after Off");
+
+        rig.board.vbus_sensed = VBUS;
+        rig.run(0.05);
+        rig.send(&Message::SetDrive(DriveMode::Off));
+        rig.run(0.01);
+        assert_eq!(
+            rig.sh.state(),
+            ST_OFF,
+            "{hz} Hz: re-armed once the bus is back"
+        );
+
+        // A trip turns the stage off, then the bus rises behind it.
+        rig.send(&Message::SetDrive(DriveMode::IfCurrent {
+            amps: 0.3,
+            omega_e: 50.0,
+        }));
+        rig.run(0.1);
+        rig.board.drv_fault = true;
+        rig.run(0.01);
+        rig.board.drv_fault = false;
+        assert_eq!(rig.sh.state(), mmc_drive::ST_FAULT_DRV, "{hz} Hz: tripped");
+        assert_eq!(rig.board.enables, 0, "{hz} Hz: stage off");
+        rig.board.vbus_sensed = 40.0;
+        rig.run(0.05);
+        assert_eq!(
+            rig.sh.state(),
+            st,
+            "{hz} Hz: over-voltage outranks the trip"
         );
     }
 }

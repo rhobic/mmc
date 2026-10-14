@@ -25,7 +25,7 @@ use mmc_core::tuning::current_pi_gains;
 use mmc_hal::MotorBoard;
 use mmc_proto::{channel, param, test};
 
-use crate::{mode, Shared, BURST_DONE, ST_FAULT_DRV, ST_FAULT_OC, ST_FAULT_VBUS, ST_OFF};
+use crate::{mode, Shared, BURST_DONE, ST_CAL, ST_FAULT_DRV, ST_FAULT_OC, ST_FAULT_VBUS, ST_OFF};
 use crate::{ST_FAULT_HALL, ST_RUN, ST_SL_BLEND, ST_SL_RAMP, ST_SS_UNLOCKED, ST_STALL};
 
 const V_SLEW: f32 = 5.0; // V/s
@@ -487,6 +487,16 @@ impl Engine {
             let last = sh.last_rx_tick.load(Ordering::Relaxed);
             if self.mode != mode::OFF && ticks.wrapping_sub(last) > cfg.ticks(DEADMAN_S) {
                 self.trip(sh, b, ST_OFF);
+            }
+        } else if self.vbus_filt > spec.vbus_max {
+            // The stage is off but the bus is still over: a rotor turning
+            // faster than the bus holds back pumps it through the body
+            // diodes (after an over-current trip, say), which no switch
+            // here can stop. Say so: it outranks the fault that turned the
+            // stage off, and Off re-arms it only once the bus is back.
+            let st = sh.state.load(Ordering::Relaxed);
+            if st != ST_CAL && st != ST_FAULT_VBUS {
+                sh.state.store(ST_FAULT_VBUS, Ordering::Relaxed);
             }
         }
 
