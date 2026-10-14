@@ -3,6 +3,26 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-14 — session 46: a bus over-voltage with the stage off is reported
+
+Found by the twin's DC-link review. **F302 fw 37, G474 fw 41, H743 fw 3**
+(nvparam unchanged).
+
+- **`vbus_max` was only checked while running.** After a trip (over-current,
+  driver fault) the stage is off, but a rotor still turning faster than the
+  bus holds back regenerates through the body diodes and keeps pumping the
+  bus; a lab supply cannot sink that current, so the link capacitor rises,
+  potentially past the L6230's 52 V rating, with the drive still showing
+  the earlier trip, or idle. Now
+  the bus is checked with the stage off as well: over `vbus_max` the state
+  becomes `ST_FAULT_VBUS` (outranking the trip that turned the stage off;
+  calibration is left alone), and Off re-arms only once the bus is back.
+  Nothing on the drive can stop the pumping itself; the fault tells the
+  host to. Test `an_over_voltage_after_a_trip_is_reported`.
+- **Open:** an active short (all low sides on) would stop the pumping, but
+  at speed it puts ψ·ω/L of short-circuit current through the winding;
+  whether that is safe is per motor and needs the bench.
+
 ## 2026-10-14 — session 45: review fixes — an ISR panic, hall six-step current, long-run hall tracking
 
 From a file-scoped review of `main` at `b437557`. **F302 fw 36, G474 fw 40,
