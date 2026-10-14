@@ -1128,3 +1128,160 @@ fn link_options_not_built_in_are_refused() {
         );
     }
 }
+
+/// Run `secs`, returning the slowest and fastest rotor speed [rad/s el] and
+/// the largest phase current [A].
+fn run_watch(rig: &mut Rig, secs: f32) -> (f32, f32, f32) {
+    let (mut lo, mut hi, mut peak) = (f32::INFINITY, f32::NEG_INFINITY, 0.0f32);
+    let n = (secs * rig.hz as f32) as u32;
+    for k in 0..n {
+        if k % (rig.hz / 10) == 0 {
+            rig.sh.host_activity();
+        }
+        rig.eng.tick(&rig.sh, &mut rig.board);
+        rig.board.advance();
+        let w = rig.board.motor.omega_e();
+        lo = lo.min(w);
+        hi = hi.max(w);
+        let i = rig.board.motor.phase_currents();
+        peak = peak.max(i.a.abs()).max(i.b.abs()).max(i.c.abs());
+    }
+    (lo, hi, peak)
+}
+
+/// The boards' software trip [A]; this rig trips at 2.5 A, so the tests
+/// below check the margin to the boards' level themselves.
+const BOARD_TRIP: f32 = 1.5;
+
+/// `iq_limit` may be set below the 0.1 A floor of the sensorless start
+/// current: the start must not panic (`clamp(0.1, 0.05)` did, in the ISR).
+#[test]
+fn a_tiny_iq_limit_does_not_panic_the_sensorless_start() {
+    let mut rig = Rig::new(10_000);
+    assert!(matches!(
+        rig.send(&Message::SetParam {
+            id: param::IQ_LIMIT,
+            value: 0.08,
+        }),
+        Message::Ack { .. }
+    ));
+    assert!(matches!(
+        rig.send(&Message::SetDrive(DriveMode::Sensorless {
+            amps: 0.5,
+            omega_e: 300.0,
+        })),
+        Message::Ack { .. }
+    ));
+    rig.run(0.2);
+}
+
+/// A flying start into I-f with a negative amplitude puts the current on
+/// the forced frame's −q: the seeded frame must account for it, or the
+/// current lands against the magnet and the rotor pole-slips.
+#[test]
+fn flying_if_entry_with_negative_amps_holds_the_rotor() {
+    for dir in [1.0f32, -1.0] {
+        let mut peaks = [0.0f32; 2];
+        for (k, amps) in [0.5f32, -0.5].into_iter().enumerate() {
+            let mut rig = Rig::new(10_000);
+            rig.send(&Message::SetDrive(DriveMode::HallFoc {
+                amps: 1.0,
+                omega_e: 200.0 * dir,
+            }));
+            rig.run(2.0);
+            let w0 = rig.board.motor.omega_e();
+            rig.send(&Message::SetDrive(DriveMode::IfCurrent {
+                amps,
+                omega_e: 200.0 * dir,
+            }));
+            let (lo, hi, peak) = run_watch(&mut rig, 0.5);
+            println!("I-f {amps} A at {w0:.0}: {lo:.0}..{hi:.0}, peak {peak:.2} A");
+            assert_eq!(rig.sh.state(), ST_RUN);
+            let (slow, fast) = if dir > 0.0 { (lo, hi) } else { (-hi, -lo) };
+            assert!(
+                slow > 0.6 * 200.0 && fast < 1.4 * 200.0,
+                "I-f {amps} A at {w0:.0}: {lo:.0}..{hi:.0}"
+            );
+            peaks[k] = peak;
+        }
+        assert!(
+            peaks[1] < 1.2 * peaks[0],
+            "{dir}: −0.5 A peaked {:.2} A against {:.2} A for +0.5 A",
+            peaks[1],
+            peaks[0]
+        );
+    }
+}
+
+/// Hall six-step started on a rotor already turning the commanded way
+/// runs on from its speed instead of braking it: at a zero reference the
+/// loop sat at zero duty, which shorts the driven pair across the
+/// back-EMF.
+#[test]
+#[cfg_attr(not(feature = "sixstep"), ignore = "needs feature sixstep")]
+fn hall_six_step_catches_a_turning_rotor() {
+    let mut rig = Rig::new(10_000);
+    rig.send(&Message::SetParam {
+        id: param::IQ_LIMIT,
+        value: 0.8,
+    });
+    rig.send(&Message::SetDrive(DriveMode::HallFoc {
+        amps: 0.8,
+        omega_e: 300.0,
+    }));
+    rig.run(2.0);
+    let w0 = rig.board.motor.omega_e();
+    rig.send(&Message::SetDrive(DriveMode::SixStepHall {
+        duty: 0.6,
+        omega_e: 300.0,
+    }));
+    let (lo, _, peak) = run_watch(&mut rig, 0.5);
+    println!("hall six-step entry at {w0:.0}: slowest {lo:.0}, peak {peak:.2} A");
+    assert_eq!(rig.sh.state(), ST_RUN);
+    // On main: reversed to −54 rad/s at 2.24 A.
+    assert!(lo > 0.6 * w0, "dipped to {lo:.0} from {w0:.0}");
+    assert!(peak < BOARD_TRIP, "peak {peak:.2} A");
+}
+
+/// Reversing hall six-step live: the reference slews through zero and the
+/// current stays bounded by `iq_limit` while the rotor still turns the old
+/// way, instead of the loop saturating at full duty with the back-EMF
+/// adding to it (plugging).
+#[test]
+#[cfg_attr(not(feature = "sixstep"), ignore = "needs feature sixstep")]
+fn hall_six_step_reverses_with_bounded_current() {
+    for conduction in [120.0f32, 180.0] {
+        let mut rig = Rig::new(10_000);
+        rig.send(&Message::SetParam {
+            id: param::IQ_LIMIT,
+            value: 0.8,
+        });
+        rig.send(&Message::SetParam {
+            id: param::SS_CONDUCTION,
+            value: conduction,
+        });
+        let drive = |w| {
+            Message::SetDrive(DriveMode::SixStepHall {
+                duty: 0.6,
+                omega_e: w,
+            })
+        };
+        rig.send(&drive(250.0));
+        rig.run(4.0);
+        let w0 = rig.board.motor.omega_e();
+        assert!(
+            w0 > 200.0,
+            "{conduction}°: only {w0:.0} before the reversal"
+        );
+        rig.send(&drive(-250.0));
+        let (_, _, peak) = run_watch(&mut rig, 6.0);
+        let w = rig.board.motor.omega_e();
+        println!("{conduction}° reversal from {w0:.0}: now {w:.0}, peak {peak:.2} A");
+        assert_eq!(rig.sh.state(), ST_RUN, "{conduction}°: faulted");
+        assert!(peak < BOARD_TRIP, "{conduction}°: peak {peak:.2} A");
+        assert!(
+            (w + 250.0).abs() < 0.15 * 250.0,
+            "{conduction}°: rotor at {w:.0} after the reversal"
+        );
+    }
+}

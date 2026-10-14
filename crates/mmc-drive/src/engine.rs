@@ -153,7 +153,9 @@ pub struct Engine {
     ss_sensing: bool,
     /// Duty→speed loop for six-step, closed on the crossing interval.
     ss_speed: Option<Pi>,
-    /// Speed target while sensing [rad/s electrical].
+    /// Speed target [rad/s electrical]: the slewed reference while sensing
+    /// (sensorless six-step, unsigned), or hall six-step's signed slewed
+    /// reference.
     ss_target: f32,
     /// Probe tick counter (mode 4).
     probe_ticks: u32,
@@ -314,7 +316,7 @@ impl Engine {
         self.cog.as_ref()
     }
 
-    /// The angle [rad el, unwrapped] the position-torque feed-forward used
+    /// The angle [rad el, wrapped] the position-torque feed-forward used
     /// last tick (the hall tracker's), if any.
     pub fn ff_angle(&self) -> Option<f32> {
         self.ff_theta.map(|t| t.0)
@@ -727,7 +729,10 @@ impl Engine {
                         }
                         self.pos_meas = pos - self.pos_origin.unwrap_or(0.0);
                         self.omega = w;
-                        self.ff_theta = Some((pos, w));
+                        // The feed-forward wants the angle, at full precision
+                        // (the unwrapped position rounds as it grows).
+                        let th = self.tracker.as_ref().map_or(pos, |t| t.angle());
+                        self.ff_theta = Some((th, w));
                     }
                     let measured = self.pos_meas;
                     let target = omega_target * pp;
@@ -793,10 +798,10 @@ impl Engine {
                             .unwrap()
                             .update(self.omega_ref_cur, self.omega, dt);
                     if let Some(h) = hall_state {
-                        self.ff_theta = self
-                            .tracker
-                            .as_mut()
-                            .and_then(|t| t.update(h, self.iq_last - cog_now, dt));
+                        self.ff_theta = self.tracker.as_mut().and_then(|t| {
+                            let (_, w) = t.update(h, self.iq_last - cog_now, dt)?;
+                            Some((t.angle(), w))
+                        });
                     }
                     iq_ref = (iq_ref + p(param::COG_FF) * cog_unit)
                         .clamp(-p(param::IQ_LIMIT), p(param::IQ_LIMIT));
@@ -1478,9 +1483,13 @@ impl Engine {
                 // would put the full current against the magnet.
                 let lean = mmc_core::math::sqrt(1.0 - frac * frac);
                 // Current angle in the rotor frame, then the forced frame
-                // whose q axis carries it.
+                // whose q axis carries it: I-f puts `amp` on that q axis, so
+                // the current sits a quarter turn ahead of the frame for a
+                // positive amplitude and a quarter turn behind for a negative
+                // one.
                 let phi = mmc_core::math::atan2(frac, lean);
-                self.theta = wrap_angle(th + phi - core::f32::consts::FRAC_PI_2);
+                let side = if amp < 0.0 { -1.0 } else { 1.0 };
+                self.theta = wrap_angle(th + phi - side * core::f32::consts::FRAC_PI_2);
                 self.omega = w;
                 self.amp = amp;
             }
@@ -1686,9 +1695,12 @@ impl Engine {
             let dir = if omega_t < 0.0 { -1.0 } else { 1.0 };
             let iq_lim = p(param::IQ_LIMIT);
             let handoff = p(param::SL_HANDOFF);
+            // max/min, not clamp: `iq_limit` may be set as low as 0.05, and
+            // `clamp(0.1, 0.05)` panics — in the ISR, with the stage live.
             let i_start = f32::from_bits(sh.cmd_amp.load(Ordering::Relaxed))
                 .abs()
-                .clamp(0.1, iq_lim);
+                .max(0.1)
+                .min(iq_lim);
             self.seq = Some(Sequencer::new(SequencerCfg {
                 i_start,
                 accel: p(param::OMEGA_ACCEL),
@@ -1912,10 +1924,27 @@ impl Engine {
                 },
                 spec.max_duty,
             );
-            let ff = p(param::IQ_LIMIT) * 2.0 * p(param::R) / self.vbus_filt.max(1.0);
+            let target = f32::from_bits(sh.cmd_omega.load(Ordering::Relaxed));
+            let r_path = sixstep_r_path(&p);
+            let vbus = self.vbus_filt.max(1.0);
+            self.ss_target = 0.0;
+            let mut ff = p(param::IQ_LIMIT) * r_path / vbus;
+            match catch {
+                // A rotor already turning the commanded way: run on from its
+                // speed at the duty that holds it there (its back-EMF plus
+                // the breakaway drop, as the sensorless handover seeds).
+                // Starting at a zero reference would put the loop at zero
+                // duty against the back-EMF.
+                Some((_, w, _)) if w * target > 0.0 => {
+                    self.ss_target = w;
+                    ff = (p(param::FLUX) * w.abs() + p(param::IQ_LIMIT) * r_path) / vbus;
+                }
+                // Turning the other way, or at rest: the reference ramps from
+                // zero, and sixstep_hall limits the plugging current.
+                _ => {}
+            }
             pi.preload(ff.clamp(0.0, spec.max_duty));
             self.ss_speed = Some(pi);
-            self.ss_target = 0.0;
         }
         // Dead-time compensation applies to every FOC-modulated mode, not just
         // sensorless: the bridge takes its cut from an I-f current vector
@@ -1949,21 +1978,53 @@ impl Engine {
         let spec = &sh.cfg.spec;
         let dt = sh.cfg.dt();
         let p = |id| sh.param(id);
-        let dir = if omega_target < 0.0 { -1.0 } else { 1.0 };
+        // Slew a signed reference so a retarget does not step the duty; the
+        // commutation direction follows its sign, through zero on a reversal.
+        let accel = p(param::OMEGA_ACCEL);
+        self.ss_target += (omega_target - self.ss_target).clamp(-accel * dt, accel * dt);
+        let dir = if self.ss_target < 0.0 || (self.ss_target == 0.0 && omega_target < 0.0) {
+            -1.0
+        } else {
+            1.0
+        };
         let mut sector = sixstep::sector_of(self.theta);
         if dir < 0.0 {
             sector = (sector + 3) % sixstep::SECTORS;
         }
         self.ss_sector = sector;
-        // Slew the target so a retarget does not step the duty.
-        let accel = p(param::OMEGA_ACCEL);
-        let want = omega_target.abs();
-        self.ss_target += (want - self.ss_target).clamp(-accel * dt, accel * dt);
         let measured = self.omega * dir;
-        let ceiling = amp_target.clamp(0.0, spec.max_duty);
+        // Bound the winding current to `iq_limit` both ways, on the same duty
+        // model as the feed-forward (back-EMF ψ·|ω| plus i·R_path across the
+        // driven windings, over the bus). Duty below the back-EMF is not "less
+        // torque" but braking — the PWM off-time and the low leg short the
+        // pair across it, at zero duty with only the winding resistance to
+        // limit it — and once the rotor turns against the commanded
+        // direction (a reversal) the back-EMF adds to the drive instead.
+        let vbus = self.vbus_filt.max(1.0);
+        let r_path = sixstep_r_path(&p);
+        let i_duty = p(param::IQ_LIMIT) * r_path / vbus;
+        let e_duty = p(param::FLUX) * self.omega.abs() / vbus;
+        let (floor, top) = if measured >= 0.0 {
+            (
+                (e_duty - i_duty).max(0.0),
+                amp_target.clamp(0.0, spec.max_duty),
+            )
+        } else {
+            (
+                0.0,
+                amp_target.clamp(0.0, spec.max_duty).min(i_duty - e_duty),
+            )
+        };
+        if floor > top {
+            // No duty keeps the current in bounds (the back-EMF alone would
+            // drive more): coast, all legs open, until the rotor slows.
+            b.set_phase_enables(0);
+            sh.sixstep_sector.store(sector as u8, Ordering::Relaxed);
+            return [0.0; 3];
+        }
         let pi = self.ss_speed.as_mut().unwrap();
-        let raw = pi.update(self.ss_target - measured, dt);
-        let duty = raw.max(0.0).min(ceiling);
+        let raw = pi.update(self.ss_target.abs() - measured, dt);
+        let duty = raw.max(floor).min(top);
         if raw != duty {
             // Back-calculation: no braking quadrant, so it saturates low on
             // every deceleration and would otherwise wind up.
@@ -2109,6 +2170,17 @@ fn cog_terms(p: &impl Fn(u8) -> f32) -> [Term; TERMS] {
 }
 
 /// The hall calibration as the parameter table holds it.
+/// Winding resistance the six-step drive current flows through [Ω]: 120°
+/// drives two windings in series, 180° one in series with two in parallel.
+fn sixstep_r_path(p: &impl Fn(u8) -> f32) -> f32 {
+    let k = if p(param::SS_CONDUCTION) >= 150.0 {
+        1.5
+    } else {
+        2.0
+    };
+    k * p(param::R)
+}
+
 fn hall_map(p: &impl Fn(u8) -> f32) -> HallMap {
     let w: [f32; 6] = core::array::from_fn(|k| p(param::HALL_W0 + k as u8));
     HallMap {
