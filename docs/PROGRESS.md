@@ -3,6 +3,79 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-14 — session 46: a bus over-voltage with the stage off is reported
+
+Found by the twin's DC-link review. **F302 fw 37, G474 fw 41, H743 fw 3**
+(nvparam unchanged).
+
+- **`vbus_max` was only checked while running.** After a trip (over-current,
+  driver fault) the stage is off, but a rotor still turning faster than the
+  bus holds back regenerates through the body diodes and keeps pumping the
+  bus; a lab supply cannot sink that current, so the link capacitor rises,
+  potentially past the L6230's 52 V rating, with the drive still showing
+  the earlier trip, or idle. Now
+  the bus is checked with the stage off as well: over `vbus_max` the state
+  becomes `ST_FAULT_VBUS` (outranking the trip that turned the stage off;
+  calibration is left alone), and Off re-arms only once the bus is back.
+  Nothing on the drive can stop the pumping itself; the fault tells the
+  host to. Test `an_over_voltage_after_a_trip_is_reported`.
+- **Open:** an active short (all low sides on) would stop the pumping, but
+  at speed it puts ψ·ω/L of short-circuit current through the winding;
+  whether that is safe is per motor and needs the bench.
+
+## 2026-10-14 — session 45: review fixes — an ISR panic, hall six-step current, long-run hall tracking
+
+From a file-scoped review of `main` at `b437557`. **F302 fw 36, G474 fw 40,
+H743 fw 2** (nvparam unchanged).
+
+- **A small `iq_limit` panicked the control interrupt.** `iq_limit` accepts
+  0.05 A and up, but the sensorless start clamped its current with
+  `clamp(0.1, iq_limit)`, which panics when the floor is above the
+  ceiling — inside `Engine::tick`, into `panic_halt` with PWM live. Now
+  `max(0.1).min(iq_limit)`. Test
+  `a_tiny_iq_limit_does_not_panic_the_sensorless_start`.
+- **Flying start into I-f with negative `amps`** seeded the forced frame a
+  half turn off: I-f puts its amplitude on the frame's q axis, sign
+  included, and the seed assumed +q, so the current landed against the
+  magnet and the rotor pole-slipped (sim: 200 rad/s el swung to −89..414).
+  Test `flying_if_entry_with_negative_amps_holds_the_rotor`: −0.5 A now
+  mirrors +0.5 A (141..257 either way).
+- **Hall six-step bounds its current.** Its duty loop treated zero duty as
+  "no torque", but duty below the back-EMF is braking — the PWM off-time
+  and the low leg short the driven pair across it — and on a live reversal
+  the loop saturated at full duty with the back-EMF adding to it
+  (plugging). Now the reference is signed and slews through zero; turning
+  the commanded way the duty stays at or above (ψ·|ω| − i_lim·R_p)/V_bus,
+  which bounds the braking current, and turning against it at or below
+  (i_lim·R_p − ψ·|ω|)/V_bus, which bounds the plugging current (R_p = 2R in
+  120°, 1.5R in 180°); where no duty can, the stage coasts. A flying start into
+  hall six-step runs on from the rotor's speed at its feed-forward duty
+  instead of from a zero reference. Sim, `iq_limit` 0.8: entry at 300 rad/s
+  el slowest 201 and 1.27 A (was: reversed to −54 at 2.24 A); 120° reversal
+  ±250 reaches −228 at 1.27 A (was: stuck at 49, 3.30 A); 180° reaches
+  −217 at 1.48 A. Steady hall six-step on the sim motor already peaks at
+  1.08 A (120°) / 1.22 A (180°), so the 180° reversal margin to the boards'
+  1.5 A trip is thin — **check on the bench**. Tests
+  `hall_six_step_catches_a_turning_rotor`,
+  `hall_six_step_reverses_with_bounded_current`.
+- **The hall tracker kept an unwrapped `f32` angle** that only grew: past
+  about 2¹⁸ rad (≈15 min at 300 rad/s el) the per-tick step rounded away
+  and the prediction stopped (a reviewer's forced test: 60° error, 449 rad/s
+  read for 300). It now keeps a wrapped angle plus whole turns; `update`
+  still returns the unwrapped position for position mode, and the
+  feed-forward reads the wrapped `angle()`. Test
+  `tracker_keeps_its_precision_after_a_long_run` (on the old tracker: 116
+  rad/s and 0.66 rad apart from a fresh one).
+- **CI was red on `main` since `1bed082`**: `tools/fixq_m0_check.sh` was
+  committed without its executable bit. Mode fixed.
+
+**Still open from the review:** the twin's `sensorless_start_on_hfi_reaches_speed`
+fails on `main` as well (not touched here); sensorless six-step blanking,
+timeout and stale speed after lock loss; fixq overflow in the speed slew and
+the tracker PLL; the profiler not checking SetDrive replies; the host sim's
+missing input protection; `hfi_d_amp`/`hfi_stuck` carried across handovers;
+hall FOC ignoring a live `amps` change.
+
 ## 2026-10-09 — session 44: what the host link costs; link as build options
 
 Report section: [mmc Footprint Report](https://claude.ai/artifact/HZRe2D5rGvoNbRqypkjjgJ)
