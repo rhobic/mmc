@@ -132,8 +132,22 @@ pub trait MotorBoard {
     /// its back-EMF. `0` takes the whole stage off.
     fn set_phase_enables(&mut self, mask: u8);
 
-    /// The gate driver is reporting a fault (overcurrent, thermal, UVLO).
+    /// The gate driver has reported a fault (overcurrent, thermal, UVLO)
+    /// since the last [`MotorBoard::clear_driver_fault`].
+    ///
+    /// Latched, not a level: a driver's fault line can pulse for a few
+    /// microseconds per event (an L6230 overcurrent retry), far shorter than
+    /// a control tick, so a board reads it through a latch (the timer's
+    /// hardware break input) that also takes the PWM outputs to their safe
+    /// state the moment the line drops. The drive polls this once per tick.
     fn driver_fault(&mut self) -> bool;
+
+    /// Re-arm the fault latch and the PWM outputs it stopped. The drive
+    /// calls it only when starting from Off, never while running, so a
+    /// fault cannot be cleared under a live stage. If the driver still
+    /// holds its fault line, the latch sets again and the next
+    /// [`MotorBoard::driver_fault`] reads it. Default: no latch to clear.
+    fn clear_driver_fault(&mut self) {}
 
     /// Raw hall-sensor state, bit 0 = H1, 1 = H2, 2 = H3; `None` when the
     /// board has no hall inputs.
