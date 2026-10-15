@@ -3,6 +3,33 @@
 Newest first. Every session that changes the project appends here: what landed,
 what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
 
+## 2026-10-15 — session 48: hall speed after a glitch, the tracker at speed
+
+From a review pass over `mmc_core::hall`; each reproduced before fixing.
+
+- **`HallSpeed` after a skipped state**: a glitch that skips two states,
+  then the real edge one sample later, was timed as a sector in 100 µs:
+  ~10 470 rad/s el for four samples (from a true 5). A skip now clears the
+  direction too, so the next edge is not a measurement.
+  Test `a_skip_before_an_edge_is_not_a_speed`.
+- **`HallTracker` at speed**: its 10 ms interval floor (bounce guard) capped
+  every measurement at one sector per 10 ms, ~105 rad/s el. Steady 300
+  read 155 with the angle up to 30° off, 600 read 179 / 43°. The tracker
+  places the position-torque feed-forward (on to 500 rad/s el) and runs
+  hall position mode. Now, once the last two same-direction edges came
+  faster than 150 rad/s el, the floor drops to half that edge interval:
+  50-1200 rad/s el within 5 % and one sample of travel + 2° of angle. Below
+  150 it is unchanged, on purpose: the bench-tuned feed-forward at 100
+  rad/s el was tuned against it, and every variant that also changed
+  105-150 moved the low-speed hunting. 105-150 still reads up to ~16 % low
+  (10° at 145); fixing that needs a bench retune of the series. A skipped
+  state also forgets the last direction, so the next edge is not a
+  same-direction measurement. Tests `tracker_follows_speed_well_above_the_floor`,
+  `tracker_skip_before_an_edge_stays_bounded`.
+- **F302 fw 39, G474 fw 43, H743 fw 4.**
+- To check on the bench: hall FOC and the feed-forward at 200-500 rad/s el,
+  and hall position mode at speed.
+
 ## 2026-10-15 — session 47: driver faults through the timer's break input
 
 - **The gap:** the boards read the driver's fault line once per control
@@ -30,6 +57,7 @@ what was decided, what's next. The stable plan lives in [PLAN.md](PLAN.md).
   confirm on the bench that a stall trips `ST_FAULT_DRV` and that a normal
   start re-arms. (The H743 build-test board has no power stage; its
   `driver_fault` stays a constant.)
+
 ## 2026-10-14 — session 46: a bus over-voltage with the stage off is reported
 
 Found by the twin's DC-link review. **F302 fw 37, G474 fw 41, H743 fw 3**
