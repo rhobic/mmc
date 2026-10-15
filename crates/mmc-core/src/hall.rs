@@ -16,7 +16,7 @@
 //! edges and decays to zero once the rotor has been quiet longer than the
 //! last interval would allow, so a stalled rotor reads 0, not its last speed.
 
-use core::f32::consts::PI;
+use core::f32::consts::{PI, TAU};
 
 use crate::math::wrap_angle;
 
@@ -317,15 +317,21 @@ impl HallAngle {
 ///   leaves it, the rotor is slower than predicted — clamp to the boundary
 ///   and drop the outward velocity.
 ///
-/// The position is kept unwrapped (electrical radians since the first
-/// sample), for position control.
+/// The position is reported unwrapped (electrical radians since the first
+/// sample), for position control, but kept as a wrapped angle plus whole
+/// turns: an unwrapped `f32` that only grows loses the per-tick step to
+/// rounding within the hour (at 300 rad/s el and 20 kHz, `ω·dt` falls below
+/// half an ulp past 2¹⁸ rad — about 15 minutes), and the prediction stops.
 #[derive(Clone, Debug)]
 pub struct HallTracker {
     map: HallMap,
     /// Electrical acceleration per amp of i_q [rad/s² per A]:
     /// `1.5·p²·ψ / J`.
     accel_per_amp: f32,
+    /// Electrical angle, wrapped to [−π, π).
     theta: f32,
+    /// Whole electrical turns since the first sample.
+    turns: i32,
     omega: f32,
     /// Learned load acceleration [rad/s², electrical] (friction, cogging
     /// average, external load).
@@ -373,6 +379,7 @@ impl HallTracker {
             map,
             accel_per_amp,
             theta: 0.0,
+            turns: 0,
             omega: 0.0,
             load: 0.0,
             last_idx: None,
@@ -387,6 +394,30 @@ impl HallTracker {
         self.load
     }
 
+    /// The tracked electrical angle, wrapped to [−π, π): full precision
+    /// however long the rotor has run (the unwrapped position from
+    /// [`update`](Self::update) rounds to its magnitude).
+    pub fn angle(&self) -> f32 {
+        self.theta
+    }
+
+    /// Unwrapped position [rad el].
+    fn position(&self) -> f32 {
+        self.turns as f32 * TAU + self.theta
+    }
+
+    /// Fold the angle back into [−π, π), counting the turn. Every move of
+    /// `theta` is under a turn, so one step suffices.
+    fn rewrap(&mut self) {
+        if self.theta >= PI {
+            self.theta -= TAU;
+            self.turns += 1;
+        } else if self.theta < -PI {
+            self.theta += TAU;
+            self.turns -= 1;
+        }
+    }
+
     /// Feed the raw hall state and the q-axis current applied over the last
     /// period. Returns (unwrapped electrical position, electrical speed), or
     /// `None` on an invalid state (sensor fault).
@@ -396,8 +427,9 @@ impl HallTracker {
         let half = self.map.half_width(state);
         let Some(last) = self.last_idx else {
             self.theta = center;
+            self.rewrap();
             self.last_idx = Some(idx);
-            return Some((self.theta, 0.0));
+            return Some((self.position(), 0.0));
         };
         // Predict.
         self.theta += self.omega * dt;
@@ -440,7 +472,8 @@ impl HallTracker {
                     self.edge_speed = 0.0;
                     self.since_edge = 0.0;
                     self.last_idx = Some(idx);
-                    return Some((self.theta, self.omega));
+                    self.rewrap();
+                    return Some((self.position(), self.omega));
                 }
                 // The drift since the last edge says the speed was off by
                 // about e/t, and the acceleration by about e/t².
@@ -485,7 +518,8 @@ impl HallTracker {
                 self.load = (self.load - Self::LOAD_GAIN * excess / t).clamp(-lim_a, lim_a);
             }
         }
-        Some((self.theta, self.omega))
+        self.rewrap();
+        Some((self.position(), self.omega))
     }
 }
 
@@ -721,6 +755,48 @@ mod tests {
         }
         assert!(worst_w < 1.0, "speed error {worst_w} rad/s el");
         assert!(worst_th < 0.1, "angle error {worst_th} rad el");
+    }
+
+    #[test]
+    fn tracker_keeps_its_precision_after_a_long_run() {
+        // One tracker as if the rotor had already turned 50 000 times
+        // (3.1e5 rad el: ~17 minutes at 300 rad/s el), one fresh, fed the
+        // same halls. An unwrapped f32 angle that size rounds the per-tick
+        // step `ω·dt` (0.015 rad) away — it read a 60° angle error and
+        // 449 rad/s for 300 — so the two must not drift apart.
+        let map = HallMap {
+            offset: 0.0,
+            dir: 1.0,
+            hyst: 0.0,
+            widths: EVEN,
+        };
+        let (mut fresh, mut old) = (HallTracker::new(map, 1.0e5), HallTracker::new(map, 1.0e5));
+        let dt = 5e-5;
+        let omega = 300.0f32;
+        let mut theta = 0.0f32; // truth, kept wrapped
+        fresh.update(ideal(theta), 0.0, dt).unwrap();
+        old.update(ideal(theta), 0.0, dt).unwrap();
+        old.turns = 50_000;
+        let mut pos0 = None;
+        for k in 0..20_000 {
+            theta = wrap_angle(theta + omega * dt);
+            let (_, w_f) = fresh.update(ideal(theta), 0.0, dt).unwrap();
+            let (pos, w_o) = old.update(ideal(theta), 0.0, dt).unwrap();
+            assert!(
+                (w_o - w_f).abs() < 1e-3,
+                "tick {k}: speed {w_o} vs fresh {w_f}"
+            );
+            let d = wrap_angle(old.angle() - fresh.angle()).abs();
+            assert!(d < 1e-4, "tick {k}: angle off the fresh tracker by {d} rad");
+            if k == 10_000 {
+                pos0 = Some(pos);
+            }
+        }
+        // The unwrapped position still counts the distance run, to the
+        // rounding of its own size (3e5 rad: ~0.03 rad).
+        let ran = old.update(ideal(theta), 0.0, dt).unwrap().0 - pos0.unwrap();
+        let want = omega * dt * 10_000.0;
+        assert!((ran - want).abs() < 0.3, "ran {ran} rad, want {want}");
     }
 
     #[test]
