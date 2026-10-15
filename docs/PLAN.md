@@ -338,6 +338,28 @@ sync — normal for motor control in any language.
   flux from a coast, and the position torque around a turn measured and fed
   forward with on-board pole-pair identification (fw 19, nvparam v10).
   Next: better cancellation in reverse, or with the encoder.
+- **TODO: one documentation site, with plots from the bench data.**
+  *(added 2026-10-09)* The docs are spread over 13 Markdown files
+  (`README.md`, `overview.md`, `docs/*.md`, `hw/README.md`,
+  `testresults/…/*.md`), hand-built HTML with hand-coded charts
+  (`docs/overview.html`, `docs/sixstep-conduction.html` with Chart.js,
+  `testresults/index.html`, the feature report) and rustdoc, with no index,
+  search or cross-links, and the ~1 000 bench CSVs in `testresults/` only
+  reach the docs as numbers typed into tables. Consolidate into one
+  generated site whose figures are drawn from those CSVs at build time.
+  **Quarto** is the lead option: plain `.md` pages render as they are, pages
+  with figures become `.qmd` with Python cells (numpy, as `tools/` already
+  uses) that read the captures and draw interactive (Plotly) or static
+  (matplotlib) plots with numbered, cross-referenced figures; Mermaid and
+  Graphviz diagrams built in; search; PDF output; frozen outputs so CI does
+  not re-run every analysis. Alternatives weighed: Sphinx + MyST-NB
+  (executed notebooks, strongest API cross-referencing, most setup), MkDocs
+  Material (Mermaid built in, execution via plugins), mdBook (static images
+  only). Scope: one tree (design, per-subsystem notes such as HFI /
+  six-step / FIXQ / calibration / profiler, hardware, bench results, the
+  PROGRESS log), the hand-built HTML reports turned into pages, rustdoc
+  linked in, a CI job that builds it with warnings as errors (broken links
+  fail). Keep the private twin's material out of the public build.
 
 ## Verification strategy
 
